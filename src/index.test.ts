@@ -10,7 +10,7 @@ mock.module("agents", () => {
   return {};
 });
 
-const { callOdoo, pickSmartFields, searchRecords } = await import("./index");
+const { callOdoo, pickSmartFields, searchRecords, escapeHtml } = await import("./index");
 
 const originalFetch = globalThis.fetch;
 
@@ -447,6 +447,373 @@ describe("write tool callOdoo call shapes", () => {
     expect(error).toBeDefined();
     expect(error?.message).not.toContain("secret-write-key-99999");
     expect(error?.message).not.toContain("sensitive-value-xyz");
+    expect(error?.message).not.toContain("Bearer");
+  });
+});
+
+describe("post_message tool callOdoo call shape", () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  test("calls message_post with ids, body, message_type and optional subtype_xmlid", async () => {
+    const conn = { url: "http://example.com", db: "test-db", apiKey: "secret-key" };
+    let fetchCalls: { url: string; body: any }[] = [];
+    const fetchMock = mock(async (url: string, init: any) => {
+      fetchCalls.push({ url, body: JSON.parse(init.body) });
+      return new Response(JSON.stringify({ result: 99 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+    globalThis.fetch = fetchMock;
+
+    const res = await callOdoo(conn, "project.task", "message_post", {
+      ids: [7],
+      body: "hello",
+      message_type: "comment",
+      subtype_xmlid: "mail.mt_comment"
+    });
+
+    expect(fetchCalls.length).toBe(1);
+    expect(fetchCalls[0].url).toContain("/project.task/message_post");
+    expect(fetchCalls[0].body).toEqual({
+      ids: [7],
+      body: "hello",
+      message_type: "comment",
+      subtype_xmlid: "mail.mt_comment"
+    });
+    expect(res).toBe(99);
+  });
+
+  test("omits subtype_xmlid when subtype is not provided", async () => {
+    const conn = { url: "http://example.com", db: "test-db", apiKey: "secret-key" };
+    let fetchCalls: { url: string; body: any }[] = [];
+    const fetchMock = mock(async (url: string, init: any) => {
+      fetchCalls.push({ url, body: JSON.parse(init.body) });
+      return new Response(JSON.stringify({ result: 100 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+    globalThis.fetch = fetchMock;
+
+    await callOdoo(conn, "project.task", "message_post", {
+      ids: [7],
+      body: "hello",
+      message_type: "comment"
+    });
+
+    expect(fetchCalls[0].body).toEqual({ ids: [7], body: "hello", message_type: "comment" });
+    expect(fetchCalls[0].body.subtype_xmlid).toBeUndefined();
+  });
+
+  test("escapeHtml escapes &, <, >, \", ' so plain text can't be interpreted as HTML", () => {
+    expect(escapeHtml(`<b>hi</b> & "quotes" 'apos'`)).toBe(
+      "&lt;b&gt;hi&lt;/b&gt; &amp; &quot;quotes&quot; &#39;apos&#39;"
+    );
+  });
+
+  test("body_is_html: false (default) sends an HTML-escaped body to message_post", async () => {
+    const conn = { url: "http://example.com", db: "test-db", apiKey: "secret-key" };
+    let fetchCalls: { url: string; body: any }[] = [];
+    const fetchMock = mock(async (url: string, init: any) => {
+      fetchCalls.push({ url, body: JSON.parse(init.body) });
+      return new Response(JSON.stringify({ result: 101 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+    globalThis.fetch = fetchMock;
+
+    const rawBody = `<script>alert('x')</script> & co.`;
+    const body_is_html = false;
+
+    await callOdoo(conn, "project.task", "message_post", {
+      ids: [7],
+      body: body_is_html ? rawBody : escapeHtml(rawBody),
+      message_type: "comment"
+    });
+
+    expect(fetchCalls[0].body.body).toBe("&lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt; &amp; co.");
+  });
+
+  test("body_is_html: true sends the raw body unescaped to message_post", async () => {
+    const conn = { url: "http://example.com", db: "test-db", apiKey: "secret-key" };
+    let fetchCalls: { url: string; body: any }[] = [];
+    const fetchMock = mock(async (url: string, init: any) => {
+      fetchCalls.push({ url, body: JSON.parse(init.body) });
+      return new Response(JSON.stringify({ result: 102 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+    globalThis.fetch = fetchMock;
+
+    const rawBody = "<p>already <b>HTML</b></p>";
+    const body_is_html = true;
+
+    await callOdoo(conn, "project.task", "message_post", {
+      ids: [7],
+      body: body_is_html ? rawBody : escapeHtml(rawBody),
+      message_type: "comment"
+    });
+
+    expect(fetchCalls[0].body.body).toBe("<p>already <b>HTML</b></p>");
+  });
+
+  test("retries on 503 and eventually succeeds (proves callOdoo retry reuse)", async () => {
+    const conn = { url: "http://example.com", db: "test-db", apiKey: "secret-key" };
+    let callCount = 0;
+    const fetchMock = mock(() => {
+      callCount++;
+      if (callCount < 2) {
+        return Promise.resolve(new Response("Service Unavailable", { status: 503 }));
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify({ result: true }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        })
+      );
+    });
+    globalThis.fetch = fetchMock;
+
+    const res = await callOdoo(conn, "project.task", "message_post", { ids: [7], body: "hi", message_type: "comment" });
+
+    expect(res).toBe(true);
+    expect(fetchMock.mock.calls.length).toBe(2);
+  });
+
+  test("times out after 15s default via callOdoo (no new timeout logic)", async () => {
+    const conn = { url: "http://example.com", db: "test-db", apiKey: "secret-post-key-abc" };
+    const fetchMock = mock((url: any, init: any) => {
+      const signal = init?.signal;
+      return new Promise((resolve, reject) => {
+        signal?.addEventListener("abort", () => {
+          reject(new DOMException("The operation was aborted.", "AbortError"));
+        });
+      });
+    });
+    globalThis.fetch = fetchMock;
+
+    let error: Error | undefined;
+    try {
+      await callOdoo(conn, "project.task", "message_post", { ids: [7], body: "hi", message_type: "comment" }, 10);
+    } catch (err) {
+      error = err as Error;
+    }
+
+    expect(error?.message).toContain("timed out");
+    expect(error?.message).not.toContain("secret-post-key-abc");
+  });
+
+  test("does not leak API key or body content on error response", async () => {
+    const conn = { url: "http://example.com", db: "test-db", apiKey: "secret-post-key-xyz" };
+    const fetchMock = mock(() =>
+      Promise.resolve(new Response(JSON.stringify({ error: { message: "Access Denied" } }), { status: 403 }))
+    );
+    globalThis.fetch = fetchMock;
+
+    let error: Error | undefined;
+    try {
+      await callOdoo(conn, "project.task", "message_post", {
+        ids: [7],
+        body: "super-sensitive-note",
+        message_type: "comment"
+      });
+    } catch (err) {
+      error = err as Error;
+    }
+
+    expect(error).toBeDefined();
+    expect(error?.message).not.toContain("secret-post-key-xyz");
+    expect(error?.message).not.toContain("Bearer");
+  });
+});
+
+describe("aggregate_records tool callOdoo call shape", () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  test("calls read_group with domain, fields (from aggregates), groupby, lazy, orderby", async () => {
+    const conn = { url: "http://example.com", db: "test-db", apiKey: "secret-key" };
+    let fetchCalls: { url: string; body: any }[] = [];
+    const fetchMock = mock(async (url: string, init: any) => {
+      fetchCalls.push({ url, body: JSON.parse(init.body) });
+      return new Response(JSON.stringify({ result: [{ stage_id: 1, stage_id_count: 3 }] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+    globalThis.fetch = fetchMock;
+
+    const res = await callOdoo(conn, "project.task", "read_group", {
+      domain: [["active", "=", true]],
+      fields: ["stage_id"],
+      groupby: ["stage_id"],
+      lazy: true,
+      orderby: "stage_id"
+    });
+
+    expect(fetchCalls.length).toBe(1);
+    expect(fetchCalls[0].url).toContain("/project.task/read_group");
+    expect(fetchCalls[0].body).toEqual({
+      domain: [["active", "=", true]],
+      fields: ["stage_id"],
+      groupby: ["stage_id"],
+      lazy: true,
+      orderby: "stage_id"
+    });
+    expect(res).toEqual([{ stage_id: 1, stage_id_count: 3 }]);
+  });
+
+  test("omits orderby when not provided", async () => {
+    const conn = { url: "http://example.com", db: "test-db", apiKey: "secret-key" };
+    let fetchCalls: { url: string; body: any }[] = [];
+    const fetchMock = mock(async (url: string, init: any) => {
+      fetchCalls.push({ url, body: JSON.parse(init.body) });
+      return new Response(JSON.stringify({ result: [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+    globalThis.fetch = fetchMock;
+
+    await callOdoo(conn, "project.task", "read_group", {
+      domain: [],
+      fields: ["stage_id"],
+      groupby: ["stage_id"],
+      lazy: false
+    });
+
+    expect(fetchCalls[0].body).toEqual({ domain: [], fields: ["stage_id"], groupby: ["stage_id"], lazy: false });
+    expect(fetchCalls[0].body.orderby).toBeUndefined();
+  });
+
+  test("retries on 429 and eventually succeeds (proves callOdoo retry reuse)", async () => {
+    const conn = { url: "http://example.com", db: "test-db", apiKey: "secret-key" };
+    let callCount = 0;
+    const fetchMock = mock(() => {
+      callCount++;
+      if (callCount < 2) {
+        return Promise.resolve(new Response("Too Many Requests", { status: 429 }));
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify({ result: [] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        })
+      );
+    });
+    globalThis.fetch = fetchMock;
+
+    const res = await callOdoo(conn, "project.task", "read_group", {
+      domain: [],
+      fields: ["stage_id"],
+      groupby: ["stage_id"],
+      lazy: true
+    });
+
+    expect(res).toEqual([]);
+    expect(fetchMock.mock.calls.length).toBe(2);
+  });
+
+  test("does not leak API key on error response", async () => {
+    const conn = { url: "http://example.com", db: "test-db", apiKey: "secret-agg-key-777" };
+    const fetchMock = mock(() =>
+      Promise.resolve(new Response(JSON.stringify({ error: { message: "Bad domain" } }), { status: 400 }))
+    );
+    globalThis.fetch = fetchMock;
+
+    let error: Error | undefined;
+    try {
+      await callOdoo(conn, "project.task", "read_group", {
+        domain: [],
+        fields: ["stage_id"],
+        groupby: ["stage_id"],
+        lazy: true
+      });
+    } catch (err) {
+      error = err as Error;
+    }
+
+    expect(error).toBeDefined();
+    expect(error?.message).not.toContain("secret-agg-key-777");
+    expect(error?.message).not.toContain("Bearer");
+  });
+});
+
+describe("call_model_method tool callOdoo call shape", () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  test("passes model, method, args and kwargs through unchanged as { args, ...kwargs }", async () => {
+    const conn = { url: "http://example.com", db: "test-db", apiKey: "secret-key" };
+    let fetchCalls: { url: string; body: any }[] = [];
+    const fetchMock = mock(async (url: string, init: any) => {
+      fetchCalls.push({ url, body: JSON.parse(init.body) });
+      return new Response(JSON.stringify({ result: "ok" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+    globalThis.fetch = fetchMock;
+
+    const args = [1, "two"];
+    const kwargs = { context: { lang: "en_US" }, limit: 5 };
+    const res = await callOdoo(conn, "res.partner", "some_custom_method", { args, ...kwargs });
+
+    expect(fetchCalls.length).toBe(1);
+    expect(fetchCalls[0].url).toContain("/res.partner/some_custom_method");
+    expect(fetchCalls[0].body).toEqual({ args: [1, "two"], context: { lang: "en_US" }, limit: 5 });
+    expect(res).toBe("ok");
+  });
+
+  test("retries on 502 and eventually succeeds (proves callOdoo retry reuse)", async () => {
+    const conn = { url: "http://example.com", db: "test-db", apiKey: "secret-key" };
+    let callCount = 0;
+    const fetchMock = mock(() => {
+      callCount++;
+      if (callCount < 2) {
+        return Promise.resolve(new Response("Bad Gateway", { status: 502 }));
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify({ result: "recovered" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        })
+      );
+    });
+    globalThis.fetch = fetchMock;
+
+    const res = await callOdoo(conn, "res.partner", "some_custom_method", { args: [], ...{} });
+
+    expect(res).toBe("recovered");
+    expect(fetchMock.mock.calls.length).toBe(2);
+  });
+
+  test("does not leak API key or args/kwargs content on error response", async () => {
+    const conn = { url: "http://example.com", db: "test-db", apiKey: "secret-generic-key-555" };
+    const fetchMock = mock(() =>
+      Promise.resolve(new Response(JSON.stringify({ error: { message: "Method not allowed" } }), { status: 400 }))
+    );
+    globalThis.fetch = fetchMock;
+
+    let error: Error | undefined;
+    try {
+      await callOdoo(conn, "res.partner", "dangerous_method", {
+        args: ["sensitive-arg-value"],
+        secret_field: "sensitive-kwarg-value"
+      });
+    } catch (err) {
+      error = err as Error;
+    }
+
+    expect(error).toBeDefined();
+    expect(error?.message).not.toContain("secret-generic-key-555");
     expect(error?.message).not.toContain("Bearer");
   });
 });

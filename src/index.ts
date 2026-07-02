@@ -157,6 +157,16 @@ function mcpError(text: string) {
   return { content: [{ type: "text" as const, text }], isError: true as const };
 }
 
+/** Exported for unit testing (see callOdoo export pattern). */
+export function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 export async function searchRecords(
   conn: OdooConnection,
   model: string,
@@ -253,6 +263,36 @@ export class McpAgent extends McpAgentBase<Env, unknown, Props> {
     );
 
     this.server.registerTool(
+      "aggregate_records",
+      {
+        description: "Read-only: model-agnostic Odoo read_group (grouped aggregation).",
+        inputSchema: {
+          model: z.string(),
+          domain: z.array(z.any()).default([]),
+          groupby: z.array(z.string()).min(1),
+          aggregates: z.array(z.string()).min(1),
+          lazy: z.boolean().default(true),
+          orderby: z.string().optional()
+        }
+      },
+      async ({ model, domain, groupby, aggregates, lazy, orderby }) => {
+        if (!model || !model.trim()) return mcpError("model must be a non-empty string");
+        try {
+          const rows = await callOdoo(requireConnection(this.props), model, "read_group", {
+            domain,
+            fields: aggregates,
+            groupby,
+            lazy,
+            ...(orderby ? { orderby } : {})
+          });
+          return { content: [{ type: "text" as const, text: JSON.stringify(rows, null, 2) }] };
+        } catch (err) {
+          return mcpError(err instanceof Error ? err.message : "aggregate_records failed");
+        }
+      }
+    );
+
+    this.server.registerTool(
       "get_record",
       {
         description: "Read-only: fetch a single Odoo record by id.",
@@ -326,6 +366,33 @@ export class McpAgent extends McpAgentBase<Env, unknown, Props> {
     );
 
     this.server.registerTool(
+      "post_message",
+      {
+        description: "Write: post a message (chatter log/comment) to a single Odoo record.",
+        inputSchema: {
+          model: z.string(),
+          record_id: z.number().int(),
+          body: z.string(),
+          subtype: z.string().optional(),
+          body_is_html: z.boolean().default(false)
+        }
+      },
+      async ({ model, record_id, body, subtype, body_is_html }) => {
+        try {
+          const result = await callOdoo(requireConnection(this.props), model, "message_post", {
+            ids: [record_id],
+            body: body_is_html ? body : escapeHtml(body),
+            message_type: "comment",
+            ...(subtype ? { subtype_xmlid: subtype } : {})
+          });
+          return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+        } catch (err) {
+          return mcpError(err instanceof Error ? err.message : "post_message failed");
+        }
+      }
+    );
+
+    this.server.registerTool(
       "update_record",
       {
         description:
@@ -364,6 +431,27 @@ export class McpAgent extends McpAgentBase<Env, unknown, Props> {
           return { content: [{ type: "text" as const, text: JSON.stringify(true, null, 2) }] };
         } catch (err) {
           return mcpError(err instanceof Error ? err.message : "delete_record failed");
+        }
+      }
+    );
+
+    this.server.registerTool(
+      "call_model_method",
+      {
+        description: "Escape hatch: call an arbitrary Odoo model method with raw positional args and keyword args.",
+        inputSchema: {
+          model: z.string(),
+          method: z.string(),
+          args: z.array(z.any()).default([]),
+          kwargs: z.record(z.string(), z.any()).default({})
+        }
+      },
+      async ({ model, method, args, kwargs }) => {
+        try {
+          const result = await callOdoo(requireConnection(this.props), model, method, { args, ...kwargs });
+          return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+        } catch (err) {
+          return mcpError(err instanceof Error ? err.message : "call_model_method failed");
         }
       }
     );
