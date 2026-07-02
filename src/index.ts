@@ -86,6 +86,7 @@ async function callOdoo(
 
 const DEFAULT_TASK_FIELDS = ["id", "name", "stage_id", "project_id"];
 const DEFAULT_GENERIC_FIELDS = ["id", "display_name"];
+const CORE_MODEL_ALLOWLIST = ["project.task", "project.project", "res.partner", "res.users"];
 
 function requireConnection(props: Props | undefined): OdooConnection {
   if (!props) throw new Error("Missing Odoo connection props");
@@ -130,6 +131,24 @@ export class McpAgent extends McpAgentBase<Env, unknown, Props> {
           return { content: [{ type: "text" as const, text: JSON.stringify(tasks, null, 2) }] };
         } catch (err) {
           return mcpError(err instanceof Error ? err.message : "projects.list_tasks failed");
+        }
+      }
+    );
+
+    this.server.registerTool(
+      "list_models",
+      {
+        description: "Read-only: list enabled/installed Odoo models (name and technical model name).",
+        inputSchema: {}
+      },
+      async () => {
+        const conn = requireConnection(this.props);
+        try {
+          const rows = await searchRecords(conn, "ir.model", [], ["model", "name"], 100);
+          return { content: [{ type: "text" as const, text: JSON.stringify(rows, null, 2) }] };
+        } catch {
+          const fallback = CORE_MODEL_ALLOWLIST.map((model) => ({ model }));
+          return { content: [{ type: "text" as const, text: JSON.stringify(fallback, null, 2) }] };
         }
       }
     );
@@ -184,6 +203,27 @@ export class McpAgent extends McpAgentBase<Env, unknown, Props> {
           return { content: [{ type: "text" as const, text: JSON.stringify(rows[0], null, 2) }] };
         } catch (err) {
           return mcpError(err instanceof Error ? err.message : "get_record failed");
+        }
+      }
+    );
+
+    this.server.registerTool(
+      "get_fields",
+      {
+        description: "Read-only: get field schema (name, type, string label) for an Odoo model.",
+        inputSchema: {
+          model: z.string()
+        }
+      },
+      async ({ model }) => {
+        if (!model || !model.trim()) return mcpError("model must be a non-empty string");
+        try {
+          const fields = await callOdoo(requireConnection(this.props), model, "fields_get", {
+            attributes: ["type", "string"]
+          });
+          return { content: [{ type: "text" as const, text: JSON.stringify(fields, null, 2) }] };
+        } catch (err) {
+          return mcpError(err instanceof Error ? err.message : "get_fields failed");
         }
       }
     );
