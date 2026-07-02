@@ -303,6 +303,70 @@ export class McpAgent extends McpAgentBase<Env, unknown, Props> {
         }
       }
     );
+
+    this.server.registerTool(
+      "create_record",
+      {
+        description: "Write: create a single Odoo record of the given model.",
+        inputSchema: {
+          model: z.string().min(1),
+          values: z.record(z.string(), z.any())
+        }
+      },
+      async ({ model, values }) => {
+        try {
+          const ids = (await callOdoo(requireConnection(this.props), model, "create", {
+            vals_list: [values]
+          })) as number[];
+          return { content: [{ type: "text" as const, text: JSON.stringify(ids[0], null, 2) }] };
+        } catch (err) {
+          return mcpError(err instanceof Error ? err.message : "create_record failed");
+        }
+      }
+    );
+
+    this.server.registerTool(
+      "update_record",
+      {
+        description:
+          "Write: update fields on a single Odoo record by id. x2many fields need Odoo command tuples (e.g. [[6,0,ids]], [[4,id]], [[3,id]]).",
+        inputSchema: {
+          model: z.string().min(1),
+          record_id: z.number().int().positive(),
+          values: z.record(z.string(), z.any())
+        }
+      },
+      async ({ model, record_id, values }) => {
+        try {
+          await callOdoo(requireConnection(this.props), model, "write", {
+            ids: [record_id],
+            vals: values
+          });
+          return { content: [{ type: "text" as const, text: JSON.stringify(true, null, 2) }] };
+        } catch (err) {
+          return mcpError(err instanceof Error ? err.message : "update_record failed");
+        }
+      }
+    );
+
+    this.server.registerTool(
+      "delete_record",
+      {
+        description: "Write: delete a single Odoo record by id.",
+        inputSchema: {
+          model: z.string().min(1),
+          record_id: z.number().int().positive()
+        }
+      },
+      async ({ model, record_id }) => {
+        try {
+          await callOdoo(requireConnection(this.props), model, "unlink", { ids: [record_id] });
+          return { content: [{ type: "text" as const, text: JSON.stringify(true, null, 2) }] };
+        } catch (err) {
+          return mcpError(err instanceof Error ? err.message : "delete_record failed");
+        }
+      }
+    );
   }
 }
 

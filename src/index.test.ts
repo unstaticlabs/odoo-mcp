@@ -365,6 +365,92 @@ describe("searchRecords", () => {
   });
 });
 
+describe("write tool callOdoo call shapes", () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  test("create_record calls create with vals_list wrapping the values", async () => {
+    const conn = { url: "http://example.com", db: "test-db", apiKey: "secret-key" };
+    let fetchCalls: { url: string; body: any }[] = [];
+    const fetchMock = mock(async (url: string, init: any) => {
+      fetchCalls.push({ url, body: JSON.parse(init.body) });
+      return new Response(JSON.stringify({ result: [42] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+    globalThis.fetch = fetchMock;
+
+    const values = { name: "New Task" };
+    const res = await callOdoo(conn, "project.task", "create", { vals_list: [values] });
+
+    expect(fetchCalls.length).toBe(1);
+    expect(fetchCalls[0].url).toContain("/project.task/create");
+    expect(fetchCalls[0].body).toEqual({ vals_list: [values] });
+    expect(res).toEqual([42]);
+  });
+
+  test("update_record calls write with ids and vals", async () => {
+    const conn = { url: "http://example.com", db: "test-db", apiKey: "secret-key" };
+    let fetchCalls: { url: string; body: any }[] = [];
+    const fetchMock = mock(async (url: string, init: any) => {
+      fetchCalls.push({ url, body: JSON.parse(init.body) });
+      return new Response(JSON.stringify({ result: true }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+    globalThis.fetch = fetchMock;
+
+    const values = { name: "Renamed" };
+    await callOdoo(conn, "project.task", "write", { ids: [7], vals: values });
+
+    expect(fetchCalls.length).toBe(1);
+    expect(fetchCalls[0].url).toContain("/project.task/write");
+    expect(fetchCalls[0].body).toEqual({ ids: [7], vals: values });
+  });
+
+  test("delete_record calls unlink with ids", async () => {
+    const conn = { url: "http://example.com", db: "test-db", apiKey: "secret-key" };
+    let fetchCalls: { url: string; body: any }[] = [];
+    const fetchMock = mock(async (url: string, init: any) => {
+      fetchCalls.push({ url, body: JSON.parse(init.body) });
+      return new Response(JSON.stringify({ result: true }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+    globalThis.fetch = fetchMock;
+
+    await callOdoo(conn, "project.task", "unlink", { ids: [7] });
+
+    expect(fetchCalls.length).toBe(1);
+    expect(fetchCalls[0].url).toContain("/project.task/unlink");
+    expect(fetchCalls[0].body).toEqual({ ids: [7] });
+  });
+
+  test("does not leak values or API key on write error", async () => {
+    const conn = { url: "http://example.com", db: "test-db", apiKey: "secret-write-key-99999" };
+    const fetchMock = mock(() =>
+      Promise.resolve(new Response(JSON.stringify({ error: { message: "Access Denied" } }), { status: 403 }))
+    );
+    globalThis.fetch = fetchMock;
+
+    let error: Error | undefined;
+    try {
+      await callOdoo(conn, "project.task", "write", { ids: [7], vals: { secret_field: "sensitive-value-xyz" } });
+    } catch (err) {
+      error = err as Error;
+    }
+
+    expect(error).toBeDefined();
+    expect(error?.message).not.toContain("secret-write-key-99999");
+    expect(error?.message).not.toContain("sensitive-value-xyz");
+    expect(error?.message).not.toContain("Bearer");
+  });
+});
+
 describe("search_records limit zod schema", () => {
   const schema = z.object({
     model: z.string(),
