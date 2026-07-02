@@ -16,6 +16,13 @@
       "gate": true
     },
     {
+      "name": "test",
+      "cmd": "bun test",
+      "cwd": ".",
+      "timeout": 300,
+      "gate": true
+    },
+    {
       "name": "deploy-dry-run",
       "cmd": "npx wrangler deploy --dry-run",
       "cwd": ".",

@@ -3,16 +3,44 @@ import { z } from "zod";
 
 mock.module("agents/mcp", () => {
   return {
-    McpAgent: class McpAgentBase {}
+    McpAgent: class McpAgentBase {
+      static serve(_path: string, _opts: unknown) {
+        return {
+          fetch: mock((_req: Request, _env: unknown, ctx: any) =>
+            Promise.resolve(new Response(JSON.stringify({ props: ctx.props }), { status: 200 }))
+          )
+        };
+      }
+    }
   };
 });
 mock.module("agents", () => {
   return {};
 });
 
-const { callOdoo, pickSmartFields, searchRecords, escapeHtml, countRecords, McpAgent } = await import("./index");
+const {
+  callOdoo,
+  pickSmartFields,
+  searchRecords,
+  escapeHtml,
+  countRecords,
+  McpAgent,
+  default: handler
+} = await import("./index");
 
 const originalFetch = globalThis.fetch;
+
+async function buildWriteToolAgent() {
+  const AgentCtor = McpAgent as any;
+  const agent = new AgentCtor();
+  agent.props = { odooBaseUrl: "http://example.com", odooDb: "test-db", odooApiKey: "secret-key" };
+  await agent.init();
+  return agent;
+}
+
+function getToolHandler(agent: any, name: string) {
+  return agent.server._registeredTools[name].handler;
+}
 
 describe("callOdoo", () => {
   afterEach(() => {
@@ -202,6 +230,94 @@ describe("callOdoo", () => {
   });
 });
 
+describe("default fetch handler", () => {
+  const validHeaders = {
+    Authorization: "Bearer my-secret-token-abc123",
+    "X-Odoo-Url": "http://odoo.example.com",
+    "X-Odoo-Db": "my-db"
+  };
+
+  function makeRequest(headers: Record<string, string>, path = "/mcp") {
+    return new Request(`http://worker.example.com${path}`, { headers });
+  }
+
+  test("returns 404 for non-/mcp paths", async () => {
+    const res = await handler.fetch(makeRequest(validHeaders, "/other"), {} as any, {} as any);
+    expect(res.status).toBe(404);
+    expect(await res.text()).toBe("Not found");
+  });
+
+  test("returns 401 when Authorization header is missing", async () => {
+    const { Authorization, ...rest } = validHeaders;
+    const res = await handler.fetch(makeRequest(rest), {} as any, {} as any);
+    const text = await res.text();
+
+    expect(res.status).toBe(401);
+    expect(res.headers.get("Content-Type")).toBe("application/json");
+    const json = JSON.parse(text);
+    expect(json.error).toBeDefined();
+    expect(text).not.toContain(validHeaders["X-Odoo-Url"]);
+    expect(text).not.toContain(validHeaders["X-Odoo-Db"]);
+  });
+
+  test("returns 401 when Authorization header is not Bearer-prefixed", async () => {
+    const res = await handler.fetch(
+      makeRequest({ ...validHeaders, Authorization: "Basic abc123" }),
+      {} as any,
+      {} as any
+    );
+    const text = await res.text();
+
+    expect(res.status).toBe(401);
+    expect(text).not.toContain("abc123");
+    expect(text).not.toContain(validHeaders["X-Odoo-Url"]);
+    expect(text).not.toContain(validHeaders["X-Odoo-Db"]);
+  });
+
+  test("returns 401 when Bearer token is empty after trimming", async () => {
+    const res = await handler.fetch(
+      makeRequest({ ...validHeaders, Authorization: "Bearer    " }),
+      {} as any,
+      {} as any
+    );
+    const text = await res.text();
+
+    expect(res.status).toBe(401);
+    expect(text).not.toContain(validHeaders["X-Odoo-Url"]);
+    expect(text).not.toContain(validHeaders["X-Odoo-Db"]);
+  });
+
+  test("returns 401 when X-Odoo-Url header is missing", async () => {
+    const { "X-Odoo-Url": _omit, ...rest } = validHeaders;
+    const res = await handler.fetch(makeRequest(rest), {} as any, {} as any);
+    const text = await res.text();
+
+    expect(res.status).toBe(401);
+    expect(text).not.toContain(validHeaders.Authorization);
+    expect(text).not.toContain(validHeaders["X-Odoo-Db"]);
+  });
+
+  test("returns 401 when X-Odoo-Db header is missing", async () => {
+    const { "X-Odoo-Db": _omit, ...rest } = validHeaders;
+    const res = await handler.fetch(makeRequest(rest), {} as any, {} as any);
+    const text = await res.text();
+
+    expect(res.status).toBe(401);
+    expect(text).not.toContain(validHeaders.Authorization);
+    expect(text).not.toContain(validHeaders["X-Odoo-Url"]);
+  });
+
+  test("valid headers reach McpAgent.serve(...).fetch with correctly threaded props", async () => {
+    const res = await handler.fetch(makeRequest(validHeaders), {} as any, {} as any);
+    expect(res.status).toBe(200);
+
+    const json = (await res.json()) as any;
+    expect(json.props.odooBaseUrl).toBe(validHeaders["X-Odoo-Url"]);
+    expect(json.props.odooDb).toBe(validHeaders["X-Odoo-Db"]);
+    expect(json.props.odooApiKey).toBe("my-secret-token-abc123");
+  });
+});
+
 describe("pickSmartFields", () => {
   test("excludes technical/expensive/non-stored fields, prioritizes specific fields, and limits to 15", () => {
     const fieldsMeta = {
@@ -362,6 +478,46 @@ describe("searchRecords", () => {
     expect(fetchCalls[0].url).toContain("/fields_get");
     expect(fetchCalls[1].url).toContain("/search_read");
     expect(fetchCalls[1].body.fields).toEqual(["id", "display_name"]);
+  });
+
+  test("clamps an out-of-range limit down to 100", async () => {
+    const conn = { url: "http://example.com", db: "test-db", apiKey: "secret-key" };
+    let fetchCalls: { url: string; body: any }[] = [];
+    const fetchMock = mock(async (url: string, init: any) => {
+      const body = JSON.parse(init.body);
+      fetchCalls.push({ url, body });
+      return new Response(JSON.stringify({ result: [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+    globalThis.fetch = fetchMock;
+
+    await searchRecords(conn, "test.model", [], ["id", "name"], 500);
+
+    expect(fetchCalls.length).toBe(1);
+    expect(fetchCalls[0].url).toContain("/search_read");
+    expect(fetchCalls[0].body.limit).toBe(100);
+  });
+
+  test("leaves an in-range limit unchanged", async () => {
+    const conn = { url: "http://example.com", db: "test-db", apiKey: "secret-key" };
+    let fetchCalls: { url: string; body: any }[] = [];
+    const fetchMock = mock(async (url: string, init: any) => {
+      const body = JSON.parse(init.body);
+      fetchCalls.push({ url, body });
+      return new Response(JSON.stringify({ result: [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+    globalThis.fetch = fetchMock;
+
+    await searchRecords(conn, "test.model", [], ["id", "name"], 1);
+
+    expect(fetchCalls.length).toBe(1);
+    expect(fetchCalls[0].url).toContain("/search_read");
+    expect(fetchCalls[0].body.limit).toBe(1);
   });
 });
 
@@ -630,6 +786,58 @@ describe("post_message tool callOdoo call shape", () => {
     expect(error?.message).not.toContain("secret-post-key-xyz");
     expect(error?.message).not.toContain("Bearer");
   });
+
+  test("rejects empty-string model without calling fetch", async () => {
+    const agent = await buildWriteToolAgent();
+    const fetchMock = mock(() => Promise.reject(new Error("should not be called")));
+    globalThis.fetch = fetchMock;
+
+    const handler = getToolHandler(agent, "post_message");
+    const result = await handler({ model: "", record_id: 7, body: "hi", body_is_html: false });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("model must be a non-empty string");
+    expect(fetchMock.mock.calls.length).toBe(0);
+  });
+
+  test("rejects whitespace-only model without calling fetch", async () => {
+    const agent = await buildWriteToolAgent();
+    const fetchMock = mock(() => Promise.reject(new Error("should not be called")));
+    globalThis.fetch = fetchMock;
+
+    const handler = getToolHandler(agent, "post_message");
+    const result = await handler({ model: "   ", record_id: 7, body: "hi", body_is_html: false });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("model must be a non-empty string");
+    expect(fetchMock.mock.calls.length).toBe(0);
+  });
+
+  test("rejects record_id: 0 without calling fetch", async () => {
+    const agent = await buildWriteToolAgent();
+    const fetchMock = mock(() => Promise.reject(new Error("should not be called")));
+    globalThis.fetch = fetchMock;
+
+    const handler = getToolHandler(agent, "post_message");
+    const result = await handler({ model: "project.task", record_id: 0, body: "hi", body_is_html: false });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("record_id must be a positive integer");
+    expect(fetchMock.mock.calls.length).toBe(0);
+  });
+
+  test("rejects record_id: -1 without calling fetch", async () => {
+    const agent = await buildWriteToolAgent();
+    const fetchMock = mock(() => Promise.reject(new Error("should not be called")));
+    globalThis.fetch = fetchMock;
+
+    const handler = getToolHandler(agent, "post_message");
+    const result = await handler({ model: "project.task", record_id: -1, body: "hi", body_is_html: false });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("record_id must be a positive integer");
+    expect(fetchMock.mock.calls.length).toBe(0);
+  });
 });
 
 describe("aggregate_records tool callOdoo call shape", () => {
@@ -834,6 +1042,58 @@ describe("call_model_method tool callOdoo call shape", () => {
     expect(error).toBeDefined();
     expect(error?.message).not.toContain("secret-generic-key-555");
     expect(error?.message).not.toContain("Bearer");
+  });
+
+  test("rejects empty-string model without calling fetch", async () => {
+    const agent = await buildWriteToolAgent();
+    const fetchMock = mock(() => Promise.reject(new Error("should not be called")));
+    globalThis.fetch = fetchMock;
+
+    const handler = getToolHandler(agent, "call_model_method");
+    const result = await handler({ model: "", method: "some_method", args: [], kwargs: {} });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("model must be a non-empty string");
+    expect(fetchMock.mock.calls.length).toBe(0);
+  });
+
+  test("rejects whitespace-only model without calling fetch", async () => {
+    const agent = await buildWriteToolAgent();
+    const fetchMock = mock(() => Promise.reject(new Error("should not be called")));
+    globalThis.fetch = fetchMock;
+
+    const handler = getToolHandler(agent, "call_model_method");
+    const result = await handler({ model: "   ", method: "some_method", args: [], kwargs: {} });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("model must be a non-empty string");
+    expect(fetchMock.mock.calls.length).toBe(0);
+  });
+
+  test("rejects empty-string method without calling fetch", async () => {
+    const agent = await buildWriteToolAgent();
+    const fetchMock = mock(() => Promise.reject(new Error("should not be called")));
+    globalThis.fetch = fetchMock;
+
+    const handler = getToolHandler(agent, "call_model_method");
+    const result = await handler({ model: "res.partner", method: "", args: [], kwargs: {} });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("method must be a non-empty string");
+    expect(fetchMock.mock.calls.length).toBe(0);
+  });
+
+  test("rejects whitespace-only method without calling fetch", async () => {
+    const agent = await buildWriteToolAgent();
+    const fetchMock = mock(() => Promise.reject(new Error("should not be called")));
+    globalThis.fetch = fetchMock;
+
+    const handler = getToolHandler(agent, "call_model_method");
+    const result = await handler({ model: "res.partner", method: "   ", args: [], kwargs: {} });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("method must be a non-empty string");
+    expect(fetchMock.mock.calls.length).toBe(0);
   });
 });
 
