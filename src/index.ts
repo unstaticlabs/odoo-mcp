@@ -119,6 +119,33 @@ export async function callOdoo(
 
 const DEFAULT_TASK_FIELDS = ["id", "name", "stage_id", "project_id"];
 const DEFAULT_GENERIC_FIELDS = ["id", "display_name"];
+
+interface OdooFieldMeta {
+  type: string;
+  store?: boolean;
+}
+
+const TECHNICAL_FIELD_NAMES = new Set(["create_uid", "create_date", "write_uid", "write_date", "__last_update"]);
+const EXPENSIVE_FIELD_TYPES = new Set(["binary", "one2many", "many2many"]);
+const PRIORITY_FIELD_NAMES = ["id", "name", "display_name", "state", "active"];
+const SMART_FIELD_LIMIT = 15;
+const ALL_FIELDS_SENTINEL = "__all__";
+
+/** Exported for unit testing (see callOdoo export pattern). */
+export function pickSmartFields(fieldsMeta: Record<string, OdooFieldMeta>): string[] {
+  const candidateNames = Object.entries(fieldsMeta)
+    .filter(([name, meta]) => {
+      if (name.startsWith("__") || TECHNICAL_FIELD_NAMES.has(name)) return false;
+      if (EXPENSIVE_FIELD_TYPES.has(meta.type)) return false;
+      if (meta.store === false) return false;
+      return true;
+    })
+    .map(([name]) => name);
+
+  const priority = PRIORITY_FIELD_NAMES.filter((name) => candidateNames.includes(name));
+  const rest = candidateNames.filter((name) => !priority.includes(name));
+  return [...priority, ...rest].slice(0, SMART_FIELD_LIMIT);
+}
 const CORE_MODEL_ALLOWLIST = ["project.task", "project.project", "res.partner", "res.users"];
 
 function requireConnection(props: Props | undefined): OdooConnection {
@@ -130,7 +157,7 @@ function mcpError(text: string) {
   return { content: [{ type: "text" as const, text }], isError: true as const };
 }
 
-async function searchRecords(
+export async function searchRecords(
   conn: OdooConnection,
   model: string,
   domain: unknown[],
@@ -138,11 +165,28 @@ async function searchRecords(
   limit: number
 ): Promise<unknown> {
   const cappedLimit = Math.min(limit, 100);
+  const resolvedFields = await resolveFields(conn, model, fields);
   return callOdoo(conn, model, "search_read", {
     domain,
-    fields: fields === null ? DEFAULT_GENERIC_FIELDS : fields,
+    fields: resolvedFields,
     limit: cappedLimit
   });
+}
+
+async function resolveFields(conn: OdooConnection, model: string, fields: string[] | null): Promise<string[]> {
+  if (fields !== null && fields.length === 1 && fields[0] === ALL_FIELDS_SENTINEL) {
+    return []; // empty fields array => Odoo search_read returns all fields natively
+  }
+  if (fields !== null) return fields;
+
+  try {
+    const meta = (await callOdoo(conn, model, "fields_get", {
+      attributes: ["type", "store"]
+    })) as Record<string, OdooFieldMeta>;
+    return pickSmartFields(meta);
+  } catch {
+    return DEFAULT_GENERIC_FIELDS; // fields_get failed (e.g. bad model) — fall back rather than error the whole search
+  }
 }
 
 export class McpAgent extends McpAgentBase<Env, unknown, Props> {
@@ -194,12 +238,11 @@ export class McpAgent extends McpAgentBase<Env, unknown, Props> {
           model: z.string(),
           domain: z.array(z.any()).default([]),
           fields: z.array(z.string()).nullable().default(null),
-          limit: z.number().default(10)
+          limit: z.number().int().min(1).max(100).default(10)
         }
       },
       async ({ model, domain, fields, limit }) => {
         if (!model || !model.trim()) return mcpError("model must be a non-empty string");
-        if (!Number.isInteger(limit) || limit < 1) return mcpError("limit must be an integer >= 1 (max 100)");
         try {
           const rows = await searchRecords(requireConnection(this.props), model, domain, fields, limit);
           return { content: [{ type: "text" as const, text: JSON.stringify(rows, null, 2) }] };
