@@ -39,6 +39,8 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
       }
     },
     async ({ model, record_id, body, subtype, body_is_html }) => {
+      if (!model || !model.trim()) return mcpError("model must be a non-empty string");
+      if (!Number.isInteger(record_id) || record_id <= 0) return mcpError("record_id must be a positive integer");
       try {
         const result = await callOdoo(requireConnection(getProps()), model, "message_post", {
           ids: [record_id],
@@ -108,6 +110,8 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
       }
     },
     async ({ model, method, args, kwargs }) => {
+      if (!model || !model.trim()) return mcpError("model must be a non-empty string");
+      if (!method || !method.trim()) return mcpError("method must be a non-empty string");
       try {
         const result = await callOdoo(requireConnection(getProps()), model, method, { ...kwargs, args });
         return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
