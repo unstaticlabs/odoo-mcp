@@ -1,0 +1,16 @@
+# odoo-mcp is BYO-key: callers send their own Odoo credentials on every
+# request via headers (Authorization: Bearer <odoo-api-key>, X-Odoo-Url,
+# X-Odoo-Db). The Worker has no server-side Odoo secrets and needs no
+# .dev.vars entries for that to work locally.
+#
+# For local testing convenience with `wrangler dev` + MCP Inspector, you can
+# send those same headers by hand, e.g.:
+#
+#   curl -X POST http://localhost:8787/mcp \
+#     -H "Authorization: Bearer <your-odoo-api-key>" \
+#     -H "X-Odoo-Url: https://acme.odoo.com" \
+#     -H "X-Odoo-Db: acme-prod" \
+#     -H "Content-Type: application/json" \
+#     -d '{...}'
+#
+# Nothing below is required to run `wrangler dev`.

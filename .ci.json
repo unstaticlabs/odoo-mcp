@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "steps": [
+    {
+      "name": "install",
+      "cmd": "SHARP_IGNORE_GLOBAL_LIBVIPS=1 npm ci",
+      "cwd": ".",
+      "timeout": 600,
+      "gate": true
+    },
+    {
+      "name": "typecheck",
+      "cmd": "npx tsc --noEmit",
+      "cwd": ".",
+      "timeout": 300,
+      "gate": true
+    },
+    {
+      "name": "deploy-dry-run",
+      "cmd": "npx wrangler deploy --dry-run",
+      "cwd": ".",
+      "timeout": 300,
+      "gate": true
+    }
+  ]
+}
