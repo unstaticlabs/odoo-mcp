@@ -85,6 +85,31 @@ async function callOdoo(
 }
 
 const DEFAULT_TASK_FIELDS = ["id", "name", "stage_id", "project_id"];
+const DEFAULT_GENERIC_FIELDS = ["id", "display_name"];
+
+function requireConnection(props: Props | undefined): OdooConnection {
+  if (!props) throw new Error("Missing Odoo connection props");
+  return { url: props.odooBaseUrl, db: props.odooDb, apiKey: props.odooApiKey };
+}
+
+function mcpError(text: string) {
+  return { content: [{ type: "text" as const, text }], isError: true as const };
+}
+
+async function searchRecords(
+  conn: OdooConnection,
+  model: string,
+  domain: unknown[],
+  fields: string[] | null,
+  limit: number
+): Promise<unknown> {
+  const cappedLimit = Math.min(limit, 100);
+  return callOdoo(conn, model, "search_read", {
+    domain,
+    fields: fields === null ? DEFAULT_GENERIC_FIELDS : fields,
+    limit: cappedLimit
+  });
+}
 
 export class McpAgent extends McpAgentBase<Env, unknown, Props> {
   server = new McpServer({ name: "odoo-mcp", version: "0.1.0" });
@@ -100,22 +125,66 @@ export class McpAgent extends McpAgentBase<Env, unknown, Props> {
         }
       },
       async ({ domain, fields }) => {
-        if (!this.props) {
-          throw new Error("Missing Odoo connection props");
+        try {
+          const tasks = await searchRecords(requireConnection(this.props), "project.task", domain, fields, 100);
+          return { content: [{ type: "text" as const, text: JSON.stringify(tasks, null, 2) }] };
+        } catch (err) {
+          return mcpError(err instanceof Error ? err.message : "projects.list_tasks failed");
         }
-        const tasks = await callOdoo(
-          {
-            url: this.props.odooBaseUrl,
-            db: this.props.odooDb,
-            apiKey: this.props.odooApiKey
-          },
-          "project.task",
-          "search_read",
-          { domain, fields }
-        );
-        return {
-          content: [{ type: "text", text: JSON.stringify(tasks, null, 2) }]
-        };
+      }
+    );
+
+    this.server.registerTool(
+      "search_records",
+      {
+        description: "Read-only: model-agnostic Odoo search_read.",
+        inputSchema: {
+          model: z.string(),
+          domain: z.array(z.any()).default([]),
+          fields: z.array(z.string()).nullable().default(null),
+          limit: z.number().default(10)
+        }
+      },
+      async ({ model, domain, fields, limit }) => {
+        if (!model || !model.trim()) return mcpError("model must be a non-empty string");
+        if (!Number.isInteger(limit) || limit < 1) return mcpError("limit must be an integer >= 1 (max 100)");
+        try {
+          const rows = await searchRecords(requireConnection(this.props), model, domain, fields, limit);
+          return { content: [{ type: "text" as const, text: JSON.stringify(rows, null, 2) }] };
+        } catch (err) {
+          return mcpError(err instanceof Error ? err.message : "search_records failed");
+        }
+      }
+    );
+
+    this.server.registerTool(
+      "get_record",
+      {
+        description: "Read-only: fetch a single Odoo record by id.",
+        inputSchema: {
+          model: z.string(),
+          record_id: z.number(),
+          fields: z.array(z.string()).nullable().default(null)
+        }
+      },
+      async ({ model, record_id, fields }) => {
+        if (!model || !model.trim()) return mcpError("model must be a non-empty string");
+        if (!Number.isInteger(record_id) || record_id <= 0) return mcpError("record_id must be a positive integer");
+        try {
+          const rows = (await searchRecords(
+            requireConnection(this.props),
+            model,
+            [["id", "=", record_id]],
+            fields,
+            1
+          )) as unknown[];
+          if (!Array.isArray(rows) || rows.length === 0) {
+            return mcpError(`No ${model} record found for id ${record_id}`);
+          }
+          return { content: [{ type: "text" as const, text: JSON.stringify(rows[0], null, 2) }] };
+        } catch (err) {
+          return mcpError(err instanceof Error ? err.message : "get_record failed");
+        }
       }
     );
   }
