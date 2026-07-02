@@ -11,7 +11,7 @@ MCP client) read and write Odoo data over a single remote endpoint.
 - **API:** Odoo JSON-2 (`POST {url}/json/2/{model}/{method}`).
 
 > Status: Milestone 1+ — projects read core, model/field discovery, smart field selection,
-> timeout+retry, and record CRUD. Roadmap: chatter/aggregate/method tools, `odoo://` resources.
+> timeout+retry, record CRUD, and `odoo://` resources.
 
 ## Connection: BYO-key headers
 
@@ -46,6 +46,22 @@ can only do what their Odoo account permits.
 For `search_records` / `get_record`, `fields`:
 - omit / `null` → a smart default set of the most relevant fields,
 - a string array → exactly those fields.
+
+## Resources
+
+In addition to tools, the server exposes read-only Odoo data as **MCP resources** via URI
+templates. Any MCP client can discover them with `resources/templates/list` (handled
+automatically by the SDK) and read them with `resources/read`.
+
+| URI template | Description | Example |
+|---|---|---|
+| `odoo://{model}/record/{id}` | Fetch a single record by id | `odoo://project.task/record/42` |
+| `odoo://{model}/search` | List records for a model. Optional `?domain=<JSON array>&fields=<comma-separated>&limit=<1-100>` query params (defaults: `domain=[]`, smart fields, `limit=10`) | `odoo://project.task/search?domain=%5B%5B%22active%22%2C%22%3D%22%2Ctrue%5D%5D&limit=5` |
+| `odoo://{model}/count` | Count records matching a domain via `search_count`. Optional `?domain=<JSON array>` query param (default `[]`) | `odoo://project.task/count?domain=%5B%5B%22active%22%2C%22%3D%22%2Ctrue%5D%5D` |
+| `odoo://{model}/fields` | Field schema (name, type, string label) for a model | `odoo://project.task/fields` |
+
+All four resources are strictly read-only (`read` / `search_read` / `search_count` / `fields_get`
+only) and use the same BYO-key connection headers as the tools above.
 
 ## Quick start
 
