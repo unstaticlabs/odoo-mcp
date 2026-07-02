@@ -1,0 +1,13 @@
+automations:
+- id: mcp_triage_inbox
+  name: Triage inbox (odoo-mcp test)
+  trigger:
+    all:
+    - field: stage
+      eq: Inbox
+  actions:
+  - kind: capability
+    body: triage
+    allowed_outcomes:
+    - add_tag
+    - comment
