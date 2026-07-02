@@ -750,7 +750,7 @@ describe("call_model_method tool callOdoo call shape", () => {
     globalThis.fetch = originalFetch;
   });
 
-  test("passes model, method, args and kwargs through unchanged as { args, ...kwargs }", async () => {
+  test("passes model, method, args and kwargs through unchanged as { ...kwargs, args }", async () => {
     const conn = { url: "http://example.com", db: "test-db", apiKey: "secret-key" };
     let fetchCalls: { url: string; body: any }[] = [];
     const fetchMock = mock(async (url: string, init: any) => {
@@ -764,12 +764,31 @@ describe("call_model_method tool callOdoo call shape", () => {
 
     const args = [1, "two"];
     const kwargs = { context: { lang: "en_US" }, limit: 5 };
-    const res = await callOdoo(conn, "res.partner", "some_custom_method", { args, ...kwargs });
+    const res = await callOdoo(conn, "res.partner", "some_custom_method", { ...kwargs, args });
 
     expect(fetchCalls.length).toBe(1);
     expect(fetchCalls[0].url).toContain("/res.partner/some_custom_method");
     expect(fetchCalls[0].body).toEqual({ args: [1, "two"], context: { lang: "en_US" }, limit: 5 });
     expect(res).toBe("ok");
+  });
+
+  test("a kwargs key literally named 'args' cannot clobber the real positional args", async () => {
+    const conn = { url: "http://example.com", db: "test-db", apiKey: "secret-key" };
+    let fetchCalls: { url: string; body: any }[] = [];
+    const fetchMock = mock(async (url: string, init: any) => {
+      fetchCalls.push({ url, body: JSON.parse(init.body) });
+      return new Response(JSON.stringify({ result: "ok" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+    globalThis.fetch = fetchMock;
+
+    const args = [[5]];
+    const kwargs = { args: [[999]], vals: { name: "x" } };
+    await callOdoo(conn, "project.task", "write", { ...kwargs, args });
+
+    expect(fetchCalls[0].body).toEqual({ args: [[5]], vals: { name: "x" } });
   });
 
   test("retries on 502 and eventually succeeds (proves callOdoo retry reuse)", async () => {

@@ -448,7 +448,7 @@ export class McpAgent extends McpAgentBase<Env, unknown, Props> {
       },
       async ({ model, method, args, kwargs }) => {
         try {
-          const result = await callOdoo(requireConnection(this.props), model, method, { args, ...kwargs });
+          const result = await callOdoo(requireConnection(this.props), model, method, { ...kwargs, args });
           return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
         } catch (err) {
           return mcpError(err instanceof Error ? err.message : "call_model_method failed");
