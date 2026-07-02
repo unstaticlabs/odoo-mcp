@@ -10,7 +10,7 @@ mock.module("agents", () => {
   return {};
 });
 
-const { callOdoo, pickSmartFields, searchRecords, escapeHtml } = await import("./index");
+const { callOdoo, pickSmartFields, searchRecords, escapeHtml, countRecords, McpAgent } = await import("./index");
 
 const originalFetch = globalThis.fetch;
 
@@ -871,5 +871,430 @@ describe("search_records limit zod schema", () => {
 
     const res4 = schema.safeParse({ model: "res.partner", limit: -5 });
     expect(res4.success).toBe(false);
+  });
+});
+
+describe("countRecords", () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  test("calls search_count with domain and returns the numeric result", async () => {
+    const conn = { url: "http://example.com", db: "test-db", apiKey: "secret-key" };
+    let fetchCalls: { url: string; body: any }[] = [];
+    const fetchMock = mock(async (url: string, init: any) => {
+      fetchCalls.push({ url, body: JSON.parse(init.body) });
+      return new Response(JSON.stringify({ result: 7 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+    globalThis.fetch = fetchMock;
+
+    const res = await countRecords(conn, "project.task", [["active", "=", true]]);
+
+    expect(fetchCalls.length).toBe(1);
+    expect(fetchCalls[0].url).toContain("/project.task/search_count");
+    expect(fetchCalls[0].body).toEqual({ domain: [["active", "=", true]] });
+    expect(res).toBe(7);
+  });
+
+  test("rejects an empty model without calling fetch", async () => {
+    const conn = { url: "http://example.com", db: "test-db", apiKey: "secret-key" };
+    const fetchMock = mock(() => Promise.reject(new Error("should not be called")));
+    globalThis.fetch = fetchMock;
+
+    let error: Error | undefined;
+    try {
+      await countRecords(conn, "  ", []);
+    } catch (err) {
+      error = err as Error;
+    }
+
+    expect(error).toBeDefined();
+    expect(error?.message).toContain("model must be a non-empty string");
+    expect(fetchMock.mock.calls.length).toBe(0);
+  });
+});
+
+describe("resources", () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const connProps = { odooBaseUrl: "http://example.com", odooDb: "test-db", odooApiKey: "secret-resource-key" };
+
+  async function buildAgent() {
+    const AgentCtor = McpAgent as any;
+    const agent = new AgentCtor();
+    agent.props = connProps;
+    await agent.init();
+    return agent;
+  }
+
+  function getTemplate(agent: any, name: string) {
+    return agent.server._registeredResourceTemplates[name];
+  }
+
+  test("registers exactly 4 resource templates with the expected URI patterns", async () => {
+    const agent = await buildAgent();
+    const templates = agent.server._registeredResourceTemplates;
+
+    expect(Object.keys(templates).sort()).toEqual(["count", "fields", "record", "search"]);
+    expect(templates.record.resourceTemplate.uriTemplate.toString()).toBe("odoo://{model}/record/{id}");
+    expect(templates.search.resourceTemplate.uriTemplate.toString()).toBe("odoo://{model}/search");
+    expect(templates.count.resourceTemplate.uriTemplate.toString()).toBe("odoo://{model}/count");
+    expect(templates.fields.resourceTemplate.uriTemplate.toString()).toBe("odoo://{model}/fields");
+  });
+
+  test("resources/templates/list surfaces all 4 templates via the SDK's built-in listing", async () => {
+    const agent = await buildAgent();
+    const handler = agent.server.server._requestHandlers.get("resources/templates/list");
+    expect(handler).toBeDefined();
+
+    const result = await handler({ method: "resources/templates/list", params: {} }, {});
+    const uris = result.resourceTemplates.map((t: any) => t.uriTemplate).sort();
+
+    expect(uris).toEqual(
+      ["odoo://{model}/count", "odoo://{model}/fields", "odoo://{model}/record/{id}", "odoo://{model}/search"].sort()
+    );
+  });
+
+  describe("odoo://{model}/record/{id}", () => {
+    test("fetches a record via searchRecords with an id domain filter", async () => {
+      const agent = await buildAgent();
+      let fetchCalls: { url: string; body: any }[] = [];
+      const fetchMock = mock(async (url: string, init: any) => {
+        fetchCalls.push({ url, body: JSON.parse(init.body) });
+        if (url.endsWith("/fields_get")) {
+          return new Response(JSON.stringify({ result: { id: { type: "integer", store: true } } }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+        return new Response(JSON.stringify({ result: [{ id: 42, name: "Task 42" }] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      });
+      globalThis.fetch = fetchMock;
+
+      const template = getTemplate(agent, "record");
+      const uri = new URL("odoo://project.task/record/42");
+      const result = await template.readCallback(uri, { model: "project.task", id: "42" }, {});
+
+      const searchReadCall = fetchCalls.find((c) => c.url.endsWith("/search_read"));
+      expect(searchReadCall).toBeDefined();
+      expect(searchReadCall?.body.domain).toEqual([["id", "=", 42]]);
+      expect(searchReadCall?.body.limit).toBe(1);
+      expect(result.contents[0].uri).toBe(uri.href);
+      expect(result.contents[0].mimeType).toBe("application/json");
+      expect(JSON.parse(result.contents[0].text)).toEqual({ id: 42, name: "Task 42" });
+    });
+
+    test("throws a clear error for an empty model without calling fetch", async () => {
+      const agent = await buildAgent();
+      const fetchMock = mock(() => Promise.reject(new Error("should not be called")));
+      globalThis.fetch = fetchMock;
+
+      const template = getTemplate(agent, "record");
+      const uri = new URL("odoo:///record/42");
+
+      let error: Error | undefined;
+      try {
+        await template.readCallback(uri, { model: "", id: "42" }, {});
+      } catch (err) {
+        error = err as Error;
+      }
+
+      expect(error?.message).toContain("model must be a non-empty string");
+      expect(fetchMock.mock.calls.length).toBe(0);
+    });
+
+    test("throws a clear error for a non-positive/non-numeric id without calling fetch", async () => {
+      const agent = await buildAgent();
+      const fetchMock = mock(() => Promise.reject(new Error("should not be called")));
+      globalThis.fetch = fetchMock;
+
+      const template = getTemplate(agent, "record");
+
+      for (const badId of ["0", "-1", "abc", ""]) {
+        let error: Error | undefined;
+        try {
+          await template.readCallback(new URL(`odoo://project.task/record/${badId || "x"}`), { model: "project.task", id: badId }, {});
+        } catch (err) {
+          error = err as Error;
+        }
+        expect(error?.message).toContain("id must be a positive integer");
+      }
+      expect(fetchMock.mock.calls.length).toBe(0);
+    });
+
+    test("throws a clear not-found error when no record matches", async () => {
+      const agent = await buildAgent();
+      const fetchMock = mock(async () => {
+        return new Response(JSON.stringify({ result: [] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      });
+      globalThis.fetch = fetchMock;
+
+      const template = getTemplate(agent, "record");
+
+      let error: Error | undefined;
+      try {
+        await template.readCallback(new URL("odoo://project.task/record/999"), { model: "project.task", id: "999" }, {});
+      } catch (err) {
+        error = err as Error;
+      }
+
+      expect(error?.message).toContain("No project.task record found for id 999");
+    });
+
+    test("does not leak the API key on error", async () => {
+      const agent = await buildAgent();
+      const fetchMock = mock(() =>
+        Promise.resolve(new Response(JSON.stringify({ error: { message: "Access Denied" } }), { status: 403 }))
+      );
+      globalThis.fetch = fetchMock;
+
+      const template = getTemplate(agent, "record");
+
+      let error: Error | undefined;
+      try {
+        await template.readCallback(new URL("odoo://project.task/record/1"), { model: "project.task", id: "1" }, {});
+      } catch (err) {
+        error = err as Error;
+      }
+
+      expect(error).toBeDefined();
+      expect(error?.message).not.toContain("secret-resource-key");
+      expect(error?.message).not.toContain("Bearer");
+    });
+  });
+
+  describe("odoo://{model}/search", () => {
+    test("reuses searchRecords: passes domain/fields/limit parsed from query params", async () => {
+      const agent = await buildAgent();
+      let fetchCalls: { url: string; body: any }[] = [];
+      const fetchMock = mock(async (url: string, init: any) => {
+        fetchCalls.push({ url, body: JSON.parse(init.body) });
+        return new Response(JSON.stringify({ result: [{ id: 1 }] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      });
+      globalThis.fetch = fetchMock;
+
+      const template = getTemplate(agent, "search");
+      const uri = new URL("odoo://project.task/search");
+      uri.searchParams.set("domain", JSON.stringify([["active", "=", true]]));
+      uri.searchParams.set("fields", "id,name");
+      uri.searchParams.set("limit", "5");
+
+      const result = await template.readCallback(uri, { model: "project.task" }, {});
+
+      expect(fetchCalls.length).toBe(1);
+      expect(fetchCalls[0].url).toContain("/project.task/search_read");
+      expect(fetchCalls[0].body).toEqual({
+        domain: [["active", "=", true]],
+        fields: ["id", "name"],
+        limit: 5
+      });
+      expect(JSON.parse(result.contents[0].text)).toEqual([{ id: 1 }]);
+    });
+
+    test("defaults to domain=[], smart fields, limit=10 when no query params are given", async () => {
+      const agent = await buildAgent();
+      let fetchCalls: { url: string; body: any }[] = [];
+      const fetchMock = mock(async (url: string, init: any) => {
+        fetchCalls.push({ url, body: JSON.parse(init.body) });
+        if (url.endsWith("/fields_get")) {
+          return new Response(JSON.stringify({ result: { id: { type: "integer", store: true } } }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+        return new Response(JSON.stringify({ result: [] }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      });
+      globalThis.fetch = fetchMock;
+
+      const template = getTemplate(agent, "search");
+      const uri = new URL("odoo://project.task/search");
+      await template.readCallback(uri, { model: "project.task" }, {});
+
+      const searchReadCall = fetchCalls.find((c) => c.url.endsWith("/search_read"));
+      expect(searchReadCall?.body.domain).toEqual([]);
+      expect(searchReadCall?.body.limit).toBe(10);
+    });
+
+    test("throws a clear error for an empty model without calling fetch", async () => {
+      const agent = await buildAgent();
+      const fetchMock = mock(() => Promise.reject(new Error("should not be called")));
+      globalThis.fetch = fetchMock;
+
+      const template = getTemplate(agent, "search");
+
+      let error: Error | undefined;
+      try {
+        await template.readCallback(new URL("odoo:///search"), { model: "" }, {});
+      } catch (err) {
+        error = err as Error;
+      }
+
+      expect(error?.message).toContain("model must be a non-empty string");
+      expect(fetchMock.mock.calls.length).toBe(0);
+    });
+
+    test("throws a clear error for a malformed domain query param", async () => {
+      const agent = await buildAgent();
+      const fetchMock = mock(() => Promise.reject(new Error("should not be called")));
+      globalThis.fetch = fetchMock;
+
+      const template = getTemplate(agent, "search");
+      const uri = new URL("odoo://project.task/search");
+      uri.searchParams.set("domain", "not-json");
+
+      let error: Error | undefined;
+      try {
+        await template.readCallback(uri, { model: "project.task" }, {});
+      } catch (err) {
+        error = err as Error;
+      }
+
+      expect(error?.message).toContain("domain query param must be valid JSON array");
+      expect(fetchMock.mock.calls.length).toBe(0);
+    });
+  });
+
+  describe("odoo://{model}/count", () => {
+    test("calls the countRecords helper (search_count), not client-side counting", async () => {
+      const agent = await buildAgent();
+      let fetchCalls: { url: string; body: any }[] = [];
+      const fetchMock = mock(async (url: string, init: any) => {
+        fetchCalls.push({ url, body: JSON.parse(init.body) });
+        return new Response(JSON.stringify({ result: 3 }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      });
+      globalThis.fetch = fetchMock;
+
+      const template = getTemplate(agent, "count");
+      const uri = new URL("odoo://project.task/count");
+      uri.searchParams.set("domain", JSON.stringify([["active", "=", true]]));
+
+      const result = await template.readCallback(uri, { model: "project.task" }, {});
+
+      expect(fetchCalls.length).toBe(1);
+      expect(fetchCalls[0].url).toContain("/project.task/search_count");
+      expect(fetchCalls[0].body).toEqual({ domain: [["active", "=", true]] });
+      expect(JSON.parse(result.contents[0].text)).toEqual({ count: 3 });
+    });
+
+    test("defaults to domain=[] when no query param is given", async () => {
+      const agent = await buildAgent();
+      let fetchCalls: { url: string; body: any }[] = [];
+      const fetchMock = mock(async (url: string, init: any) => {
+        fetchCalls.push({ url, body: JSON.parse(init.body) });
+        return new Response(JSON.stringify({ result: 0 }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      });
+      globalThis.fetch = fetchMock;
+
+      const template = getTemplate(agent, "count");
+      await template.readCallback(new URL("odoo://project.task/count"), { model: "project.task" }, {});
+
+      expect(fetchCalls[0].body).toEqual({ domain: [] });
+    });
+
+    test("throws a clear error for an empty model without calling fetch", async () => {
+      const agent = await buildAgent();
+      const fetchMock = mock(() => Promise.reject(new Error("should not be called")));
+      globalThis.fetch = fetchMock;
+
+      const template = getTemplate(agent, "count");
+
+      let error: Error | undefined;
+      try {
+        await template.readCallback(new URL("odoo:///count"), { model: "" }, {});
+      } catch (err) {
+        error = err as Error;
+      }
+
+      expect(error?.message).toContain("model must be a non-empty string");
+      expect(fetchMock.mock.calls.length).toBe(0);
+    });
+  });
+
+  describe("odoo://{model}/fields", () => {
+    test("calls fields_get with type/string attributes, matching the get_fields tool", async () => {
+      const agent = await buildAgent();
+      let fetchCalls: { url: string; body: any }[] = [];
+      const fetchMock = mock(async (url: string, init: any) => {
+        fetchCalls.push({ url, body: JSON.parse(init.body) });
+        return new Response(JSON.stringify({ result: { name: { type: "char", string: "Name" } } }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      });
+      globalThis.fetch = fetchMock;
+
+      const template = getTemplate(agent, "fields");
+      const uri = new URL("odoo://project.task/fields");
+      const result = await template.readCallback(uri, { model: "project.task" }, {});
+
+      expect(fetchCalls.length).toBe(1);
+      expect(fetchCalls[0].url).toContain("/project.task/fields_get");
+      expect(fetchCalls[0].body).toEqual({ attributes: ["type", "string"] });
+      expect(JSON.parse(result.contents[0].text)).toEqual({ name: { type: "char", string: "Name" } });
+    });
+
+    test("throws a clear error for an empty model without calling fetch", async () => {
+      const agent = await buildAgent();
+      const fetchMock = mock(() => Promise.reject(new Error("should not be called")));
+      globalThis.fetch = fetchMock;
+
+      const template = getTemplate(agent, "fields");
+
+      let error: Error | undefined;
+      try {
+        await template.readCallback(new URL("odoo:///fields"), { model: "" }, {});
+      } catch (err) {
+        error = err as Error;
+      }
+
+      expect(error?.message).toContain("model must be a non-empty string");
+      expect(fetchMock.mock.calls.length).toBe(0);
+    });
+  });
+
+  test("no resource handler ever calls a write method (create/write/unlink)", async () => {
+    const agent = await buildAgent();
+    let calledMethods: string[] = [];
+    const fetchMock = mock(async (url: string) => {
+      calledMethods.push(url.split("/").pop() ?? "");
+      return new Response(JSON.stringify({ result: url.includes("search_read") ? [{ id: 1 }] : url.includes("search_count") ? 1 : {} }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+    globalThis.fetch = fetchMock;
+
+    await getTemplate(agent, "record").readCallback(new URL("odoo://project.task/record/1"), { model: "project.task", id: "1" }, {});
+    await getTemplate(agent, "search").readCallback(new URL("odoo://project.task/search"), { model: "project.task" }, {});
+    await getTemplate(agent, "count").readCallback(new URL("odoo://project.task/count"), { model: "project.task" }, {});
+    await getTemplate(agent, "fields").readCallback(new URL("odoo://project.task/fields"), { model: "project.task" }, {});
+
+    expect(calledMethods.length).toBeGreaterThan(0);
+    for (const method of calledMethods) {
+      expect(["create", "write", "unlink"]).not.toContain(method);
+    }
   });
 });

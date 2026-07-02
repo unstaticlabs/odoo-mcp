@@ -1,5 +1,5 @@
 import { McpAgent as McpAgentBase } from "agents/mcp";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
 const ODOO_TIMEOUT_MS = 15_000;
@@ -183,6 +183,25 @@ export async function searchRecords(
   });
 }
 
+export async function countRecords(conn: OdooConnection, model: string, domain: unknown[]): Promise<number> {
+  if (!model || !model.trim()) throw new Error("model must be a non-empty string");
+  return (await callOdoo(conn, model, "search_count", { domain })) as number;
+}
+
+/** Parses a JSON-array domain from a resource URI's `domain` query param; defaults to []. */
+function parseDomainParam(uri: URL): unknown[] {
+  const raw = uri.searchParams.get("domain");
+  if (!raw) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error("domain query param must be valid JSON array");
+  }
+  if (!Array.isArray(parsed)) throw new Error("domain query param must be a JSON array");
+  return parsed;
+}
+
 async function resolveFields(conn: OdooConnection, model: string, fields: string[] | null): Promise<string[]> {
   if (fields !== null && fields.length === 1 && fields[0] === ALL_FIELDS_SENTINEL) {
     return []; // empty fields array => Odoo search_read returns all fields natively
@@ -341,6 +360,85 @@ export class McpAgent extends McpAgentBase<Env, unknown, Props> {
         } catch (err) {
           return mcpError(err instanceof Error ? err.message : "get_fields failed");
         }
+      }
+    );
+
+    this.server.registerResource(
+      "record",
+      new ResourceTemplate("odoo://{model}/record/{id}", { list: undefined }),
+      { description: "Read-only: fetch a single Odoo record by id.", mimeType: "application/json" },
+      async (uri, variables) => {
+        const model = typeof variables.model === "string" ? variables.model : "";
+        if (!model.trim()) throw new Error("model must be a non-empty string");
+        const idRaw = typeof variables.id === "string" ? variables.id : "";
+        const id = Number(idRaw);
+        if (!Number.isInteger(id) || id <= 0) throw new Error("id must be a positive integer");
+
+        const rows = (await searchRecords(
+          requireConnection(this.props),
+          model,
+          [["id", "=", id]],
+          null,
+          1
+        )) as unknown[];
+        if (!Array.isArray(rows) || rows.length === 0) {
+          throw new Error(`No ${model} record found for id ${id}`);
+        }
+        return { contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify(rows[0], null, 2) }] };
+      }
+    );
+
+    this.server.registerResource(
+      "search",
+      new ResourceTemplate("odoo://{model}/search", { list: undefined }),
+      { description: "Read-only: model-agnostic Odoo search_read via URI (domain/fields/limit query params).", mimeType: "application/json" },
+      async (uri, variables) => {
+        const model = typeof variables.model === "string" ? variables.model : "";
+        if (!model.trim()) throw new Error("model must be a non-empty string");
+
+        const domain = parseDomainParam(uri);
+        const fieldsParam = uri.searchParams.get("fields");
+        const fields = fieldsParam
+          ? fieldsParam
+              .split(",")
+              .map((f) => f.trim())
+              .filter(Boolean)
+          : null;
+        const limitParam = uri.searchParams.get("limit");
+        const limitNum = limitParam ? Number(limitParam) : 10;
+        const limit = Number.isInteger(limitNum) && limitNum > 0 ? limitNum : 10;
+
+        const rows = await searchRecords(requireConnection(this.props), model, domain, fields, limit);
+        return { contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify(rows, null, 2) }] };
+      }
+    );
+
+    this.server.registerResource(
+      "count",
+      new ResourceTemplate("odoo://{model}/count", { list: undefined }),
+      { description: "Read-only: count Odoo records matching a domain (search_count) via URI.", mimeType: "application/json" },
+      async (uri, variables) => {
+        const model = typeof variables.model === "string" ? variables.model : "";
+        if (!model.trim()) throw new Error("model must be a non-empty string");
+
+        const domain = parseDomainParam(uri);
+        const count = await countRecords(requireConnection(this.props), model, domain);
+        return { contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify({ count }, null, 2) }] };
+      }
+    );
+
+    this.server.registerResource(
+      "fields",
+      new ResourceTemplate("odoo://{model}/fields", { list: undefined }),
+      { description: "Read-only: get field schema (name, type, string label) for an Odoo model.", mimeType: "application/json" },
+      async (uri, variables) => {
+        const model = typeof variables.model === "string" ? variables.model : "";
+        if (!model.trim()) throw new Error("model must be a non-empty string");
+
+        const fields = await callOdoo(requireConnection(this.props), model, "fields_get", {
+          attributes: ["type", "string"]
+        });
+        return { contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify(fields, null, 2) }] };
       }
     );
 
