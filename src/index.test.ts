@@ -630,7 +630,7 @@ describe("searchRecords", () => {
     expect(fetchCalls.length).toBe(2);
     // First call should be fields_get
     expect(fetchCalls[0].url).toContain("/fields_get");
-    expect(fetchCalls[0].body).toEqual({ attributes: ["type", "store"] });
+    expect(fetchCalls[0].body).toEqual({ attributes: ["type", "store", "selection"] });
     // Second call should be search_read with resolved smart fields
     expect(fetchCalls[1].url).toContain("/search_read");
     expect(fetchCalls[1].body.fields).toEqual(["id", "name", "display_name"]);
@@ -795,6 +795,53 @@ describe("searchRecords", () => {
 
     expect(fetchCalls.length).toBe(1);
     expect(fetchCalls[0].body.offset).toBe(0);
+  });
+
+  test("exposes fetched fieldsMeta on the return value when fields is null", async () => {
+    const conn = { url: "http://example.com", db: "test-db", apiKey: "secret-key" };
+    const fetchMock = mock(async (url: string, init: any) => {
+      if (url.endsWith("/fields_get")) {
+        return new Response(
+          JSON.stringify({
+            result: {
+              id: { type: "integer", store: true },
+              name: { type: "char", store: true },
+              display_name: { type: "char", store: true },
+              image: { type: "binary", store: true }
+            }
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      return new Response(JSON.stringify({ result: [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+    globalThis.fetch = fetchMock;
+
+    const result = await searchRecords(makeQueue(), conn, "test.model", [], null, 10);
+    expect(result.fieldsMeta).toEqual({
+      id: { type: "integer", store: true },
+      name: { type: "char", store: true },
+      display_name: { type: "char", store: true },
+      image: { type: "binary", store: true }
+    });
+    expect(result.rows).toEqual([]);
+  });
+
+  test("returns fieldsMeta: null when explicit fields list is passed", async () => {
+    const conn = { url: "http://example.com", db: "test-db", apiKey: "secret-key" };
+    const fetchMock = mock(async () => {
+      return new Response(JSON.stringify({ result: [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+    globalThis.fetch = fetchMock;
+
+    const result = await searchRecords(makeQueue(), conn, "test.model", [], ["id", "name"], 10);
+    expect(result.fieldsMeta).toBeNull();
   });
 });
 
