@@ -1196,6 +1196,63 @@ describe("aggregate_records tool callOdoo call shape", () => {
   });
 });
 
+describe("get_fields tool callOdoo call shape", () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  test("calls fields_get with the full metadata attributes list", async () => {
+    const agent = await buildWriteToolAgent();
+    let fetchCalls: { url: string; body: any }[] = [];
+    const fetchMock = mock(async (url: string, init: any) => {
+      fetchCalls.push({ url, body: JSON.parse(init.body) });
+      return new Response(JSON.stringify({ result: { name: { type: "char", string: "Name" } } }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+    globalThis.fetch = fetchMock;
+
+    const handler = getToolHandler(agent, "get_fields");
+    await handler({ model: "project.task" });
+
+    expect(fetchCalls.length).toBe(1);
+    expect(fetchCalls[0].url).toContain("/project.task/fields_get");
+    expect(fetchCalls[0].body.attributes).toEqual([
+      "type",
+      "string",
+      "readonly",
+      "required",
+      "store",
+      "selection",
+      "relation",
+      "help",
+      "searchable",
+      "sortable"
+    ]);
+    expect(fetchCalls[0].body.allfields).toBeUndefined();
+  });
+
+  test("forwards an explicit fields allowlist as allfields", async () => {
+    const agent = await buildWriteToolAgent();
+    let fetchCalls: { url: string; body: any }[] = [];
+    const fetchMock = mock(async (url: string, init: any) => {
+      fetchCalls.push({ url, body: JSON.parse(init.body) });
+      return new Response(JSON.stringify({ result: { name: { type: "char", string: "Name" } } }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+    globalThis.fetch = fetchMock;
+
+    const handler = getToolHandler(agent, "get_fields");
+    await handler({ model: "project.task", fields: ["name", "stage_id"] });
+
+    expect(fetchCalls.length).toBe(1);
+    expect(fetchCalls[0].body.allfields).toEqual(["name", "stage_id"]);
+  });
+});
+
 describe("call_model_method tool callOdoo call shape", () => {
   afterEach(() => {
     globalThis.fetch = originalFetch;
@@ -1816,7 +1873,7 @@ describe("resources", () => {
   });
 
   describe("odoo://{model}/fields", () => {
-    test("calls fields_get with type/string attributes, matching the get_fields tool", async () => {
+    test("calls fields_get with the full metadata attributes, matching the get_fields tool", async () => {
       const agent = await buildAgent();
       let fetchCalls: { url: string; body: any }[] = [];
       const fetchMock = mock(async (url: string, init: any) => {
@@ -1834,7 +1891,10 @@ describe("resources", () => {
 
       expect(fetchCalls.length).toBe(1);
       expect(fetchCalls[0].url).toContain("/project.task/fields_get");
-      expect(fetchCalls[0].body).toEqual({ attributes: ["type", "string"] });
+      expect(fetchCalls[0].body).toEqual({
+        attributes: ["type", "string", "readonly", "required", "store", "selection", "relation", "help", "searchable", "sortable"]
+      });
+      expect(fetchCalls[0].body.allfields).toBeUndefined();
       expect(JSON.parse(result.contents[0].text)).toEqual({ name: { type: "char", string: "Name" } });
     });
 
