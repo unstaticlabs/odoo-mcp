@@ -1,4 +1,5 @@
-import { callOdoo, type OdooConnection } from "../odoo";
+import type { OdooConnection } from "../odoo";
+import type { OdooQueue } from "../odoo-queue";
 import type { Props } from "../server";
 
 export const DEFAULT_TASK_FIELDS = ["id", "name", "stage_id", "project_id"];
@@ -52,6 +53,7 @@ export function escapeHtml(text: string): string {
 }
 
 export async function searchRecords(
+  queue: OdooQueue,
   conn: OdooConnection,
   model: string,
   domain: unknown[],
@@ -59,17 +61,17 @@ export async function searchRecords(
   limit: number
 ): Promise<unknown> {
   const cappedLimit = Math.min(limit, 100);
-  const resolvedFields = await resolveFields(conn, model, fields);
-  return callOdoo(conn, model, "search_read", {
+  const resolvedFields = await resolveFields(queue, conn, model, fields);
+  return queue.enqueue(conn, model, "search_read", {
     domain,
     fields: resolvedFields,
     limit: cappedLimit
   });
 }
 
-export async function countRecords(conn: OdooConnection, model: string, domain: unknown[]): Promise<number> {
+export async function countRecords(queue: OdooQueue, conn: OdooConnection, model: string, domain: unknown[]): Promise<number> {
   if (!model || !model.trim()) throw new Error("model must be a non-empty string");
-  return (await callOdoo(conn, model, "search_count", { domain })) as number;
+  return (await queue.enqueue(conn, model, "search_count", { domain })) as number;
 }
 
 /** Parses a JSON-array domain from a resource URI's `domain` query param; defaults to []. */
@@ -86,14 +88,19 @@ export function parseDomainParam(uri: URL): unknown[] {
   return parsed;
 }
 
-async function resolveFields(conn: OdooConnection, model: string, fields: string[] | null): Promise<string[]> {
+async function resolveFields(
+  queue: OdooQueue,
+  conn: OdooConnection,
+  model: string,
+  fields: string[] | null
+): Promise<string[]> {
   if (fields !== null && fields.length === 1 && fields[0] === ALL_FIELDS_SENTINEL) {
     return []; // empty fields array => Odoo search_read returns all fields natively
   }
   if (fields !== null) return fields;
 
   try {
-    const meta = (await callOdoo(conn, model, "fields_get", {
+    const meta = (await queue.enqueue(conn, model, "fields_get", {
       attributes: ["type", "store"]
     })) as Record<string, OdooFieldMeta>;
     return pickSmartFields(meta);

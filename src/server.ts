@@ -1,5 +1,7 @@
 import { McpAgent as McpAgentBase } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { callOdoo } from "./odoo";
+import { OdooQueue } from "./odoo-queue";
 import { registerReadTools } from "./tools/read";
 import { registerResourceTemplates } from "./tools/resources";
 import { registerWriteTools } from "./tools/write";
@@ -16,11 +18,12 @@ export interface Props extends Record<string, unknown> {
 
 export class McpAgent extends McpAgentBase<Env, unknown, Props> {
   server = new McpServer({ name: "odoo-mcp", version: "0.1.0" });
+  odooQueue = new OdooQueue(callOdoo);
 
   async init() {
     const getProps = () => this.props;
-    registerReadTools(this.server, getProps);
-    registerResourceTemplates(this.server, getProps);
-    registerWriteTools(this.server, getProps);
+    registerReadTools(this.server, getProps, this.odooQueue);
+    registerResourceTemplates(this.server, getProps, this.odooQueue);
+    registerWriteTools(this.server, getProps, this.odooQueue);
   }
 }

@@ -20,6 +20,7 @@ mock.module("agents", () => {
 
 const {
   callOdoo,
+  OdooQueue,
   pickSmartFields,
   searchRecords,
   escapeHtml,
@@ -30,9 +31,15 @@ const {
 
 const originalFetch = globalThis.fetch;
 
+/** Tests don't want the production 1000ms min-delay between calls. */
+function makeQueue() {
+  return new OdooQueue(callOdoo, { minDelayMs: 0 });
+}
+
 async function buildWriteToolAgent() {
   const AgentCtor = McpAgent as any;
   const agent = new AgentCtor();
+  agent.odooQueue = makeQueue();
   agent.props = { odooBaseUrl: "http://example.com", odooDb: "test-db", odooApiKey: "secret-key" };
   await agent.init();
   return agent;
@@ -405,7 +412,7 @@ describe("searchRecords", () => {
     });
     globalThis.fetch = fetchMock;
 
-    await searchRecords(conn, "test.model", [], null, 10);
+    await searchRecords(makeQueue(), conn, "test.model", [], null, 10);
 
     expect(fetchCalls.length).toBe(2);
     // First call should be fields_get
@@ -429,7 +436,7 @@ describe("searchRecords", () => {
     });
     globalThis.fetch = fetchMock;
 
-    await searchRecords(conn, "test.model", [], ["__all__"], 10);
+    await searchRecords(makeQueue(), conn, "test.model", [], ["__all__"], 10);
 
     expect(fetchCalls.length).toBe(1);
     expect(fetchCalls[0].url).toContain("/search_read");
@@ -449,7 +456,7 @@ describe("searchRecords", () => {
     });
     globalThis.fetch = fetchMock;
 
-    await searchRecords(conn, "test.model", [], ["id", "name"], 10);
+    await searchRecords(makeQueue(), conn, "test.model", [], ["id", "name"], 10);
 
     expect(fetchCalls.length).toBe(1);
     expect(fetchCalls[0].url).toContain("/search_read");
@@ -472,7 +479,7 @@ describe("searchRecords", () => {
     });
     globalThis.fetch = fetchMock;
 
-    await searchRecords(conn, "test.model", [], null, 10);
+    await searchRecords(makeQueue(), conn, "test.model", [], null, 10);
 
     expect(fetchCalls.length).toBe(2);
     expect(fetchCalls[0].url).toContain("/fields_get");
@@ -493,7 +500,7 @@ describe("searchRecords", () => {
     });
     globalThis.fetch = fetchMock;
 
-    await searchRecords(conn, "test.model", [], ["id", "name"], 500);
+    await searchRecords(makeQueue(), conn, "test.model", [], ["id", "name"], 500);
 
     expect(fetchCalls.length).toBe(1);
     expect(fetchCalls[0].url).toContain("/search_read");
@@ -513,7 +520,7 @@ describe("searchRecords", () => {
     });
     globalThis.fetch = fetchMock;
 
-    await searchRecords(conn, "test.model", [], ["id", "name"], 1);
+    await searchRecords(makeQueue(), conn, "test.model", [], ["id", "name"], 1);
 
     expect(fetchCalls.length).toBe(1);
     expect(fetchCalls[0].url).toContain("/search_read");
@@ -1151,7 +1158,7 @@ describe("countRecords", () => {
     });
     globalThis.fetch = fetchMock;
 
-    const res = await countRecords(conn, "project.task", [["active", "=", true]]);
+    const res = await countRecords(makeQueue(), conn, "project.task", [["active", "=", true]]);
 
     expect(fetchCalls.length).toBe(1);
     expect(fetchCalls[0].url).toContain("/project.task/search_count");
@@ -1166,7 +1173,7 @@ describe("countRecords", () => {
 
     let error: Error | undefined;
     try {
-      await countRecords(conn, "  ", []);
+      await countRecords(makeQueue(), conn, "  ", []);
     } catch (err) {
       error = err as Error;
     }
@@ -1187,6 +1194,7 @@ describe("resources", () => {
   async function buildAgent() {
     const AgentCtor = McpAgent as any;
     const agent = new AgentCtor();
+    agent.odooQueue = makeQueue();
     agent.props = connProps;
     await agent.init();
     return agent;
