@@ -3,6 +3,8 @@ import { McpAgent, type Env, type Props } from "./server";
 export { callOdoo } from "./odoo";
 export { OdooQueue } from "./odoo-queue";
 export { pickSmartFields, searchRecords, escapeHtml, countRecords } from "./tools/shared";
+export { normalizeRecord, normalizeRecords } from "./normalizer";
+export type { OdooFieldMeta, FieldsMeta, NormalizeOptions } from "./normalizer";
 export { McpAgent };
 
 export default {
