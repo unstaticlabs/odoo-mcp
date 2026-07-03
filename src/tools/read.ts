@@ -1,10 +1,10 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { callOdoo } from "../odoo";
+import type { OdooQueue } from "../odoo-queue";
 import type { Props } from "../server";
 import { CORE_MODEL_ALLOWLIST, DEFAULT_TASK_FIELDS, mcpError, requireConnection, searchRecords } from "./shared";
 
-export function registerReadTools(server: McpServer, getProps: () => Props | undefined) {
+export function registerReadTools(server: McpServer, getProps: () => Props | undefined, queue: OdooQueue) {
   server.registerTool(
     "projects.list_tasks",
     {
@@ -16,7 +16,7 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
     },
     async ({ domain, fields }) => {
       try {
-        const tasks = await searchRecords(requireConnection(getProps()), "project.task", domain, fields, 100);
+        const tasks = await searchRecords(queue, requireConnection(getProps()), "project.task", domain, fields, 100);
         return { content: [{ type: "text" as const, text: JSON.stringify(tasks, null, 2) }] };
       } catch (err) {
         return mcpError(err instanceof Error ? err.message : "projects.list_tasks failed");
@@ -33,7 +33,7 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
     async () => {
       const conn = requireConnection(getProps());
       try {
-        const rows = await searchRecords(conn, "ir.model", [], ["model", "name"], 100);
+        const rows = await searchRecords(queue, conn, "ir.model", [], ["model", "name"], 100);
         return { content: [{ type: "text" as const, text: JSON.stringify(rows, null, 2) }] };
       } catch {
         const fallback = CORE_MODEL_ALLOWLIST.map((model) => ({ model }));
@@ -56,7 +56,7 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
     async ({ model, domain, fields, limit }) => {
       if (!model || !model.trim()) return mcpError("model must be a non-empty string");
       try {
-        const rows = await searchRecords(requireConnection(getProps()), model, domain, fields, limit);
+        const rows = await searchRecords(queue, requireConnection(getProps()), model, domain, fields, limit);
         return { content: [{ type: "text" as const, text: JSON.stringify(rows, null, 2) }] };
       } catch (err) {
         return mcpError(err instanceof Error ? err.message : "search_records failed");
@@ -80,7 +80,7 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
     async ({ model, domain, groupby, aggregates, lazy, orderby }) => {
       if (!model || !model.trim()) return mcpError("model must be a non-empty string");
       try {
-        const rows = await callOdoo(requireConnection(getProps()), model, "read_group", {
+        const rows = await queue.enqueue(requireConnection(getProps()), model, "read_group", {
           domain,
           fields: aggregates,
           groupby,
@@ -109,6 +109,7 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
       if (!Number.isInteger(record_id) || record_id <= 0) return mcpError("record_id must be a positive integer");
       try {
         const rows = (await searchRecords(
+          queue,
           requireConnection(getProps()),
           model,
           [["id", "=", record_id]],
@@ -136,7 +137,7 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
     async ({ model }) => {
       if (!model || !model.trim()) return mcpError("model must be a non-empty string");
       try {
-        const fields = await callOdoo(requireConnection(getProps()), model, "fields_get", {
+        const fields = await queue.enqueue(requireConnection(getProps()), model, "fields_get", {
           attributes: ["type", "string"]
         });
         return { content: [{ type: "text" as const, text: JSON.stringify(fields, null, 2) }] };

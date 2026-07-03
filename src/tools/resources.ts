@@ -1,9 +1,9 @@
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { callOdoo } from "../odoo";
+import type { OdooQueue } from "../odoo-queue";
 import type { Props } from "../server";
 import { countRecords, parseDomainParam, requireConnection, searchRecords } from "./shared";
 
-export function registerResourceTemplates(server: McpServer, getProps: () => Props | undefined) {
+export function registerResourceTemplates(server: McpServer, getProps: () => Props | undefined, queue: OdooQueue) {
   server.registerResource(
     "record",
     new ResourceTemplate("odoo://{model}/record/{id}", { list: undefined }),
@@ -16,6 +16,7 @@ export function registerResourceTemplates(server: McpServer, getProps: () => Pro
       if (!Number.isInteger(id) || id <= 0) throw new Error("id must be a positive integer");
 
       const rows = (await searchRecords(
+        queue,
         requireConnection(getProps()),
         model,
         [["id", "=", id]],
@@ -49,7 +50,7 @@ export function registerResourceTemplates(server: McpServer, getProps: () => Pro
       const limitNum = limitParam ? Number(limitParam) : 10;
       const limit = Number.isInteger(limitNum) && limitNum > 0 ? limitNum : 10;
 
-      const rows = await searchRecords(requireConnection(getProps()), model, domain, fields, limit);
+      const rows = await searchRecords(queue, requireConnection(getProps()), model, domain, fields, limit);
       return { contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify(rows, null, 2) }] };
     }
   );
@@ -63,7 +64,7 @@ export function registerResourceTemplates(server: McpServer, getProps: () => Pro
       if (!model.trim()) throw new Error("model must be a non-empty string");
 
       const domain = parseDomainParam(uri);
-      const count = await countRecords(requireConnection(getProps()), model, domain);
+      const count = await countRecords(queue, requireConnection(getProps()), model, domain);
       return { contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify({ count }, null, 2) }] };
     }
   );
@@ -76,7 +77,7 @@ export function registerResourceTemplates(server: McpServer, getProps: () => Pro
       const model = typeof variables.model === "string" ? variables.model : "";
       if (!model.trim()) throw new Error("model must be a non-empty string");
 
-      const fields = await callOdoo(requireConnection(getProps()), model, "fields_get", {
+      const fields = await queue.enqueue(requireConnection(getProps()), model, "fields_get", {
         attributes: ["type", "string"]
       });
       return { contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify(fields, null, 2) }] };
