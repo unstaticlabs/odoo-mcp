@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { OdooQueue } from "../odoo-queue";
 import type { Props } from "../server";
-import { CORE_MODEL_ALLOWLIST, DEFAULT_TASK_FIELDS, mcpError, requireConnection, searchRecords } from "./shared";
+import { CORE_MODEL_ALLOWLIST, DEFAULT_TASK_FIELDS, countRecords, mcpError, requireConnection, searchRecords } from "./shared";
 
 export function registerReadTools(server: McpServer, getProps: () => Props | undefined, queue: OdooQueue) {
   server.registerTool(
@@ -50,13 +50,15 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
         model: z.string(),
         domain: z.array(z.any()).default([]),
         fields: z.array(z.string()).nullable().default(null),
-        limit: z.number().int().min(1).max(100).default(10)
+        limit: z.number().int().min(1).max(100).default(10),
+        order: z.string().optional(),
+        offset: z.number().int().min(0).default(0)
       }
     },
-    async ({ model, domain, fields, limit }) => {
+    async ({ model, domain, fields, limit, order, offset }) => {
       if (!model || !model.trim()) return mcpError("model must be a non-empty string");
       try {
-        const rows = await searchRecords(queue, requireConnection(getProps()), model, domain, fields, limit);
+        const rows = await searchRecords(queue, requireConnection(getProps()), model, domain, fields, limit, order, offset);
         return { content: [{ type: "text" as const, text: JSON.stringify(rows, null, 2) }] };
       } catch (err) {
         return mcpError(err instanceof Error ? err.message : "search_records failed");
@@ -65,9 +67,36 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
   );
 
   server.registerTool(
+    "search_count",
+    {
+      description: "Read-only: model-agnostic Odoo search_count — count records matching a domain without fetching them.",
+      inputSchema: {
+        model: z.string(),
+        domain: z.array(z.any()).default([])
+      }
+    },
+    async ({ model, domain }) => {
+      if (!model || !model.trim()) return mcpError("model must be a non-empty string");
+      try {
+        const count = await countRecords(queue, requireConnection(getProps()), model, domain);
+        return { content: [{ type: "text" as const, text: JSON.stringify({ count }) }] };
+      } catch (err) {
+        return mcpError(err instanceof Error ? err.message : "search_count failed");
+      }
+    }
+  );
+
+  server.registerTool(
     "aggregate_records",
     {
-      description: "Read-only: model-agnostic Odoo read_group (grouped aggregation).",
+      description:
+        "Read-only: model-agnostic Odoo read_group (grouped aggregation). `groupby` and `aggregates` entries " +
+        "follow Odoo's read_group `field:agg` syntax (e.g. `amount_total:sum`, `invoice_date:month`, `__count`).\n\n" +
+        "Example 1 — group vendor bills by month:\n" +
+        '{ "model": "account.move", "domain": [["move_type", "=", "in_invoice"]], ' +
+        '"groupby": ["invoice_date:month"], "aggregates": ["amount_total:sum"] }\n\n' +
+        "Example 2 — count expenses per employee:\n" +
+        '{ "model": "hr.expense", "groupby": ["employee_id"], "aggregates": ["__count"] }',
       inputSchema: {
         model: z.string(),
         domain: z.array(z.any()).default([]),
