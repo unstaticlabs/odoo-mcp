@@ -57,6 +57,22 @@ export function normalizeRecord(record: Record<string, unknown>, fieldsMeta?: Fi
   return result;
 }
 
+/**
+ * Best-effort synthetic status derived from a raw (pre-normalization) Odoo
+ * record's `state` or `stage_id` field. `state` takes precedence since it's
+ * the more common workflow field; `stage_id` arrives as Odoo's [id, "Label"]
+ * many2one tuple, from which the label is extracted.
+ */
+export function deriveWorkflowStatus(record: Record<string, unknown>): string | null {
+  const state = record?.state;
+  if (typeof state === "string" && state) return state;
+
+  const stageId = record?.stage_id;
+  if (isMany2OneTuple(stageId)) return stageId[1] || null;
+
+  return null;
+}
+
 export function normalizeRecords(
   records: Record<string, unknown>[],
   fieldsMeta?: FieldsMeta,

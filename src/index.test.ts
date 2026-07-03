@@ -32,6 +32,7 @@ const {
   countRecords,
   normalizeRecord,
   normalizeRecords,
+  deriveWorkflowStatus,
   McpAgent,
   default: handler
 } = await import("./index");
@@ -557,6 +558,39 @@ describe("normalizer", () => {
 
   test("normalizeRecords: empty records array returns empty array", () => {
     expect(normalizeRecords([])).toEqual([]);
+  });
+});
+
+describe("deriveWorkflowStatus", () => {
+  test("record with state string returns the state", () => {
+    expect(deriveWorkflowStatus({ state: "draft" })).toBe("draft");
+  });
+
+  test("record with stage_id tuple returns the label", () => {
+    expect(deriveWorkflowStatus({ stage_id: [3, "Done"] })).toBe("Done");
+  });
+
+  test("state takes precedence over stage_id when both are present", () => {
+    expect(deriveWorkflowStatus({ state: "confirmed", stage_id: [3, "Done"] })).toBe("confirmed");
+  });
+
+  test("record with neither field returns null", () => {
+    expect(deriveWorkflowStatus({ id: 1 })).toBeNull();
+  });
+
+  test("falsy state values (empty string, 0, false) return null", () => {
+    expect(deriveWorkflowStatus({ state: "" })).toBeNull();
+    expect(deriveWorkflowStatus({ state: 0 })).toBeNull();
+    expect(deriveWorkflowStatus({ state: false })).toBeNull();
+  });
+
+  test("stage_id false (Odoo's no-relation convention) returns null", () => {
+    expect(deriveWorkflowStatus({ stage_id: false })).toBeNull();
+  });
+
+  test("stage_id malformed (not a [id, label] tuple) returns null", () => {
+    expect(deriveWorkflowStatus({ stage_id: [3] })).toBeNull();
+    expect(deriveWorkflowStatus({ stage_id: "Done" })).toBeNull();
   });
 });
 

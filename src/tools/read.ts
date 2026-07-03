@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { OdooQueue } from "../odoo-queue";
 import type { Props } from "../server";
 import { CORE_MODEL_ALLOWLIST, DEFAULT_TASK_FIELDS, countRecords, mcpError, requireConnection, searchRecords } from "./shared";
+import { deriveWorkflowStatus } from "../normalizer";
 
 export function registerReadTools(server: McpServer, getProps: () => Props | undefined, queue: OdooQueue) {
   server.registerTool(
@@ -154,7 +155,10 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
         if (!Array.isArray(rows) || rows.length === 0) {
           return mcpError(`No ${model} record found for id ${record_id}`);
         }
-        return { content: [{ type: "text" as const, text: JSON.stringify(rows[0], null, 2) }] };
+        const record = rows[0] as Record<string, unknown>;
+        const workflowStatus = deriveWorkflowStatus(record);
+        const result = workflowStatus != null ? { ...record, _workflow_status: workflowStatus } : record;
+        return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
       } catch (err) {
         return mcpError(err instanceof Error ? err.message : "get_record failed");
       }
