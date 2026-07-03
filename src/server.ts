@@ -1,5 +1,6 @@
 import { McpAgent as McpAgentBase } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 import { callOdoo } from "./odoo";
 import { OdooQueue } from "./odoo-queue";
 import { registerReadTools } from "./tools/read";
@@ -8,6 +9,10 @@ import { registerWriteTools } from "./tools/write";
 
 export interface Env {
   McpAgent: DurableObjectNamespace<McpAgent>;
+  /** Token/grant storage for the ChatGPT OAuth shim (workers-oauth-provider). */
+  OAUTH_KV: KVNamespace;
+  /** Injected by OAuthProvider into handlers it invokes; absent on the raw header path. */
+  OAUTH_PROVIDER: OAuthHelpers;
 }
 
 export interface Props extends Record<string, unknown> {

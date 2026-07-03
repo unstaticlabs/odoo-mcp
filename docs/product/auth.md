@@ -71,25 +71,70 @@ client's MCP server env block), not from an HTTP header. In this mode the key
 - **Redaction:** the key (and any Odoo secrets) must be redacted from all logs
   and error surfaces. Never echo the `Authorization` header or a raw Odoo key
   into observability, tool output, or error messages.
-- **No persistence:** the server keeps no user store and writes no credential to
-  KV/D1/DO storage. The only DO is the rate limiter, which is keyed by Odoo
-  *origin* (not by key) and stores no secrets.
+- **No persistence on the header path:** the server keeps no user store and
+  writes no credential to KV/D1/DO storage for header-authenticated requests.
+  The one exception is the ChatGPT OAuth shim below, which stores credentials
+  **encrypted** in KV because ChatGPT cannot send headers.
 
-## The ChatGPT caveat (the one edge case)
+## The ChatGPT OAuth shim (implemented)
 
 Claude clients (Claude Code, Claude desktop/web) can pass a static API-key
 header, so BYO-key works for them directly.
 
-**ChatGPT's remote-connector auth may not support a static API-key header.** Its
-connector model leans on OAuth. If ChatGPT cannot pass the `Authorization: Bearer
-<odoo-api-key>` header we require, then — and *only* then — we add a **thin OAuth
-shim on that path**: a minimal OAuth front that, after the user authorizes,
-resolves back to a specific Odoo key/instance and injects it into the same
-per-request BYO-key flow. Everything downstream of the shim is unchanged.
+ChatGPT's remote-connector UI (Settings → Apps & Connectors → Developer Mode)
+cannot set static headers — its auth model is OAuth-only. Since Odoo has no
+OAuth endpoint we can delegate to, the Worker now carries a **thin OAuth 2.1
+shim scoped to that path**: a credential vault behind an OAuth-shaped front
+door, built on
+[`@cloudflare/workers-oauth-provider`](https://github.com/cloudflare/workers-oauth-provider).
 
-This OAuth shim is **explicitly out of scope for v1** and is only built if
-ChatGPT compatibility actually requires it. See the branch in
-[`roadmap.md`](./roadmap.md).
+How it works:
+
+1. ChatGPT discovers the server via `/.well-known/oauth-authorization-server`,
+   registers itself dynamically (`/register`, RFC 7591), and starts the
+   authorization-code + PKCE flow.
+2. `/authorize` is a hosted form (served by the Worker, no frontend build)
+   where the user pastes **their own** Odoo URL, database, and API key — the
+   same three values the header contract carries.
+3. The shim validates the credentials with a real lightweight Odoo call
+   (`res.users` `fields_get`) before accepting them; Odoo rejections fail the
+   flow with a clear, redacted error.
+4. On success the credentials become the grant's `props` and the standard code
+   exchange completes at `/token`. Access tokens expire after **1 hour**;
+   refresh tokens (30 days) let ChatGPT renew silently.
+5. On each token-authenticated `/mcp` request, the provider resolves the token
+   back to the stored credentials and injects them as the **same `Props`
+   object** the header path builds. Everything downstream — `McpAgent`, every
+   tool — is identical and cannot tell the two auth paths apart.
+
+Requests to `/mcp` that carry any `X-Odoo-*` header take the raw BYO-key path
+exactly as before; requests without them are treated as OAuth. Both paths
+coexist on the same endpoint.
+
+### Stored-credential security
+
+The OAuth path is the *only* place `odoo-mcp` persists a credential, and it is
+never stored in plaintext:
+
+- **Encryption at rest:** `workers-oauth-provider` end-to-end encrypts grant
+  `props` (the Odoo URL/db/key) in the `OAUTH_KV` namespace. The AES key
+  material is wrapped by the access/refresh token itself, so the stored blob
+  can only be decrypted by a request that presents the actual token — neither
+  a KV dump nor the Worker at rest can recover the key. Token secrets
+  themselves are stored only as hashes.
+- **Scope discipline:** one grant maps to exactly one Odoo credential set.
+  There is still no user store, no scopes/permissions model, no session system
+  — Odoo's per-user permissions remain the entire authorization layer.
+- **Redaction:** the plaintext key exists only inside the `/authorize` form
+  POST → validation call → grant creation. It is never logged, echoed into
+  error pages, or re-filled into the form after a failed attempt.
+- **Revocation:** delete the grant from KV and the tokens die with it (their
+  decryption key material is gone). Manual path:
+  `npx wrangler kv key list --binding OAUTH_KV --remote --prefix grant:` then
+  `npx wrangler kv key delete --binding OAUTH_KV --remote "<grant key>"`.
+  Programmatic path: `env.OAUTH_PROVIDER.listGrants(userId)` /
+  `revokeGrant(grantId)`. Re-authorizing from ChatGPT also revokes prior
+  grants for the same user+client automatically.
 
 ## Rejected alternative: one service account + OAuth scopes
 

@@ -52,20 +52,27 @@ Odoo, and a read-only Odoo key is correctly refused the write by Odoo itself.
   project/booking).
 - Same infra; billing is just more Odoo models behind the same gateway.
 
-## Branch — OAuth only if ChatGPT needs it
+## Branch — OAuth only if ChatGPT needs it ✅ (shipped)
 
-Not a numbered milestone; a **conditional** branch triggered by M1's ChatGPT
-connection attempt.
+The condition fired: ChatGPT's Developer-Mode connector UI only takes a name +
+URL — no static headers — so the shim was built. What shipped:
 
-- **Condition:** ChatGPT's remote connector cannot pass a static API-key header,
-  so BYO-key-over-header doesn't work for it.
-- **Action:** add a **thin OAuth shim on the ChatGPT path only**. After OAuth,
-  resolve back to a specific Odoo key/instance and inject it into the existing
-  per-request BYO-key flow. No other client is affected; the core stays
-  stateless/BYO-key.
-- **Non-goal:** a general OAuth + scopes system. We do not build a user store or
-  scope model. The shim is the minimum needed to satisfy one client's transport
-  auth.
+- OAuth 2.1 authorization-code + PKCE flow via
+  `@cloudflare/workers-oauth-provider`: `/authorize`, `/token`, `/register`
+  (dynamic client registration), and `/.well-known/*` discovery metadata.
+- `/authorize` is a hosted form where the user pastes their own Odoo
+  URL/db/API key; the shim verifies them with a real `res.users` `fields_get`
+  call before completing the grant.
+- Credentials are stored **end-to-end encrypted** as grant props in a new
+  `OAUTH_KV` namespace; token-authenticated `/mcp` requests resolve back to
+  the exact same `Props` object the header path builds. Access tokens live
+  1 hour, refresh tokens 30 days. See [`auth.md`](./auth.md) for the security
+  model and revocation.
+- The raw header path is untouched: any `/mcp` request with an `X-Odoo-*`
+  header bypasses the shim entirely. Tools remain auth-path-agnostic.
+- **Non-goal held:** no user store, no scopes/permissions model, no session
+  system — the shim maps one OAuth grant to one Odoo credential set, nothing
+  more.
 
 ## Cross-cutting — CI gate (dogfood)
 

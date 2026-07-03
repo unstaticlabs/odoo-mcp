@@ -17,6 +17,11 @@ mock.module("agents/mcp", () => {
 mock.module("agents", () => {
   return {};
 });
+// workers-oauth-provider imports the workerd-only "cloudflare:workers" module
+// solely for the WorkerEntrypoint base class; a stub suffices under bun.
+mock.module("cloudflare:workers", () => {
+  return { WorkerEntrypoint: class WorkerEntrypoint {} };
+});
 
 const {
   callOdoo,
@@ -246,8 +251,9 @@ describe("default fetch handler", () => {
     "X-Odoo-Db": "my-db"
   };
 
+  // POST: real MCP traffic is POST; GET /mcp is deliberately 405 (no push stream).
   function makeRequest(headers: Record<string, string>, path = "/mcp") {
-    return new Request(`http://worker.example.com${path}`, { headers });
+    return new Request(`http://worker.example.com${path}`, { method: "POST", headers });
   }
 
   test("returns 404 for non-/mcp paths", async () => {
@@ -1737,5 +1743,348 @@ describe("resources", () => {
     for (const method of calledMethods) {
       expect(["create", "write", "unlink"]).not.toContain(method);
     }
+  });
+});
+
+describe("OAuth shim (ChatGPT path)", () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  /** Minimal in-memory KV faithful to the calls workers-oauth-provider makes. */
+  function makeKV() {
+    const store = new Map<string, string>();
+    return {
+      async get(key: string, opts?: any) {
+        const value = store.get(key) ?? null;
+        if (value === null) return null;
+        const type = typeof opts === "string" ? opts : opts?.type;
+        return type === "json" ? JSON.parse(value) : value;
+      },
+      async put(key: string, value: string, _opts?: any) {
+        store.set(key, value);
+      },
+      async delete(key: string) {
+        store.delete(key);
+      },
+      async list(opts?: any) {
+        const prefix = opts?.prefix ?? "";
+        const keys = [...store.keys()].filter((k) => k.startsWith(prefix)).map((name) => ({ name }));
+        return { keys, list_complete: true };
+      },
+      _store: store
+    };
+  }
+
+  function makeCtx() {
+    return { waitUntil: () => {}, passThroughOnException: () => {}, props: undefined } as any;
+  }
+
+  function makeEnv() {
+    return { OAUTH_KV: makeKV() } as any;
+  }
+
+  async function pkcePair() {
+    const verifier = "test-verifier-0123456789-0123456789-0123456789";
+    const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
+    const challenge = btoa(String.fromCharCode(...new Uint8Array(digest)))
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/, "");
+    return { verifier, challenge };
+  }
+
+  const ORIGIN = "http://worker.example.com";
+  const REDIRECT_URI = "https://chatgpt.com/connector_platform_oauth_redirect";
+
+  async function registerClient(env: any) {
+    const res = await handler.fetch(
+      new Request(`${ORIGIN}/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          client_name: "ChatGPT",
+          redirect_uris: [REDIRECT_URI],
+          token_endpoint_auth_method: "none",
+          grant_types: ["authorization_code", "refresh_token"],
+          response_types: ["code"]
+        })
+      }),
+      env,
+      makeCtx()
+    );
+    expect(res.status).toBe(201);
+    return (await res.json()) as any;
+  }
+
+  async function getAuthorizeForm(env: any, clientId: string, challenge: string) {
+    const authorizeUrl =
+      `${ORIGIN}/authorize?response_type=code&client_id=${encodeURIComponent(clientId)}` +
+      `&redirect_uri=${encodeURIComponent(REDIRECT_URI)}&state=xyz-state&scope=odoo` +
+      `&code_challenge=${challenge}&code_challenge_method=S256`;
+    const res = await handler.fetch(new Request(authorizeUrl), env, makeCtx());
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    const match = html.match(/name="oauth_req" value="([^"]+)"/);
+    expect(match).not.toBeNull();
+    return { html, oauthReq: match![1] };
+  }
+
+  function odooValidationFetchMock() {
+    return mock(async (url: string, init: any) => {
+      if (String(url).includes("/res.users/fields_get")) {
+        return new Response(JSON.stringify({ result: { login: { type: "char" } } }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+  }
+
+  async function submitAuthorizeForm(env: any, oauthReq: string, creds: Record<string, string>) {
+    const body = new URLSearchParams({ oauth_req: oauthReq, ...creds });
+    return handler.fetch(
+      new Request(`${ORIGIN}/authorize`, { method: "POST", body }),
+      env,
+      makeCtx()
+    );
+  }
+
+  test("serves OAuth discovery metadata with authorize/token/register endpoints", async () => {
+    const env = makeEnv();
+    const res = await handler.fetch(
+      new Request(`${ORIGIN}/.well-known/oauth-authorization-server`),
+      env,
+      makeCtx()
+    );
+    expect(res.status).toBe(200);
+    const meta = (await res.json()) as any;
+    expect(meta.authorization_endpoint).toBe(`${ORIGIN}/authorize`);
+    expect(meta.token_endpoint).toBe(`${ORIGIN}/token`);
+    expect(meta.registration_endpoint).toBe(`${ORIGIN}/register`);
+    expect(meta.code_challenge_methods_supported).toContain("S256");
+  });
+
+  test("full flow: register → authorize form → Odoo validation → code → token → /mcp props", async () => {
+    const env = makeEnv();
+    const { verifier, challenge } = await pkcePair();
+    const { client_id } = await registerClient(env);
+
+    const { html, oauthReq } = await getAuthorizeForm(env, client_id, challenge);
+    expect(html).toContain("ChatGPT");
+    expect(html).toContain('name="odoo_url"');
+    expect(html).toContain('name="odoo_db"');
+    expect(html).toContain('name="odoo_api_key"');
+
+    const fetchMock = odooValidationFetchMock();
+    globalThis.fetch = fetchMock as any;
+
+    const redirectRes = await submitAuthorizeForm(env, oauthReq, {
+      odoo_url: "https://acme.odoo.com",
+      odoo_db: "acme-prod",
+      odoo_api_key: "shim-secret-key-424242"
+    });
+    expect(redirectRes.status).toBe(302);
+    const location = new URL(redirectRes.headers.get("Location")!);
+    expect(location.origin + location.pathname).toBe(REDIRECT_URI);
+    expect(location.searchParams.get("state")).toBe("xyz-state");
+    const code = location.searchParams.get("code");
+    expect(code).toBeTruthy();
+
+    // The validation call hit Odoo with the submitted credentials.
+    const validationCall = fetchMock.mock.calls[0] as any;
+    expect(String(validationCall[0])).toBe("https://acme.odoo.com/json/2/res.users/fields_get");
+    expect(validationCall[1].headers.Authorization).toBe("Bearer shim-secret-key-424242");
+    expect(validationCall[1].headers["X-Odoo-Database"]).toBe("acme-prod");
+
+    globalThis.fetch = originalFetch;
+
+    const tokenRes = await handler.fetch(
+      new Request(`${ORIGIN}/token`, {
+        method: "POST",
+        body: new URLSearchParams({
+          grant_type: "authorization_code",
+          code: code!,
+          redirect_uri: REDIRECT_URI,
+          client_id,
+          code_verifier: verifier
+        })
+      }),
+      env,
+      makeCtx()
+    );
+    expect(tokenRes.status).toBe(200);
+    const tokens = (await tokenRes.json()) as any;
+    expect(tokens.access_token).toBeTruthy();
+    expect(tokens.refresh_token).toBeTruthy();
+    expect(tokens.expires_in).toBe(3600);
+
+    // A token-authenticated /mcp request resolves back to the stored Odoo
+    // credentials as the exact same Props shape the header path builds.
+    const mcpRes = await handler.fetch(
+      new Request(`${ORIGIN}/mcp`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${tokens.access_token}` }
+      }),
+      env,
+      makeCtx()
+    );
+    expect(mcpRes.status).toBe(200);
+    const echoed = (await mcpRes.json()) as any;
+    expect(echoed.props).toEqual({
+      odooBaseUrl: "https://acme.odoo.com",
+      odooDb: "acme-prod",
+      odooApiKey: "shim-secret-key-424242"
+    });
+
+    // Refresh grant issues a fresh usable access token.
+    const refreshRes = await handler.fetch(
+      new Request(`${ORIGIN}/token`, {
+        method: "POST",
+        body: new URLSearchParams({
+          grant_type: "refresh_token",
+          refresh_token: tokens.refresh_token,
+          client_id
+        })
+      }),
+      env,
+      makeCtx()
+    );
+    expect(refreshRes.status).toBe(200);
+    const refreshed = (await refreshRes.json()) as any;
+    expect(refreshed.access_token).toBeTruthy();
+    expect(refreshed.access_token).not.toBe(tokens.access_token);
+  });
+
+  test("stored grant data in KV never contains the plaintext Odoo API key", async () => {
+    const env = makeEnv();
+    const { verifier, challenge } = await pkcePair();
+    const { client_id } = await registerClient(env);
+    const { oauthReq } = await getAuthorizeForm(env, client_id, challenge);
+
+    globalThis.fetch = odooValidationFetchMock() as any;
+    const redirectRes = await submitAuthorizeForm(env, oauthReq, {
+      odoo_url: "https://acme.odoo.com",
+      odoo_db: "acme-prod",
+      odoo_api_key: "plaintext-should-never-persist-987"
+    });
+    expect(redirectRes.status).toBe(302);
+    globalThis.fetch = originalFetch;
+
+    for (const [key, value] of (env.OAUTH_KV as any)._store.entries()) {
+      expect(`${key}=${value}`).not.toContain("plaintext-should-never-persist-987");
+    }
+  });
+
+  test("rejects the flow when Odoo refuses the credentials, without echoing the key", async () => {
+    const env = makeEnv();
+    const { challenge } = await pkcePair();
+    const { client_id } = await registerClient(env);
+    const { oauthReq } = await getAuthorizeForm(env, client_id, challenge);
+
+    globalThis.fetch = mock(async () =>
+      new Response(JSON.stringify({ error: { message: "Invalid apikey" } }), { status: 401 })
+    ) as any;
+
+    const res = await submitAuthorizeForm(env, oauthReq, {
+      odoo_url: "https://acme.odoo.com",
+      odoo_db: "acme-prod",
+      odoo_api_key: "bad-secret-key-13371337"
+    });
+    const html = await res.text();
+
+    expect(res.status).toBe(400);
+    expect(html).toContain("rejected these credentials");
+    expect(html).not.toContain("bad-secret-key-13371337");
+    // Re-renders the form so the user can retry without restarting the flow.
+    expect(html).toContain('name="oauth_req"');
+  });
+
+  test("rejects a non-http(s) Odoo URL without calling Odoo", async () => {
+    const env = makeEnv();
+    const { challenge } = await pkcePair();
+    const { client_id } = await registerClient(env);
+    const { oauthReq } = await getAuthorizeForm(env, client_id, challenge);
+
+    const fetchMock = mock(() => Promise.reject(new Error("should not be called")));
+    globalThis.fetch = fetchMock as any;
+
+    const res = await submitAuthorizeForm(env, oauthReq, {
+      odoo_url: "ftp://acme.odoo.com",
+      odoo_db: "acme-prod",
+      odoo_api_key: "some-key"
+    });
+
+    expect(res.status).toBe(400);
+    expect(await res.text()).toContain("valid http(s) URL");
+    expect(fetchMock.mock.calls.length).toBe(0);
+  });
+
+  test("tampered oauth_req is rejected", async () => {
+    const env = makeEnv();
+    const res = await submitAuthorizeForm(env, "not-valid-base64-json", {
+      odoo_url: "https://acme.odoo.com",
+      odoo_db: "acme-prod",
+      odoo_api_key: "some-key"
+    });
+    expect(res.status).toBe(400);
+  });
+
+  test("GET /mcp is declined with 405 on both auth paths (no standalone SSE stream)", async () => {
+    const env = makeEnv();
+    const viaToken = await handler.fetch(
+      new Request(`${ORIGIN}/mcp`, { headers: { Authorization: "Bearer some-token" } }),
+      env,
+      makeCtx()
+    );
+    expect(viaToken.status).toBe(405);
+    expect(viaToken.headers.get("Allow")).toBe("POST, DELETE");
+
+    const viaHeaders = await handler.fetch(
+      new Request(`${ORIGIN}/mcp`, {
+        headers: {
+          Authorization: "Bearer raw-key",
+          "X-Odoo-Url": "https://acme.odoo.com",
+          "X-Odoo-Db": "acme-prod"
+        }
+      }),
+      {} as any,
+      makeCtx()
+    );
+    expect(viaHeaders.status).toBe(405);
+  });
+
+  test("/mcp with an invalid bearer token and no X-Odoo headers returns 401", async () => {
+    const env = makeEnv();
+    const res = await handler.fetch(
+      new Request(`${ORIGIN}/mcp`, {
+        method: "POST",
+        headers: { Authorization: "Bearer garbage-token" }
+      }),
+      env,
+      makeCtx()
+    );
+    expect(res.status).toBe(401);
+    expect(await res.text()).not.toContain("garbage-token");
+  });
+
+  test("/mcp with X-Odoo headers stays on the raw header path and never touches the OAuth provider", async () => {
+    // env deliberately has no OAUTH_KV: the header path must not need it.
+    const res = await handler.fetch(
+      new Request(`${ORIGIN}/mcp`, {
+        method: "POST",
+        headers: {
+          Authorization: "Bearer raw-header-key",
+          "X-Odoo-Url": "https://acme.odoo.com",
+          "X-Odoo-Db": "acme-prod"
+        }
+      }),
+      {} as any,
+      makeCtx()
+    );
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as any;
+    expect(json.props.odooApiKey).toBe("raw-header-key");
   });
 });

@@ -1,8 +1,9 @@
 # Testing the odoo-mcp server
 
 How to run and exercise the server **locally** and against a **deployed Cloudflare Worker**.
-All requests to `/mcp` need the three BYO-key headers (see the README):
-`Authorization: Bearer <odoo-api-key>`, `X-Odoo-Url`, `X-Odoo-Db`.
+Header-authenticated requests to `/mcp` need the three BYO-key headers (see the README):
+`Authorization: Bearer <odoo-api-key>`, `X-Odoo-Url`, `X-Odoo-Db`. Requests without any
+`X-Odoo-*` header go through the ChatGPT OAuth shim instead (section 3).
 
 ---
 
@@ -102,13 +103,6 @@ claude mcp add --transport http odoo https://<worker>.workers.dev/mcp \
   --header "X-Odoo-Db: your-db"
 ```
 
-### Connect ChatGPT (remote)
-
-Add a **custom connector / remote MCP server** pointing at `https://<worker>.workers.dev/mcp`.
-ChatGPT's connector UI is more restrictive about custom auth headers than Claude; if it can't
-send the BYO-key headers, a thin OAuth shim can be added for that path later (out of scope for
-now). See `docs/product/auth.md`.
-
 ### Verify the deploy
 
 Reuse the Node client from section 1(d) with the deployed URL — the outbound Odoo fetch is
@@ -116,8 +110,70 @@ reliable on the real Cloudflare edge (unlike local Miniflare), so calls return p
 
 ---
 
+## 3. The ChatGPT OAuth shim
+
+ChatGPT can't send custom headers, so it authenticates through the Worker's OAuth 2.1 shim
+(`/authorize`, `/token`, `/register`, `/.well-known/*`). See `docs/product/auth.md` for the
+design; `wrangler.jsonc` must have the `OAUTH_KV` binding.
+
+### a) MCP Inspector (test the OAuth flow without ChatGPT)
+
+```bash
+npx @modelcontextprotocol/inspector
+```
+
+In the Inspector UI: transport **Streamable HTTP**, URL `http://localhost:8787/mcp` (or the
+deployed URL), **no headers**, and click **Open Auth Settings → Quick OAuth Flow** (or just
+Connect — the Inspector detects the `401` + discovery metadata). A browser tab opens the
+Worker's `/authorize` page: paste your Odoo URL, database, and API key. The shim validates
+them against Odoo, redirects back, and the Inspector completes the token exchange. Then
+**List Tools** and try `search_records`.
+
+### b) Connect ChatGPT (Developer Mode)
+
+1. ChatGPT → **Settings → Apps & Connectors → Advanced settings → enable Developer Mode**.
+2. **Create connector**: name it, set the MCP server URL to
+   `https://<worker>.workers.dev/mcp`, authentication **OAuth**.
+3. ChatGPT registers itself dynamically and sends you to the `/authorize` form: enter your
+   Odoo URL, database, and API key.
+4. After the redirect the connector lists the tools. Verify with a read, e.g. ask ChatGPT to
+   "search project.task, limit 3" with the connector enabled.
+
+### c) Raw curl checks
+
+```bash
+# discovery metadata:
+curl -s https://<worker>.workers.dev/.well-known/oauth-authorization-server | jq .
+
+# /mcp without headers or token → 401 (OAuth challenge, not the header-path error):
+curl -s -o /dev/null -w "%{http_code}\n" -X POST https://<worker>.workers.dev/mcp \
+  -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+
+# GET /mcp → 405: the optional standalone SSE (server-push) stream is deliberately
+# not offered — this server never sends server-initiated messages, and agents@0.17.3
+# stalls subsequent POSTs in production while a standalone stream is open.
+curl -s -o /dev/null -w "%{http_code}\n" https://<worker>.workers.dev/mcp \
+  -H "Accept: text/event-stream"
+```
+
+### d) Revoke a stored credential
+
+```bash
+npx wrangler kv key list --binding OAUTH_KV --remote --prefix grant: | jq -r '.[].name'
+npx wrangler kv key delete --binding OAUTH_KV --remote "grant:<userId>:<grantId>"
+```
+
+Deleting the grant destroys the wrapped encryption key, so outstanding access/refresh tokens
+become useless immediately.
+
+---
+
 ## Security notes
 
-- Credentials arrive per request and are never logged, persisted, or echoed in errors.
-- Auth failures return `401` with a generic message (no header values).
-- Writes (`create`/`update`/`delete`) are limited by the caller's own Odoo permissions.
+- Header-path credentials arrive per request and are never logged, persisted, or echoed in
+  errors.
+- OAuth-path credentials are validated against Odoo once at `/authorize`, then stored
+  end-to-end encrypted in `OAUTH_KV` (decryptable only by presenting the issued token).
+- Auth failures return `401` with a generic message (no header values, no token echoes).
+- Writes (`create`/`update`/`delete`) are limited by the caller's own Odoo permissions on
+  both paths.

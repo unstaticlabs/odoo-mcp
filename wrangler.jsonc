@@ -4,6 +4,15 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-07-01",
   "compatibility_flags": ["nodejs_compat"],
+  "kv_namespaces": [
+    {
+      // Token/grant/client storage for the ChatGPT OAuth shim
+      // (@cloudflare/workers-oauth-provider). Odoo credentials inside grants
+      // are end-to-end encrypted; see docs/product/auth.md.
+      "binding": "OAUTH_KV",
+      "id": "87163e0f22e54140b5e87ed656844cc7"
+    }
+  ],
   "durable_objects": {
     "bindings": [
       {

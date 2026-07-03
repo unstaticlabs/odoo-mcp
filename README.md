@@ -6,8 +6,11 @@ MCP client) read and write Odoo data over a single remote endpoint.
 
 - **Transport:** Streamable HTTP at `/mcp` (via the Cloudflare Agents `McpAgent`).
 - **Auth:** **bring-your-own-key (BYO-key)** — each caller supplies their *own* Odoo URL +
-  API key per request, so Odoo's own per-user permissions are the authorization. The server
-  is stateless; no OAuth, no shared service account, no credential storage.
+  API key, so Odoo's own per-user permissions are the authorization. Clients that can set
+  static headers (Claude Code, Claude Desktop) send them per request; ChatGPT connects via a
+  built-in **OAuth shim** that collects the same credentials once and stores them encrypted
+  (see [docs/product/auth.md](docs/product/auth.md)). No shared service account, no scopes
+  model.
 - **API:** Odoo JSON-2 (`POST {url}/json/2/{model}/{method}`).
 
 > Status: Milestone 1+ — projects read core, model/field discovery, smart field selection,
@@ -15,7 +18,9 @@ MCP client) read and write Odoo data over a single remote endpoint.
 
 ## Connection: BYO-key headers
 
-Every request to `/mcp` must carry three headers (missing/malformed → `401`):
+For clients that can set static headers, every request to `/mcp` carries three headers
+(missing/malformed → `401`). Requests without any `X-Odoo-*` header are treated as OAuth
+(see [Connect ChatGPT](#connect-chatgpt-oauth) below).
 
 | Header | Value |
 |---|---|
@@ -78,12 +83,56 @@ claude mcp add --transport http odoo http://localhost:8787/mcp \
   --header "X-Odoo-Db: your-db"
 ```
 
+## Connect ChatGPT (OAuth)
+
+ChatGPT's connector UI can't set custom headers, so the Worker ships an OAuth 2.1 shim
+(authorization code + PKCE + dynamic client registration) on the same `/mcp` endpoint:
+
+1. Deploy the Worker (see below — the `OAUTH_KV` namespace must exist).
+2. In ChatGPT: **Settings → Apps & Connectors → Advanced settings → enable Developer Mode**,
+   then **Create connector**: give it a name and the server URL
+   `https://<worker>.workers.dev/mcp`, auth **OAuth**.
+3. ChatGPT redirects you to the Worker's hosted `/authorize` page. Paste your Odoo URL,
+   database, and API key — the shim verifies them against your Odoo before accepting.
+4. Back in ChatGPT, the connector shows the tool list; try a read tool (e.g. ask it to
+   search `project.task`).
+
+Your credentials are stored end-to-end encrypted in Workers KV and resolved per request —
+tools behave exactly as on the header path, limited by your own Odoo permissions. Token
+lifetime is 1 h (refresh 30 days). Revocation: delete the `grant:*` key via
+`npx wrangler kv key list/delete --binding OAUTH_KV --remote` (details in
+[docs/product/auth.md](docs/product/auth.md)).
+
+## Deploy
+
+```bash
+npm ci                # required — node_modules must actually be installed before bundling
+npx wrangler deploy
+```
+
+- `wrangler` must already be logged in (`npx wrangler whoami`; if not, `npx wrangler login`).
+- The header path is stateless/BYO-key, so there are no secrets or `.dev.vars` to set for a
+  deploy. The ChatGPT OAuth shim needs one resource: the **`OAUTH_KV`** KV namespace bound in
+  `wrangler.jsonc`. Deploying to a new account? Create it once with
+  `npx wrangler kv namespace create OAUTH_KV` and put the printed `id` into the
+  `kv_namespaces` entry.
+- If your Cloudflare login can reach **multiple accounts**, `wrangler deploy` needs to know
+  which one to use. `wrangler deploy` has no `--account-id` flag — set the account via the
+  `CLOUDFLARE_ACCOUNT_ID` env var instead (or add `"account_id"` to `wrangler.jsonc`):
+  ```bash
+  CLOUDFLARE_ACCOUNT_ID=<account-id> npx wrangler deploy
+  ```
+  Run `npx wrangler whoami` to list the account IDs your login can reach.
+- `wrangler.jsonc` declares the `McpAgent` Durable Object; the first deploy provisions it
+  automatically — no manual setup needed.
+- On success, wrangler prints the public URL: `https://<worker-name>.<subdomain>.workers.dev`.
+  The MCP endpoint is that URL + `/mcp`.
+
 ## Development
 
 - `npm run typecheck` — `tsc --noEmit`
 - `npx wrangler deploy --dry-run` — bundle check
 - CI gate: `.ci.json` (install → typecheck → deploy dry-run)
-- Deploy: `npx wrangler deploy`
 
 ## License
 
