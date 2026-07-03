@@ -11,3 +11,29 @@ automations:
     allowed_outcomes:
     - add_tag
     - comment
+    - set_priority
+    - move_stage
+    - escalate
+    - set_status
+    - create_activity
+    - remove_tag
+    - fail
+- id: mcp_build
+  name: Build (implementation) — odoo-mcp
+  trigger:
+    all:
+    - field: stage
+      eq: Build
+  actions:
+  - kind: capability
+    body: implementation
+    allowed_outcomes:
+    - open_pr
+    - comment
+    - commit
+    - link_artifact
+    - move_stage
+    - set_status
+    - create_activity
+    - escalate
+    - fail
