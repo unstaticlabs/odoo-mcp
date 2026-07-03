@@ -78,7 +78,7 @@ export function registerResourceTemplates(server: McpServer, getProps: () => Pro
       if (!model.trim()) throw new Error("model must be a non-empty string");
 
       const fields = await queue.enqueue(requireConnection(getProps()), model, "fields_get", {
-        attributes: ["type", "string"]
+        attributes: ["type", "string", "readonly", "required", "store", "selection", "relation", "help", "searchable", "sortable"]
       });
       return { contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify(fields, null, 2) }] };
     }

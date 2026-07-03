@@ -129,18 +129,21 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
   server.registerTool(
     "get_fields",
     {
-      description: "Read-only: get field schema (name, type, string label) for an Odoo model.",
+      description:
+        "Read-only: get field schema for an Odoo model. Fields with readonly=true cannot be written via update_record; selection lists the allowed values.",
       inputSchema: {
-        model: z.string()
+        model: z.string(),
+        fields: z.array(z.string()).nullable().default(null)
       }
     },
-    async ({ model }) => {
+    async ({ model, fields }) => {
       if (!model || !model.trim()) return mcpError("model must be a non-empty string");
       try {
-        const fields = await queue.enqueue(requireConnection(getProps()), model, "fields_get", {
-          attributes: ["type", "string"]
+        const result = await queue.enqueue(requireConnection(getProps()), model, "fields_get", {
+          attributes: ["type", "string", "readonly", "required", "store", "selection", "relation", "help", "searchable", "sortable"],
+          ...(fields && fields.length > 0 ? { allfields: fields } : {})
         });
-        return { content: [{ type: "text" as const, text: JSON.stringify(fields, null, 2) }] };
+        return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
       } catch (err) {
         return mcpError(err instanceof Error ? err.message : "get_fields failed");
       }
