@@ -146,4 +146,70 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
       }
     }
   );
+
+  server.registerTool(
+    "describe_database",
+    {
+      description:
+        "Read-only: summarize what this Odoo instance contains — installed modules, custom/Studio models, " +
+        "Studio-added fields, server actions, and automated actions. Costs one Odoo call per requested section " +
+        "(each call goes through the rate-limited queue, so requesting all 5 sections takes ~5x the per-call delay).",
+      inputSchema: {
+        include: z.array(z.enum(["modules", "custom_models", "studio_fields", "server_actions", "automations"])).optional()
+      }
+    },
+    async ({ include }) => {
+      const conn = requireConnection(getProps());
+      const sections = (include && include.length > 0 ? include : ALL_DESCRIBE_SECTIONS) as DescribeSection[];
+
+      const result: Record<string, unknown> = {};
+      for (const key of sections) {
+        const { model, domain, fields, limit } = DESCRIBE_SECTIONS[key];
+        try {
+          const rows = (await queue.enqueue(conn, model, "search_read", { domain, fields, limit })) as unknown[];
+          result[key] = { count: rows.length, records: rows };
+        } catch (err) {
+          result[key] = { error: err instanceof Error ? err.message : `${key} failed` };
+        }
+      }
+
+      return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+    }
+  );
 }
+
+const DESCRIBE_SECTIONS = {
+  modules: {
+    model: "ir.module.module",
+    domain: [["state", "=", "installed"]],
+    fields: ["name", "shortdesc"],
+    limit: 200
+  },
+  custom_models: {
+    model: "ir.model",
+    domain: ["|", ["state", "=", "manual"], ["model", "like", "x_%"]],
+    fields: ["model", "name"],
+    limit: 100
+  },
+  studio_fields: {
+    model: "ir.model.fields",
+    domain: [["name", "like", "x_studio%"]],
+    fields: ["model", "name", "ttype", "field_description"],
+    limit: 100
+  },
+  server_actions: {
+    model: "ir.actions.server",
+    domain: [],
+    fields: ["name", "model_id", "state"],
+    limit: 100
+  },
+  automations: {
+    model: "base.automation",
+    domain: [],
+    fields: ["name", "trigger", "model_id", "active"],
+    limit: 100
+  }
+} as const;
+
+type DescribeSection = keyof typeof DESCRIBE_SECTIONS;
+const ALL_DESCRIBE_SECTIONS = Object.keys(DESCRIBE_SECTIONS) as DescribeSection[];

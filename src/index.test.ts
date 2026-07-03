@@ -1746,6 +1746,84 @@ describe("resources", () => {
   });
 });
 
+describe("describe_database", () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  function mockOdoo(perModel: Record<string, unknown[] | Error>) {
+    return mock(async (url: string) => {
+      const model = Object.keys(perModel).find((m) => url.includes(`/json/2/${m}/search_read`));
+      const outcome = model ? perModel[model] : undefined;
+      if (outcome instanceof Error) {
+        return new Response(JSON.stringify({ error: { message: outcome.message } }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+      return new Response(JSON.stringify({ result: outcome ?? [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+  }
+
+  test("default run returns all 5 sections with counts", async () => {
+    const agent = await buildWriteToolAgent();
+    globalThis.fetch = mockOdoo({
+      "ir.module.module": [{ name: "sale", shortdesc: "Sales" }],
+      "ir.model": [{ model: "x_custom", name: "Custom" }],
+      "ir.model.fields": [{ model: "res.partner", name: "x_studio_foo", ttype: "char", field_description: "Foo" }],
+      "ir.actions.server": [{ name: "Action", model_id: [1, "res.partner"], state: "code" }],
+      "base.automation": [{ name: "Auto", trigger: "on_create", model_id: [1, "res.partner"], active: true }]
+    });
+
+    const handler = getToolHandler(agent, "describe_database");
+    const result = await handler({});
+    const body = JSON.parse(result.content[0].text);
+
+    expect(Object.keys(body).sort()).toEqual(
+      ["automations", "custom_models", "modules", "server_actions", "studio_fields"].sort()
+    );
+    expect(body.modules.count).toBe(1);
+    expect(body.automations.count).toBe(1);
+    expect(result.isError).toBeUndefined();
+  });
+
+  test("include filters to a subset of sections", async () => {
+    const agent = await buildWriteToolAgent();
+    globalThis.fetch = mockOdoo({ "ir.module.module": [{ name: "sale", shortdesc: "Sales" }] });
+
+    const handler = getToolHandler(agent, "describe_database");
+    const result = await handler({ include: ["modules"] });
+    const body = JSON.parse(result.content[0].text);
+
+    expect(Object.keys(body)).toEqual(["modules"]);
+    expect(body.modules.count).toBe(1);
+  });
+
+  test("one section erroring does not fail the others", async () => {
+    const agent = await buildWriteToolAgent();
+    globalThis.fetch = mockOdoo({
+      "ir.module.module": [{ name: "sale", shortdesc: "Sales" }],
+      "ir.model": [{ model: "x_custom", name: "Custom" }],
+      "ir.model.fields": [],
+      "ir.actions.server": [],
+      "base.automation": new Error("Invalid model name 'base.automation'")
+    });
+
+    const handler = getToolHandler(agent, "describe_database");
+    const result = await handler({});
+    const body = JSON.parse(result.content[0].text);
+
+    expect(body.automations.error).toContain("base.automation");
+    expect(body.automations.count).toBeUndefined();
+    expect(body.modules.count).toBe(1);
+    expect(body.custom_models.count).toBe(1);
+    expect(result.isError).toBeUndefined();
+  });
+});
+
 describe("OAuth shim (ChatGPT path)", () => {
   afterEach(() => {
     globalThis.fetch = originalFetch;
