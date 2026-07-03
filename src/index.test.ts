@@ -32,6 +32,9 @@ const {
   countRecords,
   normalizeRecord,
   normalizeRecords,
+  parseButtonsFromArch,
+  mergeModelActions,
+  CURATED_MODEL_ACTIONS,
   McpAgent,
   default: handler
 } = await import("./index");
@@ -1279,6 +1282,129 @@ describe("call_model_method tool callOdoo call shape", () => {
 
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain("method must be a non-empty string");
+    expect(fetchMock.mock.calls.length).toBe(0);
+  });
+});
+
+describe("parseButtonsFromArch", () => {
+  test("extracts type=object buttons with name/string/confirm, excludes type=action buttons, dedupes by name", () => {
+    const arch = `
+      <form>
+        <header>
+          <button name="action_post" type="object" string="Post"/>
+          <button name="button_cancel" type="object" string="Cancel" confirm="Are you sure?"/>
+          <button name="button_cancel" type="object" string="Duplicate Cancel"/>
+          <button name="do_report" type="action" string="Print"/>
+        </header>
+      </form>
+    `;
+
+    const actions = parseButtonsFromArch(arch);
+
+    expect(actions).toEqual([
+      { method: "action_post", label: "Post", source: "view" },
+      { method: "button_cancel", label: "Cancel", confirm: "Are you sure?", source: "view" }
+    ]);
+    expect(actions.some((a: any) => a.method === "do_report")).toBe(false);
+  });
+
+  test("returns an empty array for missing/empty arch", () => {
+    expect(parseButtonsFromArch(undefined)).toEqual([]);
+    expect(parseButtonsFromArch(null)).toEqual([]);
+    expect(parseButtonsFromArch("")).toEqual([]);
+  });
+});
+
+describe("mergeModelActions", () => {
+  test("view entry wins on duplicate method, curated entries retained, no duplicate methods", () => {
+    const curated = CURATED_MODEL_ACTIONS["account.move"];
+    const viewActions = [
+      { method: "action_post", label: "Post Entry (view)", source: "view" as const },
+      { method: "action_new_view_only_method", label: "New", source: "view" as const }
+    ];
+
+    const merged = mergeModelActions(curated, viewActions);
+
+    const byMethod = new Map(merged.map((a: any) => [a.method, a]));
+    expect(byMethod.get("action_post")).toEqual({ method: "action_post", label: "Post Entry (view)", source: "view" });
+    expect(byMethod.get("button_draft")).toEqual({ method: "button_draft", source: "curated" });
+    expect(byMethod.get("button_cancel")).toEqual({ method: "button_cancel", source: "curated" });
+    expect(byMethod.get("action_new_view_only_method")).toEqual({
+      method: "action_new_view_only_method",
+      label: "New",
+      source: "view"
+    });
+
+    const methods = merged.map((a: any) => a.method);
+    expect(new Set(methods).size).toBe(methods.length);
+  });
+});
+
+describe("list_model_actions tool", () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  test("combines curated actions with form-view buttons, view wins on overlap", async () => {
+    const agent = await buildWriteToolAgent();
+    let fetchCalls: { url: string; body: any }[] = [];
+    const arch =
+      '<form><header>' +
+      '<button name="action_post" type="object" string="Post (from view)"/>' +
+      '<button name="do_print" type="action" string="Print"/>' +
+      "</header></form>";
+    const fetchMock = mock(async (url: string, init: any) => {
+      fetchCalls.push({ url, body: JSON.parse(init.body) });
+      return new Response(JSON.stringify({ result: { views: { form: { arch } } } }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+    globalThis.fetch = fetchMock;
+
+    const handler = getToolHandler(agent, "list_model_actions");
+    const result = await handler({ model: "account.move" });
+
+    expect(result.isError).toBeUndefined();
+    expect(fetchCalls.length).toBe(1);
+    expect(fetchCalls[0].url).toContain("/account.move/get_views");
+    expect(fetchCalls[0].body).toEqual({ views: [[false, "form"]] });
+
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.note).toBeUndefined();
+    const byMethod = new Map(payload.actions.map((a: any) => [a.method, a]));
+    expect(byMethod.get("action_post")).toEqual({ method: "action_post", label: "Post (from view)", source: "view" });
+    expect(byMethod.get("button_draft")).toEqual({ method: "button_draft", source: "curated" });
+    expect(byMethod.get("do_print")).toBeUndefined();
+  });
+
+  test("falls back to curated-only actions with a note when get_views fails, without isError", async () => {
+    const agent = await buildWriteToolAgent();
+    const fetchMock = mock(() => Promise.reject(new Error("network unreachable")));
+    globalThis.fetch = fetchMock;
+
+    const handler = getToolHandler(agent, "list_model_actions");
+    const result = await handler({ model: "sale.order" });
+
+    expect(result.isError).toBeUndefined();
+    const payload = JSON.parse(result.content[0].text);
+    expect(typeof payload.note).toBe("string");
+    expect(payload.actions).toEqual([
+      { method: "action_confirm", source: "curated" },
+      { method: "action_cancel", source: "curated" }
+    ]);
+  });
+
+  test("rejects empty-string model without calling fetch", async () => {
+    const agent = await buildWriteToolAgent();
+    const fetchMock = mock(() => Promise.reject(new Error("should not be called")));
+    globalThis.fetch = fetchMock;
+
+    const handler = getToolHandler(agent, "list_model_actions");
+    const result = await handler({ model: "" });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("model must be a non-empty string");
     expect(fetchMock.mock.calls.length).toBe(0);
   });
 });

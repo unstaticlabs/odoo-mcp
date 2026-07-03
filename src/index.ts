@@ -5,6 +5,8 @@ import { oauthDefaultHandler } from "./oauth";
 export { callOdoo } from "./odoo";
 export { OdooQueue } from "./odoo-queue";
 export { pickSmartFields, searchRecords, escapeHtml, countRecords } from "./tools/shared";
+export { parseButtonsFromArch, mergeModelActions } from "./tools/read";
+export { CURATED_MODEL_ACTIONS } from "./tools/actions-map";
 export { normalizeRecord, normalizeRecords } from "./normalizer";
 export type { OdooFieldMeta, FieldsMeta, NormalizeOptions } from "./normalizer";
 export { validateOdooCredentials } from "./oauth";
