@@ -24,6 +24,8 @@ const {
   searchRecords,
   escapeHtml,
   countRecords,
+  normalizeRecord,
+  normalizeRecords,
   McpAgent,
   default: handler
 } = await import("./index");
@@ -371,6 +373,177 @@ describe("pickSmartFields", () => {
 
     // Priority ordering
     expect(res.slice(0, 5)).toEqual(["id", "name", "display_name", "state", "active"]);
+  });
+});
+
+describe("normalizer", () => {
+  test("normalizeRecord: many2one populated tuple becomes {id, name}", () => {
+    const record = { user_id: [5, "Some Name"] };
+    const fieldsMeta = { user_id: { type: "many2one" } };
+    expect(normalizeRecord(record, fieldsMeta)).toEqual({ user_id: { id: 5, name: "Some Name" } });
+  });
+
+  test("normalizeRecord: many2one empty (false) becomes null", () => {
+    const record = { user_id: false };
+    const fieldsMeta = { user_id: { type: "many2one" } };
+    expect(normalizeRecord(record, fieldsMeta)).toEqual({ user_id: null });
+  });
+
+  test("normalizeRecord: one2many/many2many populated becomes {ids, count}", () => {
+    const record = { tag_ids: [1, 2, 3], attachment_ids: [7] };
+    const fieldsMeta = {
+      tag_ids: { type: "many2many" },
+      attachment_ids: { type: "one2many" }
+    };
+    expect(normalizeRecord(record, fieldsMeta)).toEqual({
+      tag_ids: { ids: [1, 2, 3], count: 3 },
+      attachment_ids: { ids: [7], count: 1 }
+    });
+  });
+
+  test("normalizeRecord: one2many/many2many empty array becomes {ids: [], count: 0}", () => {
+    const record = { tag_ids: [] };
+    const fieldsMeta = { tag_ids: { type: "many2many" } };
+    expect(normalizeRecord(record, fieldsMeta)).toEqual({ tag_ids: { ids: [], count: 0 } });
+  });
+
+  test("normalizeRecord: one2many/many2many false WITH metadata becomes null", () => {
+    const record = { tag_ids: false, attachment_ids: false };
+    const fieldsMeta = {
+      tag_ids: { type: "many2many" },
+      attachment_ids: { type: "one2many" }
+    };
+    expect(normalizeRecord(record, fieldsMeta)).toEqual({ tag_ids: null, attachment_ids: null });
+  });
+
+  test("normalizeRecord: scalar char/date/datetime false WITH metadata becomes null", () => {
+    const record = { name: false, date_deadline: false, write_date: false };
+    const fieldsMeta = {
+      name: { type: "char" },
+      date_deadline: { type: "date" },
+      write_date: { type: "datetime" }
+    };
+    expect(normalizeRecord(record, fieldsMeta)).toEqual({ name: null, date_deadline: null, write_date: null });
+  });
+
+  test("normalizeRecord: scalar char/date/datetime false WITHOUT metadata stays false", () => {
+    const record = { name: false, date_deadline: false };
+    expect(normalizeRecord(record)).toEqual({ name: false, date_deadline: false });
+  });
+
+  test("normalizeRecord: boolean fields stay boolean, with and without metadata", () => {
+    const record = { active: true, is_done: false };
+    const fieldsMeta = { active: { type: "boolean" }, is_done: { type: "boolean" } };
+    expect(normalizeRecord(record, fieldsMeta)).toEqual({ active: true, is_done: false });
+    expect(normalizeRecord(record)).toEqual({ active: true, is_done: false });
+  });
+
+  test("normalizeRecord: selection field WITH metadata + selection list becomes {value, label}", () => {
+    const record = { state: "done" };
+    const fieldsMeta = {
+      state: {
+        type: "selection",
+        selection: [
+          ["draft", "Draft"],
+          ["done", "Done"]
+        ] as [string, string][]
+      }
+    };
+    expect(normalizeRecord(record, fieldsMeta)).toEqual({ state: { value: "done", label: "Done" } });
+  });
+
+  test("normalizeRecord: selection field WITHOUT metadata passes raw value through unchanged", () => {
+    const record = { state: "done" };
+    expect(normalizeRecord(record)).toEqual({ state: "done" });
+  });
+
+  test("normalizeRecord: selection value not found in list falls back gracefully", () => {
+    const record = { state: "unknown_value" };
+    const fieldsMeta = {
+      state: {
+        type: "selection",
+        selection: [
+          ["draft", "Draft"],
+          ["done", "Done"]
+        ] as [string, string][]
+      }
+    };
+    expect(normalizeRecord(record, fieldsMeta)).toEqual({ state: { value: "unknown_value", label: null } });
+  });
+
+  test("normalizeRecord: selection field false WITH metadata becomes null", () => {
+    const record = { state: false };
+    const fieldsMeta = {
+      state: {
+        type: "selection",
+        selection: [
+          ["draft", "Draft"],
+          ["done", "Done"]
+        ] as [string, string][]
+      }
+    };
+    expect(normalizeRecord(record, fieldsMeta)).toEqual({ state: null });
+  });
+
+  test("normalizeRecord: monetary/float/integer values unchanged, including 0", () => {
+    const record = { amount: 0, price: 12.5, sequence: 3 };
+    const fieldsMeta = {
+      amount: { type: "monetary" },
+      price: { type: "float" },
+      sequence: { type: "integer" }
+    };
+    expect(normalizeRecord(record, fieldsMeta)).toEqual({ amount: 0, price: 12.5, sequence: 3 });
+    expect(normalizeRecord(record)).toEqual({ amount: 0, price: 12.5, sequence: 3 });
+  });
+
+  test("normalizeRecord: date/datetime ISO strings stay untouched", () => {
+    const record = { date_deadline: "2026-07-02", write_date: "2026-07-02 10:00:00" };
+    const fieldsMeta = { date_deadline: { type: "date" }, write_date: { type: "datetime" } };
+    expect(normalizeRecord(record, fieldsMeta)).toEqual(record);
+  });
+
+  test("normalizeRecord: heuristic fallback without fieldsMeta still normalizes relational shapes", () => {
+    const record = { user_id: [5, "Some Name"], tag_ids: [1, 2, 3] };
+    expect(normalizeRecord(record)).toEqual({
+      user_id: { id: 5, name: "Some Name" },
+      tag_ids: { ids: [1, 2, 3], count: 3 }
+    });
+  });
+
+  test("normalizeRecord: id field and other clean values pass through untouched", () => {
+    const record = { id: 42, display_name: "Task A" };
+    expect(normalizeRecord(record)).toEqual({ id: 42, display_name: "Task A" });
+  });
+
+  test("normalizeRecord: empty record returns empty object", () => {
+    expect(normalizeRecord({})).toEqual({});
+  });
+
+  test("normalizeRecords: maps normalizeRecord over multiple records", () => {
+    const records = [{ id: 1, user_id: [5, "A"] as [number, string] }, { id: 2, user_id: false }];
+    const fieldsMeta = { user_id: { type: "many2one" } };
+    expect(normalizeRecords(records, fieldsMeta)).toEqual([
+      { id: 1, user_id: { id: 5, name: "A" } },
+      { id: 2, user_id: null }
+    ]);
+  });
+
+  test("normalizeRecords: opts.includeRaw attaches original record under _raw", () => {
+    const records = [{ id: 1, user_id: [5, "A"] as [number, string] }];
+    const fieldsMeta = { user_id: { type: "many2one" } };
+    expect(normalizeRecords(records, fieldsMeta, { includeRaw: true })).toEqual([
+      { id: 1, user_id: { id: 5, name: "A" }, _raw: { id: 1, user_id: [5, "A"] } }
+    ]);
+  });
+
+  test("normalizeRecords: omitted/false includeRaw does not add _raw", () => {
+    const records = [{ id: 1 }];
+    expect(normalizeRecords(records)).toEqual([{ id: 1 }]);
+    expect(normalizeRecords(records, undefined, { includeRaw: false })).toEqual([{ id: 1 }]);
+  });
+
+  test("normalizeRecords: empty records array returns empty array", () => {
+    expect(normalizeRecords([])).toEqual([]);
   });
 });
 
