@@ -8,7 +8,9 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
   server.registerTool(
     "projects.list_tasks",
     {
+      title: "List Project Tasks",
       description: "Read-only: list Odoo project.task records matching a domain.",
+      annotations: { readOnlyHint: true, openWorldHint: false },
       inputSchema: {
         domain: z.array(z.any()).default([]),
         fields: z.array(z.string()).default(DEFAULT_TASK_FIELDS)
@@ -27,7 +29,9 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
   server.registerTool(
     "list_models",
     {
+      title: "List Models",
       description: "Read-only: list enabled/installed Odoo models (name and technical model name).",
+      annotations: { readOnlyHint: true, openWorldHint: false },
       inputSchema: {}
     },
     async () => {
@@ -45,7 +49,9 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
   server.registerTool(
     "search_records",
     {
+      title: "Search Records",
       description: "Read-only: model-agnostic Odoo search_read.",
+      annotations: { readOnlyHint: true, openWorldHint: false },
       inputSchema: {
         model: z.string(),
         domain: z.array(z.any()).default([]),
@@ -67,7 +73,9 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
   server.registerTool(
     "aggregate_records",
     {
+      title: "Aggregate Records",
       description: "Read-only: model-agnostic Odoo read_group (grouped aggregation).",
+      annotations: { readOnlyHint: true, openWorldHint: false },
       inputSchema: {
         model: z.string(),
         domain: z.array(z.any()).default([]),
@@ -97,7 +105,9 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
   server.registerTool(
     "get_record",
     {
+      title: "Get Record",
       description: "Read-only: fetch a single Odoo record by id.",
+      annotations: { readOnlyHint: true, openWorldHint: false },
       inputSchema: {
         model: z.string(),
         record_id: z.number(),
@@ -129,7 +139,9 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
   server.registerTool(
     "get_fields",
     {
+      title: "Get Fields",
       description: "Read-only: get field schema (name, type, string label) for an Odoo model.",
+      annotations: { readOnlyHint: true, openWorldHint: false },
       inputSchema: {
         model: z.string()
       }
