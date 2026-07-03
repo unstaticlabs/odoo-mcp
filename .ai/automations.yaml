@@ -20,6 +20,9 @@ automations:
     - fail
 - id: mcp_build
   name: Build (implementation) — odoo-mcp
+  # One heavy build per tick: keeps a long implementation run from starving
+  # triage/shaping dispatch slots (global cap is 5/tick).
+  max_per_tick: 1
   trigger:
     all:
     - field: stage

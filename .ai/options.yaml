@@ -1,1 +1,3 @@
+autonomy_transitions:
+  Build->Review: auto
 scan_enabled: true
