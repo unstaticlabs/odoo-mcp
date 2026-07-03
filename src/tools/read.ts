@@ -126,7 +126,13 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
   server.registerTool(
     "get_record",
     {
-      description: "Read-only: fetch a single Odoo record by id.",
+      description:
+        "Read-only: fetch a single Odoo record by id. Many transactional models expose a workflow/lifecycle " +
+        "field (here called `_workflow_status`, though its real name varies — commonly `state` or `stage_id`) " +
+        "showing where the record sits (e.g. draft, confirmed, posted, done, cancelled). By convention, records " +
+        "where this field is `'draft'` are unconfirmed and generally safe to edit or remove via `update_record`/" +
+        "`delete_record`; records past `draft` are higher risk — Odoo may block the write or it may trigger real " +
+        "side effects (linked accounting entries, downstream automations), so check this field before mutating.",
       inputSchema: {
         model: z.string(),
         record_id: z.number(),
