@@ -19,10 +19,15 @@ describe("OdooQueue", () => {
 
   test("serializes concurrent calls so they never overlap", async () => {
     const events: string[] = [];
+    let inFlight = 0;
+    let maxInFlight = 0;
     const fetchMock = mock(async () => {
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
       events.push("start");
       await new Promise((resolve) => setTimeout(resolve, 10));
       events.push("end");
+      inFlight--;
       return jsonResponse("ok");
     });
     globalThis.fetch = fetchMock;
@@ -35,6 +40,7 @@ describe("OdooQueue", () => {
     ]);
 
     expect(events).toEqual(["start", "end", "start", "end", "start", "end"]);
+    expect(maxInFlight).toBe(1);
   });
 
   test("enforces the minimum delay between call starts", async () => {

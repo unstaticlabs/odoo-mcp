@@ -42,6 +42,23 @@ export function mcpError(text: string) {
   return { content: [{ type: "text" as const, text }], isError: true as const };
 }
 
+/**
+ * Wraps a tool/resource handler so its response carries how many Odoo calls it caused,
+ * via the queue's snapshot/delta mechanism (MCP's spec-blessed `_meta` field, not the
+ * `content`/`contents` payload, so callers relying on exact response shape are unaffected).
+ */
+export function withOdooMetrics<Args extends unknown[], Result extends object>(
+  queue: OdooQueue,
+  fn: (...args: Args) => Promise<Result>
+): (...args: Args) => Promise<Result & { _meta: { odoo_calls: number; total_duration_ms: number } }> {
+  return async (...args: Args) => {
+    const before = queue.snapshot();
+    const result = await fn(...args);
+    const delta = queue.delta(before);
+    return { ...result, _meta: { odoo_calls: delta.odoo_calls, total_duration_ms: delta.total_duration_ms } };
+  };
+}
+
 /** Exported for unit testing (see callOdoo export pattern). */
 export function escapeHtml(text: string): string {
   return text

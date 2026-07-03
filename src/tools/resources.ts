@@ -1,14 +1,14 @@
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { OdooQueue } from "../odoo-queue";
 import type { Props } from "../server";
-import { countRecords, parseDomainParam, requireConnection, searchRecords } from "./shared";
+import { countRecords, parseDomainParam, requireConnection, searchRecords, withOdooMetrics } from "./shared";
 
 export function registerResourceTemplates(server: McpServer, getProps: () => Props | undefined, queue: OdooQueue) {
   server.registerResource(
     "record",
     new ResourceTemplate("odoo://{model}/record/{id}", { list: undefined }),
     { description: "Read-only: fetch a single Odoo record by id.", mimeType: "application/json" },
-    async (uri, variables) => {
+    withOdooMetrics(queue, async (uri, variables) => {
       const model = typeof variables.model === "string" ? variables.model : "";
       if (!model.trim()) throw new Error("model must be a non-empty string");
       const idRaw = typeof variables.id === "string" ? variables.id : "";
@@ -27,14 +27,14 @@ export function registerResourceTemplates(server: McpServer, getProps: () => Pro
         throw new Error(`No ${model} record found for id ${id}`);
       }
       return { contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify(rows[0], null, 2) }] };
-    }
+    })
   );
 
   server.registerResource(
     "search",
     new ResourceTemplate("odoo://{model}/search", { list: undefined }),
     { description: "Read-only: model-agnostic Odoo search_read via URI (domain/fields/limit query params).", mimeType: "application/json" },
-    async (uri, variables) => {
+    withOdooMetrics(queue, async (uri, variables) => {
       const model = typeof variables.model === "string" ? variables.model : "";
       if (!model.trim()) throw new Error("model must be a non-empty string");
 
@@ -52,28 +52,28 @@ export function registerResourceTemplates(server: McpServer, getProps: () => Pro
 
       const rows = await searchRecords(queue, requireConnection(getProps()), model, domain, fields, limit);
       return { contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify(rows, null, 2) }] };
-    }
+    })
   );
 
   server.registerResource(
     "count",
     new ResourceTemplate("odoo://{model}/count", { list: undefined }),
     { description: "Read-only: count Odoo records matching a domain (search_count) via URI.", mimeType: "application/json" },
-    async (uri, variables) => {
+    withOdooMetrics(queue, async (uri, variables) => {
       const model = typeof variables.model === "string" ? variables.model : "";
       if (!model.trim()) throw new Error("model must be a non-empty string");
 
       const domain = parseDomainParam(uri);
       const count = await countRecords(queue, requireConnection(getProps()), model, domain);
       return { contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify({ count }, null, 2) }] };
-    }
+    })
   );
 
   server.registerResource(
     "fields",
     new ResourceTemplate("odoo://{model}/fields", { list: undefined }),
     { description: "Read-only: get field schema (name, type, string label) for an Odoo model.", mimeType: "application/json" },
-    async (uri, variables) => {
+    withOdooMetrics(queue, async (uri, variables) => {
       const model = typeof variables.model === "string" ? variables.model : "";
       if (!model.trim()) throw new Error("model must be a non-empty string");
 
@@ -81,6 +81,6 @@ export function registerResourceTemplates(server: McpServer, getProps: () => Pro
         attributes: ["type", "string"]
       });
       return { contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify(fields, null, 2) }] };
-    }
+    })
   );
 }

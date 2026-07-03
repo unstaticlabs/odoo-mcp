@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { OdooQueue } from "../odoo-queue";
 import type { Props } from "../server";
-import { escapeHtml, mcpError, requireConnection } from "./shared";
+import { escapeHtml, mcpError, requireConnection, withOdooMetrics } from "./shared";
 
 export function registerWriteTools(server: McpServer, getProps: () => Props | undefined, queue: OdooQueue) {
   server.registerTool(
@@ -14,7 +14,7 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
         values: z.record(z.string(), z.any())
       }
     },
-    async ({ model, values }) => {
+    withOdooMetrics(queue, async ({ model, values }) => {
       try {
         const ids = (await queue.enqueue(requireConnection(getProps()), model, "create", {
           vals_list: [values]
@@ -23,7 +23,7 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
       } catch (err) {
         return mcpError(err instanceof Error ? err.message : "create_record failed");
       }
-    }
+    })
   );
 
   server.registerTool(
@@ -38,7 +38,7 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
         body_is_html: z.boolean().default(false)
       }
     },
-    async ({ model, record_id, body, subtype, body_is_html }) => {
+    withOdooMetrics(queue, async ({ model, record_id, body, subtype, body_is_html }) => {
       if (!model || !model.trim()) return mcpError("model must be a non-empty string");
       if (!Number.isInteger(record_id) || record_id <= 0) return mcpError("record_id must be a positive integer");
       try {
@@ -52,7 +52,7 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
       } catch (err) {
         return mcpError(err instanceof Error ? err.message : "post_message failed");
       }
-    }
+    })
   );
 
   server.registerTool(
@@ -66,7 +66,7 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
         values: z.record(z.string(), z.any())
       }
     },
-    async ({ model, record_id, values }) => {
+    withOdooMetrics(queue, async ({ model, record_id, values }) => {
       try {
         await queue.enqueue(requireConnection(getProps()), model, "write", {
           ids: [record_id],
@@ -76,7 +76,7 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
       } catch (err) {
         return mcpError(err instanceof Error ? err.message : "update_record failed");
       }
-    }
+    })
   );
 
   server.registerTool(
@@ -88,14 +88,14 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
         record_id: z.number().int().positive()
       }
     },
-    async ({ model, record_id }) => {
+    withOdooMetrics(queue, async ({ model, record_id }) => {
       try {
         await queue.enqueue(requireConnection(getProps()), model, "unlink", { ids: [record_id] });
         return { content: [{ type: "text" as const, text: JSON.stringify(true, null, 2) }] };
       } catch (err) {
         return mcpError(err instanceof Error ? err.message : "delete_record failed");
       }
-    }
+    })
   );
 
   server.registerTool(
@@ -109,7 +109,7 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
         kwargs: z.record(z.string(), z.any()).default({})
       }
     },
-    async ({ model, method, args, kwargs }) => {
+    withOdooMetrics(queue, async ({ model, method, args, kwargs }) => {
       if (!model || !model.trim()) return mcpError("model must be a non-empty string");
       if (!method || !method.trim()) return mcpError("method must be a non-empty string");
       try {
@@ -118,6 +118,6 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
       } catch (err) {
         return mcpError(err instanceof Error ? err.message : "call_model_method failed");
       }
-    }
+    })
   );
 }
