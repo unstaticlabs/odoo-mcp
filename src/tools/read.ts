@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { OdooQueue } from "../odoo-queue";
 import type { Props } from "../server";
 import { CORE_MODEL_ALLOWLIST, DEFAULT_TASK_FIELDS, countRecords, mcpError, requireConnection, searchRecords } from "./shared";
+import { deriveWorkflowStatus } from "../normalizer";
 
 export function registerReadTools(server: McpServer, getProps: () => Props | undefined, queue: OdooQueue) {
   server.registerTool(
@@ -126,7 +127,13 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
   server.registerTool(
     "get_record",
     {
-      description: "Read-only: fetch a single Odoo record by id.",
+      description:
+        "Read-only: fetch a single Odoo record by id. Many transactional models expose a workflow/lifecycle " +
+        "field (here called `_workflow_status`, though its real name varies — commonly `state` or `stage_id`) " +
+        "showing where the record sits (e.g. draft, confirmed, posted, done, cancelled). By convention, records " +
+        "where this field is `'draft'` are unconfirmed and generally safe to edit or remove via `update_record`/" +
+        "`delete_record`; records past `draft` are higher risk — Odoo may block the write or it may trigger real " +
+        "side effects (linked accounting entries, downstream automations), so check this field before mutating.",
       inputSchema: {
         model: z.string(),
         record_id: z.number(),
@@ -148,7 +155,10 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
         if (!Array.isArray(rows) || rows.length === 0) {
           return mcpError(`No ${model} record found for id ${record_id}`);
         }
-        return { content: [{ type: "text" as const, text: JSON.stringify(rows[0], null, 2) }] };
+        const record = rows[0] as Record<string, unknown>;
+        const workflowStatus = deriveWorkflowStatus(record);
+        const result = workflowStatus != null ? { ...record, _workflow_status: workflowStatus } : record;
+        return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
       } catch (err) {
         return mcpError(err instanceof Error ? err.message : "get_record failed");
       }
