@@ -58,14 +58,18 @@ export async function searchRecords(
   model: string,
   domain: unknown[],
   fields: string[] | null,
-  limit: number
+  limit: number,
+  order?: string,
+  offset?: number
 ): Promise<unknown> {
   const cappedLimit = Math.min(limit, 100);
   const resolvedFields = await resolveFields(queue, conn, model, fields);
   return queue.enqueue(conn, model, "search_read", {
     domain,
     fields: resolvedFields,
-    limit: cappedLimit
+    limit: cappedLimit,
+    offset: offset ?? 0,
+    ...(order ? { order } : {})
   });
 }
 

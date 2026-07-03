@@ -705,6 +705,63 @@ describe("searchRecords", () => {
     expect(fetchCalls[0].url).toContain("/search_read");
     expect(fetchCalls[0].body.limit).toBe(1);
   });
+
+  test("forwards order into search_read kwargs when provided", async () => {
+    const conn = { url: "http://example.com", db: "test-db", apiKey: "secret-key" };
+    let fetchCalls: { url: string; body: any }[] = [];
+    const fetchMock = mock(async (url: string, init: any) => {
+      const body = JSON.parse(init.body);
+      fetchCalls.push({ url, body });
+      return new Response(JSON.stringify({ result: [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+    globalThis.fetch = fetchMock;
+
+    await searchRecords(makeQueue(), conn, "test.model", [], ["id", "name"], 10, "name desc");
+
+    expect(fetchCalls.length).toBe(1);
+    expect(fetchCalls[0].body.order).toBe("name desc");
+  });
+
+  test("forwards offset into search_read kwargs when provided", async () => {
+    const conn = { url: "http://example.com", db: "test-db", apiKey: "secret-key" };
+    let fetchCalls: { url: string; body: any }[] = [];
+    const fetchMock = mock(async (url: string, init: any) => {
+      const body = JSON.parse(init.body);
+      fetchCalls.push({ url, body });
+      return new Response(JSON.stringify({ result: [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+    globalThis.fetch = fetchMock;
+
+    await searchRecords(makeQueue(), conn, "test.model", [], ["id", "name"], 10, undefined, 20);
+
+    expect(fetchCalls.length).toBe(1);
+    expect(fetchCalls[0].body.offset).toBe(20);
+  });
+
+  test("defaults offset to 0 when not provided", async () => {
+    const conn = { url: "http://example.com", db: "test-db", apiKey: "secret-key" };
+    let fetchCalls: { url: string; body: any }[] = [];
+    const fetchMock = mock(async (url: string, init: any) => {
+      const body = JSON.parse(init.body);
+      fetchCalls.push({ url, body });
+      return new Response(JSON.stringify({ result: [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+    globalThis.fetch = fetchMock;
+
+    await searchRecords(makeQueue(), conn, "test.model", [], ["id", "name"], 10);
+
+    expect(fetchCalls.length).toBe(1);
+    expect(fetchCalls[0].body.offset).toBe(0);
+  });
 });
 
 describe("write tool callOdoo call shapes", () => {
@@ -1288,7 +1345,9 @@ describe("search_records limit zod schema", () => {
     model: z.string(),
     domain: z.array(z.any()).default([]),
     fields: z.array(z.string()).nullable().default(null),
-    limit: z.number().int().min(1).max(100).default(10)
+    limit: z.number().int().min(1).max(100).default(10),
+    order: z.string().optional(),
+    offset: z.number().int().min(0).default(0)
   });
 
   test("accepts valid limits and defaults to 10", () => {
@@ -1317,6 +1376,41 @@ describe("search_records limit zod schema", () => {
 
     const res4 = schema.safeParse({ model: "res.partner", limit: -5 });
     expect(res4.success).toBe(false);
+  });
+
+  test("order is optional and absent when not provided", () => {
+    const res = schema.safeParse({ model: "res.partner" });
+    expect(res.success).toBe(true);
+    if (res.success) {
+      expect(res.data.order).toBeUndefined();
+    }
+  });
+
+  test("order passes through a valid string", () => {
+    const res = schema.safeParse({ model: "res.partner", order: "name desc" });
+    expect(res.success).toBe(true);
+    if (res.success) {
+      expect(res.data.order).toBe("name desc");
+    }
+  });
+
+  test("offset defaults to 0 and accepts non-negative integers", () => {
+    const res1 = schema.safeParse({ model: "res.partner" });
+    expect(res1.success).toBe(true);
+    if (res1.success) {
+      expect(res1.data.offset).toBe(0);
+    }
+
+    const res2 = schema.safeParse({ model: "res.partner", offset: 20 });
+    expect(res2.success).toBe(true);
+    if (res2.success) {
+      expect(res2.data.offset).toBe(20);
+    }
+  });
+
+  test("rejects negative offset", () => {
+    const res = schema.safeParse({ model: "res.partner", offset: -1 });
+    expect(res.success).toBe(false);
   });
 });
 
@@ -1359,6 +1453,46 @@ describe("countRecords", () => {
 
     expect(error).toBeDefined();
     expect(error?.message).toContain("model must be a non-empty string");
+    expect(fetchMock.mock.calls.length).toBe(0);
+  });
+});
+
+describe("search_count", () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  test("calls search_count RPC and returns { count } matching the mocked value", async () => {
+    const agent = await buildWriteToolAgent();
+    let fetchCalls: { url: string; body: any }[] = [];
+    const fetchMock = mock(async (url: string, init: any) => {
+      fetchCalls.push({ url, body: JSON.parse(init.body) });
+      return new Response(JSON.stringify({ result: 42 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+    globalThis.fetch = fetchMock;
+
+    const handler = getToolHandler(agent, "search_count");
+    const result = await handler({ model: "project.task", domain: [["active", "=", true]] });
+
+    expect(fetchCalls.length).toBe(1);
+    expect(fetchCalls[0].url).toContain("/project.task/search_count");
+    expect(fetchCalls[0].body).toEqual({ domain: [["active", "=", true]] });
+    expect(JSON.parse(result.content[0].text)).toEqual({ count: 42 });
+  });
+
+  test("rejects an empty model without calling fetch", async () => {
+    const agent = await buildWriteToolAgent();
+    const fetchMock = mock(() => Promise.reject(new Error("should not be called")));
+    globalThis.fetch = fetchMock;
+
+    const handler = getToolHandler(agent, "search_count");
+    const result = await handler({ model: "  ", domain: [] });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("model must be a non-empty string");
     expect(fetchMock.mock.calls.length).toBe(0);
   });
 });
@@ -1547,7 +1681,8 @@ describe("resources", () => {
       expect(fetchCalls[0].body).toEqual({
         domain: [["active", "=", true]],
         fields: ["id", "name"],
-        limit: 5
+        limit: 5,
+        offset: 0
       });
       expect(JSON.parse(result.contents[0].text)).toEqual([{ id: 1 }]);
     });
