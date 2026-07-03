@@ -16,7 +16,7 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
     },
     async ({ domain, fields }) => {
       try {
-        const tasks = await searchRecords(queue, requireConnection(getProps()), "project.task", domain, fields, 100);
+        const { rows: tasks } = await searchRecords(queue, requireConnection(getProps()), "project.task", domain, fields, 100);
         return { content: [{ type: "text" as const, text: JSON.stringify(tasks, null, 2) }] };
       } catch (err) {
         return mcpError(err instanceof Error ? err.message : "projects.list_tasks failed");
@@ -33,7 +33,7 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
     async () => {
       const conn = requireConnection(getProps());
       try {
-        const rows = await searchRecords(queue, conn, "ir.model", [], ["model", "name"], 100);
+        const { rows } = await searchRecords(queue, conn, "ir.model", [], ["model", "name"], 100);
         return { content: [{ type: "text" as const, text: JSON.stringify(rows, null, 2) }] };
       } catch {
         const fallback = CORE_MODEL_ALLOWLIST.map((model) => ({ model }));
@@ -58,7 +58,7 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
     async ({ model, domain, fields, limit, order, offset }) => {
       if (!model || !model.trim()) return mcpError("model must be a non-empty string");
       try {
-        const rows = await searchRecords(queue, requireConnection(getProps()), model, domain, fields, limit, order, offset);
+        const { rows } = await searchRecords(queue, requireConnection(getProps()), model, domain, fields, limit, order, offset);
         return { content: [{ type: "text" as const, text: JSON.stringify(rows, null, 2) }] };
       } catch (err) {
         return mcpError(err instanceof Error ? err.message : "search_records failed");
@@ -137,14 +137,14 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
       if (!model || !model.trim()) return mcpError("model must be a non-empty string");
       if (!Number.isInteger(record_id) || record_id <= 0) return mcpError("record_id must be a positive integer");
       try {
-        const rows = (await searchRecords(
+        const { rows } = (await searchRecords(
           queue,
           requireConnection(getProps()),
           model,
           [["id", "=", record_id]],
           fields,
           1
-        )) as unknown[];
+        )) as { rows: unknown[]; fieldsMeta: unknown };
         if (!Array.isArray(rows) || rows.length === 0) {
           return mcpError(`No ${model} record found for id ${record_id}`);
         }
