@@ -2088,3 +2088,86 @@ describe("OAuth shim (ChatGPT path)", () => {
     expect(json.props.odooApiKey).toBe("raw-header-key");
   });
 });
+
+describe("call_model_method JSON-2 body contract", () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  test("body contains only kwargs (+ ids) — never an 'args' key", async () => {
+    const agent = await buildWriteToolAgent();
+    const fetchCalls: { url: string; body: any }[] = [];
+    globalThis.fetch = mock(async (url: string, init: any) => {
+      fetchCalls.push({ url, body: JSON.parse(init.body) });
+      return new Response(JSON.stringify({ result: "ok" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+
+    const handler = getToolHandler(agent, "call_model_method");
+    const result = await handler({
+      model: "ir.attachment",
+      method: "read",
+      ids: [7, 8],
+      kwargs: { fields: ["name", "mimetype"] },
+      args: []
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(fetchCalls.length).toBe(1);
+    expect(fetchCalls[0].url).toContain("/ir.attachment/read");
+    // JSON-2 binds every body key as a named kwarg: an injected args:[] would 422
+    // on any method without an 'args' parameter (verified live on saas-19.2).
+    expect(fetchCalls[0].body).toEqual({ fields: ["name", "mimetype"], ids: [7, 8] });
+    expect("args" in fetchCalls[0].body).toBe(false);
+  });
+
+  test("omits ids from the body when not provided", async () => {
+    const agent = await buildWriteToolAgent();
+    const fetchCalls: { body: any }[] = [];
+    globalThis.fetch = mock(async (_url: string, init: any) => {
+      fetchCalls.push({ body: JSON.parse(init.body) });
+      return new Response(JSON.stringify({ result: "ok" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+
+    const handler = getToolHandler(agent, "call_model_method");
+    await handler({ model: "res.partner", method: "search_read", kwargs: { domain: [], limit: 1 }, args: [] });
+
+    expect(fetchCalls[0].body).toEqual({ domain: [], limit: 1 });
+    expect("ids" in fetchCalls[0].body).toBe(false);
+  });
+
+  test("explicit ids wins over an ids key inside kwargs", async () => {
+    const agent = await buildWriteToolAgent();
+    const fetchCalls: { body: any }[] = [];
+    globalThis.fetch = mock(async (_url: string, init: any) => {
+      fetchCalls.push({ body: JSON.parse(init.body) });
+      return new Response(JSON.stringify({ result: "ok" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+
+    const handler = getToolHandler(agent, "call_model_method");
+    await handler({ model: "project.task", method: "write", ids: [5], kwargs: { ids: [999], vals: { name: "x" } }, args: [] });
+
+    expect(fetchCalls[0].body).toEqual({ ids: [5], vals: { name: "x" } });
+  });
+
+  test("non-empty positional args fail loudly without calling Odoo", async () => {
+    const agent = await buildWriteToolAgent();
+    const fetchMock = mock(() => Promise.reject(new Error("should not be called")));
+    globalThis.fetch = fetchMock;
+
+    const handler = getToolHandler(agent, "call_model_method");
+    const result = await handler({ model: "res.partner", method: "read", args: [[1, 2]], kwargs: {} });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("no positional args");
+    expect(fetchMock.mock.calls.length).toBe(0);
+  });
+});
