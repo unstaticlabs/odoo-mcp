@@ -129,6 +129,22 @@ export function escapeHtml(text: string): string {
     .replace(/'/g, "&#39;");
 }
 
+/**
+ * Render caller-supplied PLAIN TEXT as Odoo-safe HTML: escape HTML
+ * metacharacters (so `<p>` shows literally, not as markup) and turn newlines
+ * into `<br>`.
+ *
+ * This must be paired with `body_is_html: true` on the `message_post` call.
+ * Odoo's `message_post` runs a plaintext body through its own escaping
+ * (plaintext2html); if we escape here AND let Odoo escape again, the result is
+ * double-escaped mojibake (`<p>` → `&amp;lt;p&amp;gt;`, rendered as the literal
+ * text `&lt;p&gt;`). By escaping once and declaring the body is already HTML,
+ * Odoo leaves it untouched and it renders correctly.
+ */
+export function plaintextToHtml(text: string): string {
+  return escapeHtml(text).replace(/\r\n|\r|\n/g, "<br>");
+}
+
 export async function searchRecords(
   queue: OdooQueue,
   conn: OdooConnection,

@@ -1149,6 +1149,81 @@ describe("create_record provenance stamping", () => {
   });
 });
 
+describe("chatter HTML escaping — no double-escape", () => {
+  // Regression: message_post bodies were escaped locally but sent WITHOUT
+  // body_is_html, so Odoo re-escaped them (`<p>` → `&amp;lt;p&amp;gt;`), rendering
+  // as the literal text `&lt;p&gt;`. The fix escapes once AND declares
+  // body_is_html:true so Odoo leaves the body untouched.
+
+  test("post_message plain text: escaped exactly once AND body_is_html declared", async () => {
+    const queue = makeStubQueue();
+    const agent = await buildAgentWithQueue(queue);
+    const handler = getToolHandler(agent, "post_message");
+
+    await handler({ model: "project.task", record_id: 7, body: "<p>hi</p> & <b>x</b>", body_is_html: false });
+
+    const call = queue.calls.find((c) => c.method === "message_post")!;
+    // single-escaped (renders literally as "<p>hi</p> & <b>x</b>"), NOT &amp;lt;
+    expect(call.args.body).toBe("&lt;p&gt;hi&lt;/p&gt; &amp; &lt;b&gt;x&lt;/b&gt;");
+    expect(call.args.body_is_html).toBe(true);
+  });
+
+  test("post_message plain text: newlines become <br>", async () => {
+    const queue = makeStubQueue();
+    const agent = await buildAgentWithQueue(queue);
+    const handler = getToolHandler(agent, "post_message");
+
+    await handler({ model: "project.task", record_id: 7, body: "line1\nline2", body_is_html: false });
+
+    const call = queue.calls.find((c) => c.method === "message_post")!;
+    expect(call.args.body).toBe("line1<br>line2");
+    expect(call.args.body_is_html).toBe(true);
+  });
+
+  test("post_message body_is_html:true passes raw HTML through and declares it", async () => {
+    const queue = makeStubQueue();
+    const agent = await buildAgentWithQueue(queue);
+    const handler = getToolHandler(agent, "post_message");
+
+    await handler({ model: "project.task", record_id: 7, body: "<p>already <b>HTML</b></p>", body_is_html: true });
+
+    const call = queue.calls.find((c) => c.method === "message_post")!;
+    expect(call.args.body).toBe("<p>already <b>HTML</b></p>");
+    expect(call.args.body_is_html).toBe(true);
+  });
+
+  test("batch_post_message: each entry escaped once and body_is_html declared", async () => {
+    const queue = makeStubQueue();
+    const agent = await buildAgentWithQueue(queue);
+    const handler = getToolHandler(agent, "batch_post_message");
+
+    await handler({
+      model: "project.task",
+      messages: [
+        { record_id: 1, body: "<i>a</i>", body_is_html: false },
+        { record_id: 2, body: "<i>b</i>", body_is_html: true }
+      ]
+    });
+
+    const posts = queue.calls.filter((c) => c.method === "message_post");
+    expect(posts[0].args.body).toBe("&lt;i&gt;a&lt;/i&gt;");
+    expect(posts[0].args.body_is_html).toBe(true);
+    expect(posts[1].args.body).toBe("<i>b</i>");
+    expect(posts[1].args.body_is_html).toBe(true);
+  });
+
+  test("create_record provenance stamp declares body_is_html", async () => {
+    const queue = makeStubQueue({ createId: 42 });
+    const agent = await buildAgentWithQueue(queue);
+    const handler = getToolHandler(agent, "create_record");
+
+    await handler({ model: "project.task", values: { name: "X" } });
+
+    const post = queue.calls.find((c) => c.method === "message_post")!;
+    expect(post.args.body_is_html).toBe(true);
+  });
+});
+
 describe("post_message tool callOdoo call shape", () => {
   afterEach(() => {
     globalThis.fetch = originalFetch;
@@ -3344,6 +3419,7 @@ describe("batch_post_message tool", () => {
     expect(fetchCalls[0].body).toEqual({
       ids: [1],
       body: "&lt;b&gt;hi&lt;/b&gt;",
+      body_is_html: true,
       message_type: "comment"
     });
     expect(fetchCalls[0].body.subtype_xmlid).toBeUndefined();
@@ -3373,6 +3449,7 @@ describe("batch_post_message tool", () => {
     expect(fetchCalls[0].body).toEqual({
       ids: [7],
       body: "<p>already <b>HTML</b></p>",
+      body_is_html: true,
       message_type: "comment",
       subtype_xmlid: "mail.mt_note"
     });

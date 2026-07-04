@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { OdooQueue } from "../odoo-queue";
 import type { Props } from "../server";
-import { escapeHtml, mcpError, mcpErrorFromException, mcpStructured, requireConnection } from "./shared";
+import { mcpError, mcpErrorFromException, mcpStructured, plaintextToHtml, requireConnection } from "./shared";
 
 export function registerWriteTools(server: McpServer, getProps: () => Props | undefined, queue: OdooQueue) {
   server.registerTool(
@@ -52,7 +52,10 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
       try {
         await queue.enqueue(conn, "project.task", "message_post", {
           ids: [id],
-          body: escapeHtml(body),
+          body: plaintextToHtml(body),
+          // The body is now already HTML — tell Odoo so it doesn't re-escape it
+          // into double-escaped mojibake. See plaintextToHtml().
+          body_is_html: true,
           message_type: "comment"
         });
         text += `\n\nTrace token: ${token} — include this token verbatim in your visible reply so this conversation can be found later.`;
@@ -90,7 +93,10 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
       try {
         const result = await queue.enqueue(requireConnection(getProps()), model, "message_post", {
           ids: [record_id],
-          body: body_is_html ? body : escapeHtml(body),
+          body: body_is_html ? body : plaintextToHtml(body),
+          // Body is HTML either way now (caller-supplied, or escaped from plain
+          // text) — declare it so Odoo doesn't double-escape. See plaintextToHtml().
+          body_is_html: true,
           message_type: "comment",
           ...(subtype ? { subtype_xmlid: subtype } : {})
         });
@@ -208,7 +214,10 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
         for (const m of messages) {
           const res = await queue.enqueue(conn, model, "message_post", {
             ids: [m.record_id],
-            body: m.body_is_html ? m.body : escapeHtml(m.body),
+            body: m.body_is_html ? m.body : plaintextToHtml(m.body),
+            // Body is HTML either way now — declare it so Odoo doesn't
+            // double-escape. See plaintextToHtml().
+            body_is_html: true,
             message_type: "comment",
             ...(m.subtype ? { subtype_xmlid: m.subtype } : {})
           });
