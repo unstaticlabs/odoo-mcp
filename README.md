@@ -47,9 +47,24 @@ The server never logs, stores, or echoes your key.
 | `delete_record` | write | `model` (string), `record_id` (positive int) |
 | `batch_update` | write | `model` (string), `updates` (array of `{ record_id, values }`; x2many use Odoo command tuples) — one `write` per entry, fail-fast |
 | `batch_post_message` | write | `model` (string), `messages` (array of `{ record_id, body, subtype?, body_is_html? }`) — one `message_post` per entry, HTML-escaped unless `body_is_html` |
+| `bookkeeping.get_snapshot` | read | `company` (string), `date_from`/`date_to` (string), `scopes` (enum[] min 1: `tax_report`, `tax_returns`, `return_types`, `external_values`, `key_accounts`), `key_account_codes` (string[], optional) — batched tax-close snapshot |
+| `bookkeeping.review_key_accounts` | read | `company` (string), `date_to` (string), `account_codes` (string[]) — per-account balance, open items, and a factual closure-blocker severity |
+| `bookkeeping.explain_report_line` | read | `company` (string), `report_name` (string), `line_code` (string), `date_from`/`date_to` (string) — fact-only diagnosis of why a tax-report line reads its value (e.g. CA12 `box_22` carryover) |
+| `bookkeeping.list_source_documents` | read | `model` (string, default `account.move`), `record_id` (positive int) — `ir.attachment` source docs tagged `original_source`/`official_pdf`/`other` |
+| `bookkeeping.fetch_attachment` | read | `attachment_id` (positive int), `max_bytes` (positive int, default `10485760`) — attachment metadata + base64 content unless URL-type or over `max_bytes` |
+| `bookkeeping.preview_returns` | read | `company` (positive int), `from`/`to` (string), `return_type_xmlids` (string[] min 1) — which `account.return` cards should exist; blank periodicity → `configuration_issues` |
+| `bookkeeping.plan_safe_write` | validate-only | `operation` (enum: `create_or_update_report_external_value`, `create_manual_tax_return`, `update_return_type_periodicity`, `create_lock_exception`), `company` (string), `values` (object) — dry-run write plan + HMAC confirmation token; never writes |
 
 Writes are gated by *your* Odoo user's access rights and record rules (BYO-key), so a caller
 can only do what their Odoo account permits.
+
+> **Bookkeeping safety.** The `bookkeeping.*` tools are **read-only by default**. Writes are
+> **two-phase**: `bookkeeping.plan_safe_write` only *validates* and returns a would-write
+> plan plus an HMAC confirmation token — it **never writes**, and the actual write happens
+> only after explicit human confirmation. These tools **never auto-reconcile** and **never
+> guess tax treatment**; they report facts and leave judgment to the human. See
+> [docs/bookkeeping.md](docs/bookkeeping.md) for the snapshot-first workflow, rate-limit and
+> cache model, full tool reference, and worked CA12 walkthroughs.
 
 ### Field selection
 
