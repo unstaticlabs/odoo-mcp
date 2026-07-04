@@ -3,7 +3,15 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { TtlCache } from "../cache";
 import { callOdoo } from "../odoo";
 import { OdooQueue } from "../odoo-queue";
-import { registerBookkeepingTools, registerSourceDocumentTools } from "./bookkeeping";
+import {
+  computeDeadline,
+  diffExpectedReturns,
+  generatePeriods,
+  normalizePeriodicity,
+  registerBookkeepingTools,
+  registerReturnPreviewTools,
+  registerSourceDocumentTools
+} from "./bookkeeping";
 
 const originalFetch = globalThis.fetch;
 
@@ -698,5 +706,184 @@ describe("bookkeeping.fetch_attachment", () => {
     });
     expect(result.content[0].text).not.toContain("secret-bookkeeping-key");
     expect(result.content[0].text).not.toContain("Bearer");
+  });
+});
+
+// ---- Fiscal-return preview tests (card ODOO1077) ----
+
+function buildPreviewHandler(queue: OdooQueue, cache: TtlCache) {
+  const server = new McpServer({ name: "test", version: "0.0.0" });
+  const props = { odooBaseUrl: "http://example.com", odooDb: "test-db", odooApiKey: "secret-key" };
+  registerReturnPreviewTools(server, () => props, queue, cache);
+  return (server as any)._registeredTools["bookkeeping.preview_returns"].handler;
+}
+
+const VAT_XMLID = "l10n_fr_reports.vat_return_type";
+const RESOLVE_VAT_RETURN_TYPE: Record<string, CannedResponse> = {
+  "ir.model.data.search_read": {
+    status: 200,
+    body: [{ model: "account.return.type", res_id: 900 }]
+  }
+};
+
+describe("bookkeeping.preview_returns", () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  test("resolves an XML ID to its account.return.type record and surfaces its raw discovered fields", async () => {
+    const { fetchMock, calls } = buildFetchMock(RESOLVE_VAT_RETURN_TYPE);
+    globalThis.fetch = fetchMock;
+    const handler = buildPreviewHandler(makeQueue(), new TtlCache());
+
+    const result = await handler({ company: 1, from: "2026-02-01", to: "2026-02-28", return_type_xmlids: [VAT_XMLID] });
+
+    expect(result.isError).toBeUndefined();
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.return_types).toHaveLength(1);
+    expect(parsed.return_types[0].id).toBe(900);
+    expect(parsed.return_types[0].periodicity).toBe("monthly");
+    expect(parsed.return_types[0].report_id).toEqual({ id: 100, name: "Tax Report" });
+    expect(parsed.configuration_issues).toEqual([]);
+
+    // XML ID resolution went through ir.model.data with the module/name split.
+    const resolveCall = calls.find((c) => c.model === "ir.model.data" && c.method === "search_read");
+    expect(resolveCall?.body.domain).toEqual([
+      ["module", "=", "l10n_fr_reports"],
+      ["name", "=", "vat_return_type"]
+    ]);
+    const typeSearch = calls.find((c) => c.model === "account.return.type" && c.method === "search_read");
+    expect(typeSearch?.body.domain).toEqual([["id", "in", [900]]]);
+  });
+
+  test("blank periodicity produces a configuration issue and NO guessed periods", async () => {
+    const { fetchMock } = buildFetchMock({
+      ...RESOLVE_VAT_RETURN_TYPE,
+      "account.return.type.fields_get": {
+        status: 200,
+        body: {
+          id: { type: "integer" },
+          name: { type: "char" },
+          periodicity: { type: "selection" },
+          deadline_periodicity: { type: "selection" },
+          deadline_days_delay: { type: "integer" },
+          auto_generate: { type: "boolean" },
+          report_id: { type: "many2one", relation: "account.report" }
+        }
+      },
+      "account.return.type.search_read": {
+        status: 200,
+        body: [
+          {
+            id: 900,
+            name: "CA12 TVA oct. 2025 - sept. 2026",
+            periodicity: false,
+            deadline_periodicity: false,
+            deadline_days_delay: 19,
+            auto_generate: true,
+            report_id: false
+          }
+        ]
+      }
+    });
+    globalThis.fetch = fetchMock;
+    const handler = buildPreviewHandler(makeQueue(), new TtlCache());
+
+    const result = await handler({ company: 1, from: "2025-10-01", to: "2026-09-30", return_type_xmlids: [VAT_XMLID] });
+
+    expect(result.isError).toBeUndefined();
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.expected_returns).toEqual([]);
+    expect(parsed.configuration_issues).toHaveLength(1);
+    expect(parsed.configuration_issues[0]).toContain("blank or unrecognized");
+    expect(parsed.configuration_issues[0]).toContain("CA12");
+  });
+
+  test("an unresolvable XML ID degrades into configuration_issues without throwing", async () => {
+    const { fetchMock } = buildFetchMock({
+      "ir.model.data.search_read": { status: 200, body: [] }
+    });
+    globalThis.fetch = fetchMock;
+    const handler = buildPreviewHandler(makeQueue(), new TtlCache());
+
+    const result = await handler({ company: 1, from: "2026-01-01", to: "2026-03-31", return_type_xmlids: ["bad.module_xmlid"] });
+
+    expect(result.isError).toBeUndefined();
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.return_types).toEqual([]);
+    expect(parsed.expected_returns).toEqual([]);
+    expect(parsed.configuration_issues.some((c: string) => c.includes("bad.module_xmlid"))).toBe(true);
+  });
+
+  test("end-to-end exists-matching: a monthly period matching an existing return is flagged exists:true", async () => {
+    const { fetchMock } = buildFetchMock(RESOLVE_VAT_RETURN_TYPE);
+    globalThis.fetch = fetchMock;
+    const handler = buildPreviewHandler(makeQueue(), new TtlCache());
+
+    // BASE account.return.search_read returns a Feb 2026 return (date_from 2026-02-01, date_to 2026-02-28).
+    const result = await handler({ company: 1, from: "2026-02-01", to: "2026-02-28", return_type_xmlids: [VAT_XMLID] });
+
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.expected_returns).toHaveLength(1);
+    expect(parsed.expected_returns[0]).toMatchObject({
+      date_start: "2026-02-01",
+      date_end: "2026-02-28",
+      deadline: "2026-03-20", // period end + deadline_days (20)
+      exists: true
+    });
+  });
+
+  test("end-to-end exists-matching: a period with no matching existing return is flagged exists:false", async () => {
+    const { fetchMock } = buildFetchMock(RESOLVE_VAT_RETURN_TYPE);
+    globalThis.fetch = fetchMock;
+    const handler = buildPreviewHandler(makeQueue(), new TtlCache());
+
+    // January window; the only existing return (BASE) is February → no match.
+    const result = await handler({ company: 1, from: "2026-01-01", to: "2026-01-31", return_type_xmlids: [VAT_XMLID] });
+
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.expected_returns).toHaveLength(1);
+    expect(parsed.expected_returns[0]).toMatchObject({ date_start: "2026-01-01", date_end: "2026-01-31", exists: false });
+  });
+});
+
+describe("preview_returns pure functions", () => {
+  test("normalizePeriodicity maps known cadences and rejects blanks", () => {
+    expect(normalizePeriodicity("monthly")).toBe("monthly");
+    expect(normalizePeriodicity("quarterly")).toBe("quarterly");
+    expect(normalizePeriodicity("annual")).toBe("yearly");
+    expect(normalizePeriodicity("yearly")).toBe("yearly");
+    expect(normalizePeriodicity(false)).toBeNull();
+    expect(normalizePeriodicity("")).toBeNull();
+    expect(normalizePeriodicity("whenever")).toBeNull();
+  });
+
+  test("generatePeriods computes a custom (Oct→Sep) annual fiscal year with the correct deadline", () => {
+    const periods = generatePeriods("yearly", "2025-10-01", "2026-09-30", "2025-10-01");
+    expect(periods).toEqual([{ date_start: "2025-10-01", date_end: "2026-09-30" }]);
+    expect(computeDeadline(periods[0].date_end, 19)).toBe("2026-10-19");
+  });
+
+  test("generatePeriods enumerates calendar months and quarters across the window", () => {
+    expect(generatePeriods("monthly", "2026-01-01", "2026-03-31")).toEqual([
+      { date_start: "2026-01-01", date_end: "2026-01-31" },
+      { date_start: "2026-02-01", date_end: "2026-02-28" },
+      { date_start: "2026-03-01", date_end: "2026-03-31" }
+    ]);
+    expect(generatePeriods("quarterly", "2026-01-01", "2026-06-30")).toEqual([
+      { date_start: "2026-01-01", date_end: "2026-03-31" },
+      { date_start: "2026-04-01", date_end: "2026-06-30" }
+    ]);
+  });
+
+  test("diffExpectedReturns flags matching periods exists:true and missing ones exists:false", () => {
+    const expected = [
+      { name: "A", date_start: "2026-01-01", date_end: "2026-01-31", deadline: "2026-02-20" },
+      { name: "B", date_start: "2026-02-01", date_end: "2026-02-28", deadline: "2026-03-20" }
+    ];
+    const existing = [{ date_from: "2026-01-01", date_to: "2026-01-31" }];
+    const diffed = diffExpectedReturns(expected, existing);
+    expect(diffed[0].exists).toBe(true);
+    expect(diffed[1].exists).toBe(false);
   });
 });

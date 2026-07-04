@@ -1,6 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { type CachedFieldMeta, type TtlCache, getFieldsCached } from "../cache";
+import { type CachedFieldMeta, type TtlCache, getFieldsCached, resolveXmlIdCached } from "../cache";
 import { normalizeRecord, normalizeRecords } from "../normalizer";
 import { OdooError, type OdooConnection } from "../odoo";
 import type { OdooQueue } from "../odoo-queue";
@@ -18,10 +18,13 @@ const ACCOUNT_RETURN_TYPE_FIELD_CANDIDATES = [
   "id",
   "name",
   "periodicity",
+  "deadline_periodicity",
   "deadline_days",
+  "deadline_days_delay",
   "deadline_months",
   "deadline_start_date",
   "deadline_end_type",
+  "auto_generate",
   "report_id"
 ];
 const ACCOUNT_RETURN_FIELD_CANDIDATES = ["id", "name", "company_id", "date_from", "date_to", "state", "type_id"];
@@ -605,6 +608,309 @@ export function registerSourceDocumentTools(server: McpServer, getProps: () => P
         };
       } catch (err) {
         return mcpErrorFromException(err, { model: "ir.attachment", method: "read" });
+      }
+    }
+  );
+}
+
+// ---- Fiscal-return preview (card ODOO1077) ----
+
+export type ReturnPeriodicity = "monthly" | "quarterly" | "yearly";
+
+export interface ReturnPeriod {
+  date_start: string;
+  date_end: string;
+}
+
+export interface ExpectedReturn {
+  name: string;
+  date_start: string;
+  date_end: string;
+  deadline: string;
+  exists: boolean;
+}
+
+/**
+ * Exported for unit testing. Maps an Odoo `periodicity` / `deadline_periodicity`
+ * selection value to a canonical cadence, or `null` when it is blank/unrecognized
+ * (the caller must then refuse to guess periods).
+ */
+export function normalizePeriodicity(raw: unknown): ReturnPeriodicity | null {
+  const value = typeof raw === "string" ? raw.trim().toLowerCase() : "";
+  if (!value) return null;
+  if (["monthly", "month", "1_months"].includes(value)) return "monthly";
+  if (["quarterly", "quarter", "trimester", "3_months"].includes(value)) return "quarterly";
+  if (["yearly", "annual", "annually", "year", "12_months"].includes(value)) return "yearly";
+  return null;
+}
+
+function parseIsoDay(iso: string): { y: number; m: number; d: number } | null {
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso);
+  if (!match) return null;
+  return { y: Number(match[1]), m: Number(match[2]), d: Number(match[3]) };
+}
+
+function pad2(n: number): string {
+  return String(n).padStart(2, "0");
+}
+
+function isoOf(y: number, m: number, d: number): string {
+  return `${y}-${pad2(m)}-${pad2(d)}`;
+}
+
+/** Last calendar day of a 1-based month (handles leap years via UTC date rollover). */
+function lastDayOfMonth(y: number, m: number): number {
+  return new Date(Date.UTC(y, m, 0)).getUTCDate();
+}
+
+const MS_PER_DAY = 86_400_000;
+
+/**
+ * Exported for unit testing. Deadline = period end shifted forward by
+ * `deadlineDaysDelay` days (Odoo's `deadline_days_delay`). Pure calendar math
+ * in UTC — no timezone drift.
+ */
+export function computeDeadline(periodEnd: string, deadlineDaysDelay: number): string {
+  const parsed = parseIsoDay(periodEnd);
+  if (!parsed) return periodEnd;
+  const delay = Number.isFinite(deadlineDaysDelay) ? deadlineDaysDelay : 0;
+  const shifted = new Date(Date.UTC(parsed.y, parsed.m - 1, parsed.d) + delay * MS_PER_DAY);
+  return shifted.toISOString().slice(0, 10);
+}
+
+/**
+ * Exported for unit testing. Enumerates the periods of the given cadence that
+ * overlap `[from, to]`. Monthly/quarterly are anchored to calendar boundaries;
+ * yearly is anchored to `fiscalYearStart` (an ISO date whose month/day set the
+ * fiscal-year boundary — e.g. `2025-10-01` yields Oct→Sep fiscal years), falling
+ * back to the calendar year when omitted. Returns `[]` on malformed input.
+ */
+export function generatePeriods(
+  periodicity: ReturnPeriodicity,
+  from: string,
+  to: string,
+  fiscalYearStart?: string | null
+): ReturnPeriod[] {
+  const start = parseIsoDay(from);
+  const end = parseIsoDay(to);
+  if (!start || !end || from > to) return [];
+
+  const periods: ReturnPeriod[] = [];
+
+  if (periodicity === "monthly") {
+    let y = start.y;
+    let m = start.m;
+    while (isoOf(y, m, 1) <= to) {
+      const dateStart = isoOf(y, m, 1);
+      const dateEnd = isoOf(y, m, lastDayOfMonth(y, m));
+      if (dateEnd >= from) periods.push({ date_start: dateStart, date_end: dateEnd });
+      if (++m > 12) {
+        m = 1;
+        y++;
+      }
+    }
+    return periods;
+  }
+
+  if (periodicity === "quarterly") {
+    let y = start.y;
+    let m = Math.floor((start.m - 1) / 3) * 3 + 1; // 1, 4, 7, 10
+    while (isoOf(y, m, 1) <= to) {
+      const endMonth = m + 2;
+      const dateStart = isoOf(y, m, 1);
+      const dateEnd = isoOf(y, endMonth, lastDayOfMonth(y, endMonth));
+      if (dateEnd >= from) periods.push({ date_start: dateStart, date_end: dateEnd });
+      m += 3;
+      if (m > 12) {
+        m -= 12;
+        y++;
+      }
+    }
+    return periods;
+  }
+
+  // yearly — anchored to the fiscal-year start month/day (custom or calendar).
+  const anchor = (fiscalYearStart ? parseIsoDay(fiscalYearStart) : null) ?? { y: start.y, m: 1, d: 1 };
+  const fyMonth = anchor.m;
+  const fyDay = anchor.d;
+  let y = start.y;
+  if (start.m < fyMonth || (start.m === fyMonth && start.d < fyDay)) y -= 1; // fiscal year start on-or-before `from`
+  while (isoOf(y, fyMonth, fyDay) <= to) {
+    const dateStart = isoOf(y, fyMonth, fyDay);
+    const dateEnd = new Date(Date.UTC(y + 1, fyMonth - 1, fyDay) - MS_PER_DAY).toISOString().slice(0, 10);
+    if (dateEnd >= from) periods.push({ date_start: dateStart, date_end: dateEnd });
+    y += 1;
+  }
+  return periods;
+}
+
+function existingReturnBoundary(record: Record<string, unknown>, keys: string[]): string | null {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "string" && value) return value.slice(0, 10);
+  }
+  return null;
+}
+
+/**
+ * Exported for unit testing. Flags each expected period `exists: true` when an
+ * existing `account.return` record shares its date_start/date_end (company scope
+ * is already applied by the caller's domain).
+ */
+export function diffExpectedReturns(
+  expectedPeriods: Array<{ name: string; date_start: string; date_end: string; deadline: string }>,
+  existingReturns: Array<Record<string, unknown>>
+): ExpectedReturn[] {
+  return expectedPeriods.map((period) => ({
+    name: period.name,
+    date_start: period.date_start,
+    date_end: period.date_end,
+    deadline: period.deadline,
+    exists: existingReturns.some(
+      (record) =>
+        existingReturnBoundary(record, ["date_from", "date_start"]) === period.date_start &&
+        existingReturnBoundary(record, ["date_to", "date_end"]) === period.date_end
+    )
+  }));
+}
+
+/** Extracts the raw selection value from a normalized field (`{value,label}`, a bare string, or null). */
+function selectionRawValue(record: Record<string, unknown>, keys: string[]): string | null {
+  for (const key of keys) {
+    const value = record[key];
+    if (value && typeof value === "object" && "value" in value) {
+      const raw = (value as { value: unknown }).value;
+      if (typeof raw === "string" && raw) return raw;
+    } else if (typeof value === "string" && value) {
+      return value;
+    }
+  }
+  return null;
+}
+
+function deadlineDaysDelay(record: Record<string, unknown>): number {
+  for (const key of ["deadline_days_delay", "deadline_days"]) {
+    const value = record[key];
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+  }
+  return 0;
+}
+
+export function registerReturnPreviewTools(
+  server: McpServer,
+  getProps: () => Props | undefined,
+  queue: OdooQueue,
+  cache: TtlCache
+) {
+  server.registerTool(
+    "bookkeeping.preview_returns",
+    {
+      title: "Preview Fiscal Returns",
+      description:
+        "Read-only: preview which account.return (fiscal return) cards SHOULD exist for a company over a date window, " +
+        "based on account.return.type configuration resolved from XML IDs. Flags each expected return as existing or " +
+        "missing. When a return type's periodicity is blank or unrecognized, reports a `configuration_issues` entry " +
+        "instead of guessing periods (e.g. a French CA12 with auto_generate but a blank periodicity).",
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      inputSchema: {
+        company: z.number().int().positive(),
+        from: z.string(),
+        to: z.string(),
+        return_type_xmlids: z.array(z.string()).min(1)
+      }
+    },
+    async ({ company, from, to, return_type_xmlids }) => {
+      try {
+        const conn = requireConnection(getProps());
+        const warnings: string[] = [];
+        const configuration_issues: string[] = [];
+
+        // 1. Resolve each XML ID to an account.return.type res_id (bad ids degrade into configuration_issues).
+        const resIds: number[] = [];
+        for (const xmlId of return_type_xmlids) {
+          try {
+            const { model, res_id } = await resolveXmlIdCached(cache, queue, conn, xmlId);
+            if (model !== "account.return.type") {
+              configuration_issues.push(
+                `XML ID "${xmlId}" resolves to ${model} (res_id ${res_id}), not account.return.type; skipping.`
+              );
+              continue;
+            }
+            resIds.push(res_id);
+          } catch (err) {
+            configuration_issues.push(`Could not resolve XML ID "${xmlId}": ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+
+        // 2. Discover which candidate fields exist on this Odoo version.
+        const typeFieldsMeta = await getFieldsCached(cache, queue, conn, "account.return.type");
+        const typeFields = pickExistingFields(ACCOUNT_RETURN_TYPE_FIELD_CANDIDATES, typeFieldsMeta);
+        for (const candidate of ["periodicity", "deadline_periodicity", "deadline_days_delay"]) {
+          if (!(candidate in typeFieldsMeta)) warnings.push(`account.return.type.${candidate} not present on this Odoo version.`);
+        }
+
+        // 3. Read the resolved return type(s).
+        let returnTypeRecords: Record<string, unknown>[] = [];
+        if (resIds.length > 0) {
+          const rows = (await queue.enqueue(conn, "account.return.type", "search_read", {
+            domain: [["id", "in", resIds]],
+            fields: Array.from(new Set([...typeFields, "id"]))
+          })) as Record<string, unknown>[];
+          returnTypeRecords = normalizeRecords(rows, typeFieldsMeta);
+        }
+
+        // 4. Read existing returns for the company within the window.
+        const returnFieldsMeta = await getFieldsCached(cache, queue, conn, "account.return");
+        const returnFields = pickExistingFields(ACCOUNT_RETURN_FIELD_CANDIDATES, returnFieldsMeta);
+        let existingReturns: Record<string, unknown>[] = [];
+        try {
+          const rows = (await queue.enqueue(conn, "account.return", "search_read", {
+            domain: [
+              ["company_id", "=", company],
+              ["date_from", "<=", to],
+              ["date_to", ">=", from]
+            ],
+            fields: Array.from(new Set([...returnFields, "id"]))
+          })) as Record<string, unknown>[];
+          existingReturns = normalizeRecords(rows, returnFieldsMeta);
+        } catch (err) {
+          warnings.push(warnOn("account.return", err));
+        }
+
+        // 5 + 6. Compute expected periods/deadlines and diff against existing returns.
+        const expected_returns: ExpectedReturn[] = [];
+        for (const returnType of returnTypeRecords) {
+          const id = returnType.id as number;
+          const name = typeof returnType.name === "string" ? returnType.name : `account.return.type ${id}`;
+          const periodicity = normalizePeriodicity(selectionRawValue(returnType, ["periodicity", "deadline_periodicity"]));
+          if (!periodicity) {
+            configuration_issues.push(
+              `account.return.type ${id} (${name}): periodicity/deadline_periodicity is blank or unrecognized; ` +
+                "cannot preview periods; manual creation of the return may be required."
+            );
+            continue;
+          }
+          const delay = deadlineDaysDelay(returnType);
+          const periods = generatePeriods(periodicity, from, to, periodicity === "yearly" ? from : null);
+          const withMeta = periods.map((period) => ({
+            name: `${name} (${period.date_start} → ${period.date_end})`,
+            date_start: period.date_start,
+            date_end: period.date_end,
+            deadline: computeDeadline(period.date_end, delay)
+          }));
+          expected_returns.push(...diffExpectedReturns(withMeta, existingReturns));
+        }
+
+        const result = {
+          return_types: returnTypeRecords,
+          existing_returns: existingReturns,
+          expected_returns,
+          configuration_issues,
+          warnings
+        };
+        return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return mcpErrorFromException(err, { model: "account.return.type", method: "search_read" });
       }
     }
   );
