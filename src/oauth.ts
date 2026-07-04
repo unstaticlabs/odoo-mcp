@@ -72,6 +72,8 @@ function renderAuthorizePage(opts: AuthorizePageOptions): Response {
   .error { background: #fdecea; border: 1px solid #f5c6c2; color: #92322a; border-radius: 6px;
            padding: .6rem .8rem; font-size: .86rem; margin-bottom: .5rem; }
   .note { color: #777; font-size: .78rem; margin-top: 1rem; }
+  .hint { color: #777; font-size: .76rem; margin: .35rem 0 0; line-height: 1.45; }
+  .hint b { color: #555; font-weight: 600; }
 </style>
 </head>
 <body>
@@ -90,7 +92,11 @@ function renderAuthorizePage(opts: AuthorizePageOptions): Response {
            value="${escapeHtml(odooDb ?? "")}">
     <label for="odoo_api_key">API key</label>
     <input id="odoo_api_key" name="odoo_api_key" type="password" required autocomplete="off"
-           placeholder="Odoo &rarr; Preferences &rarr; Account Security &rarr; API Keys">
+           placeholder="paste your Odoo API key">
+    <p class="hint">To create one, in Odoo click your <b>profile picture</b> (top right)
+    &rarr; <b>My&nbsp;Preferences</b> &rarr; <b>Account&nbsp;Security</b> tab &rarr;
+    <b>API&nbsp;Keys</b> &rarr; <b>New&nbsp;API&nbsp;Key</b>. (Menu names follow your Odoo
+    language, e.g. <i>Mes pr&eacute;f&eacute;rences</i> in French.)</p>
     <button type="submit">Verify &amp; connect</button>
   </form>
   <p class="note">Your API key encodes your own Odoo permissions &mdash; this connection can never do

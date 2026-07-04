@@ -166,6 +166,18 @@ npx wrangler kv key delete --binding OAUTH_KV --remote "grant:<userId>:<grantId>
 Deleting the grant destroys the wrapped encryption key, so outstanding access/refresh tokens
 become useless immediately.
 
+### e) Point a connector at a moved/rebuilt Odoo instance (re-auth)
+
+You never need to delete a ChatGPT connector to change its Odoo URL, database, or API key —
+those live in the OAuth grant, not in the connector. When an (ephemeral) test instance moves:
+
+1. Revoke its grant as in (d). The grant's `userId` is `"<odoo-host>/<db>"`, so the key name
+   tells you which connection is which.
+2. Use the connector in ChatGPT again. The next call fails auth, ChatGPT prompts you to
+   reconnect, and the same `/authorize` form comes up — enter the new URL/db/key there.
+3. The connector, its name, and its settings all survive; only the grant is replaced. This
+   also covers a rebuilt instance whose API key changed.
+
 ---
 
 ## Security notes
