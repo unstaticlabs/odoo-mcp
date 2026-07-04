@@ -16,14 +16,14 @@ export function registerResourceTemplates(server: McpServer, getProps: () => Pro
         const id = Number(idRaw);
         if (!Number.isInteger(id) || id <= 0) throw new Error("id must be a positive integer");
 
-        const rows = (await searchRecords(
+        const { rows } = (await searchRecords(
           queue,
           requireConnection(getProps()),
           model,
           [["id", "=", id]],
           null,
           1
-        )) as unknown[];
+        )) as { rows: unknown[]; fieldsMeta: unknown };
         if (!Array.isArray(rows) || rows.length === 0) {
           throw new Error(`No ${model} record found for id ${id}`);
         }
@@ -55,7 +55,7 @@ export function registerResourceTemplates(server: McpServer, getProps: () => Pro
         const limitNum = limitParam ? Number(limitParam) : 10;
         const limit = Number.isInteger(limitNum) && limitNum > 0 ? limitNum : 10;
 
-        const rows = await searchRecords(queue, requireConnection(getProps()), model, domain, fields, limit);
+        const { rows } = await searchRecords(queue, requireConnection(getProps()), model, domain, fields, limit);
         return { contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify(rows, null, 2) }] };
       } catch (err) {
         return resourceErrorFromException(uri, err, { model, method: "search_read" });
@@ -91,7 +91,7 @@ export function registerResourceTemplates(server: McpServer, getProps: () => Pro
         if (!model.trim()) throw new Error("model must be a non-empty string");
 
         const fields = await queue.enqueue(requireConnection(getProps()), model, "fields_get", {
-          attributes: ["type", "string"]
+          attributes: ["type", "string", "readonly", "required", "store", "selection", "relation", "help", "searchable", "sortable"]
         });
         return { contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify(fields, null, 2) }] };
       } catch (err) {
