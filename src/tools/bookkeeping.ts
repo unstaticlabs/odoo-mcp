@@ -31,6 +31,18 @@ const ACCOUNT_RETURN_FIELD_CANDIDATES = ["id", "name", "company_id", "date_from"
 const ACCOUNT_ACCOUNT_FIELD_CANDIDATES = ["id", "code", "name"];
 const ACCOUNT_ACCOUNT_COMPANY_FIELD_CANDIDATES = ["company_id", "company_ids"];
 const MOVE_LINE_OPEN_FIELD_CANDIDATES = ["id", "account_id", "date", "name", "amount_residual", "move_id", "partner_id"];
+const ACCOUNT_ACCOUNT_REVIEW_FIELD_CANDIDATES = ["id", "code", "name", "account_type", "reconcile"];
+const MOVE_LINE_REVIEW_FIELD_CANDIDATES = [
+  "id",
+  "account_id",
+  "date",
+  "name",
+  "amount_residual",
+  "move_id",
+  "partner_id",
+  "journal_id",
+  "reconciled"
+];
 
 /** Exported for unit testing. Intersects candidate field names with a model's fields_get result. */
 export function pickExistingFields(candidates: string[], fieldsMeta: Record<string, unknown>): string[] {
@@ -53,6 +65,30 @@ export function groupByAccountId(rows: Record<string, unknown>[]): Record<string
     (groups[key] ??= []).push(row);
   }
   return groups;
+}
+
+/**
+ * Exported for unit testing. Balance-sheet accounts (e.g. suspense 471000, internal
+ * transfers 580000) that should net to zero at close. Kept as an explicit set so tests
+ * can assert against it directly.
+ */
+export const SUSPENSE_ACCOUNT_CODES = new Set(["471000", "580000"]);
+
+/** Exported for unit testing. Whether a code is a known suspense/clearing account. */
+export function isSuspenseAccount(code: string): boolean {
+  return SUSPENSE_ACCOUNT_CODES.has(code);
+}
+
+/**
+ * Exported for unit testing. FACTUAL severity heuristic only — never judges whether a
+ * line *should* be reconciled. A suspense account carrying any balance or open item is
+ * a closure blocker (`attention`); a fully-empty account is `ok`; anything else is `info`.
+ */
+export function computeSeverity(code: string, balance: number, openItemCount: number): "attention" | "ok" | "info" {
+  const nonZeroBalance = Math.abs(balance) > 1e-9; // tolerate float noise
+  if (isSuspenseAccount(code) && (nonZeroBalance || openItemCount > 0)) return "attention";
+  if (!nonZeroBalance && openItemCount === 0) return "ok";
+  return "info";
 }
 
 function warnOn(model: string, err: unknown): string {
@@ -330,6 +366,156 @@ async function buildKeyAccountsScope(
   };
 }
 
+interface KeyAccountReview {
+  code: string;
+  name: unknown;
+  id: number;
+  balance: number;
+  debit: number;
+  credit: number;
+  account_type: unknown;
+  reconcile: unknown;
+  severity: "attention" | "ok" | "info";
+  open_item_count: number;
+  top_lines: Record<string, unknown>[];
+}
+
+interface KeyAccountsReviewResult {
+  accounts: KeyAccountReview[];
+  warnings: string[];
+}
+
+/**
+ * Sibling of buildKeyAccountsScope reshaped into the review output: one object per
+ * requested account with balance, open-item count, top open lines, and a factual severity.
+ * Keeps live Odoo calls to ~3 (account lookup + balances read_group + open-lines search_read)
+ * on top of cache-backed fields_get.
+ */
+async function buildKeyAccountsReview(
+  cache: TtlCache,
+  queue: OdooQueue,
+  conn: OdooConnection,
+  companyId: number,
+  accountCodes: string[],
+  dateTo: string
+): Promise<KeyAccountsReviewResult> {
+  const warnings: string[] = [];
+
+  // Call 1: resolve the requested accounts by code (company-scoped when the field exists).
+  const accountFieldsMeta = await getFieldsCached(cache, queue, conn, "account.account");
+  const companyField = ACCOUNT_ACCOUNT_COMPANY_FIELD_CANDIDATES.find((name) => name in accountFieldsMeta);
+  const domain: unknown[] = [["code", "in", accountCodes]];
+  if (companyField === "company_id") domain.push([companyField, "=", companyId]);
+  else if (companyField === "company_ids") domain.push([companyField, "in", [companyId]]);
+  else warnings.push("account.account: no company_id/company_ids field found; results not filtered by company.");
+
+  const accountFields = pickExistingFields(
+    [...ACCOUNT_ACCOUNT_REVIEW_FIELD_CANDIDATES, ...(companyField ? [companyField] : [])],
+    accountFieldsMeta
+  );
+  const accountRows = (await queue.enqueue(conn, "account.account", "search_read", {
+    domain,
+    fields: accountFields,
+    limit: 100
+  })) as Record<string, unknown>[];
+
+  const foundCodes = new Set(accountRows.map((row) => row.code as string));
+  for (const code of accountCodes) {
+    if (!foundCodes.has(code)) warnings.push(`No account.account record found for code: ${code}`);
+  }
+
+  if (accountRows.length === 0) return { accounts: [], warnings };
+
+  const accountIds = accountRows.map((row) => row.id as number);
+  const moveLineFieldsMeta = await getFieldsCached(cache, queue, conn, "account.move.line");
+
+  // Call 2: balances grouped by account (balance:sum when present, else debit/credit fallback).
+  const balanceByAccount: Record<string, { balance: number; debit: number; credit: number }> = {};
+  const hasBalance = "balance" in moveLineFieldsMeta;
+  const aggregates: string[] = [];
+  if (hasBalance) aggregates.push("balance:sum");
+  if ("debit" in moveLineFieldsMeta) aggregates.push("debit:sum");
+  if ("credit" in moveLineFieldsMeta) aggregates.push("credit:sum");
+  if (aggregates.length === 0) aggregates.push("balance:sum");
+  try {
+    const balanceRows = (await queue.enqueue(conn, "account.move.line", "read_group", {
+      domain: [
+        ["account_id", "in", accountIds],
+        ["date", "<=", dateTo],
+        ["parent_state", "=", "posted"],
+        ["company_id", "=", companyId]
+      ],
+      fields: aggregates,
+      groupby: ["account_id"],
+      lazy: true
+    })) as Record<string, unknown>[];
+    for (const row of balanceRows) {
+      const acc = row.account_id;
+      if (!Array.isArray(acc) || typeof acc[0] !== "number") continue;
+      const debit = (row.debit as number) ?? 0;
+      const credit = (row.credit as number) ?? 0;
+      const balance = (row.balance as number) ?? debit - credit;
+      balanceByAccount[String(acc[0])] = { balance, debit, credit };
+    }
+  } catch (err) {
+    warnings.push(warnOn("account.move.line (balances)", err));
+  }
+
+  // Call 3: unreconciled open lines. Prefer amount_residual != 0; fall back to reconciled = false.
+  let openByAccount: Record<string, unknown[]> = {};
+  const openPredicate: unknown | null =
+    "amount_residual" in moveLineFieldsMeta
+      ? ["amount_residual", "!=", 0]
+      : "reconciled" in moveLineFieldsMeta
+        ? ["reconciled", "=", false]
+        : null;
+  if (!openPredicate) {
+    warnings.push("account.move.line: no amount_residual/reconciled field found; open lines not fetched.");
+  } else {
+    try {
+      const openFields = pickExistingFields(MOVE_LINE_REVIEW_FIELD_CANDIDATES, moveLineFieldsMeta);
+      const openRows = (await queue.enqueue(conn, "account.move.line", "search_read", {
+        domain: [
+          ["account_id", "in", accountIds],
+          ["date", "<=", dateTo],
+          ["parent_state", "=", "posted"],
+          ["company_id", "=", companyId],
+          openPredicate
+        ],
+        fields: openFields,
+        order: "date desc",
+        limit: 60
+      })) as Record<string, unknown>[];
+      openByAccount = groupByAccountId(normalizeRecords(openRows, moveLineFieldsMeta));
+    } catch (err) {
+      warnings.push(warnOn("account.move.line (open lines)", err));
+    }
+  }
+
+  const accounts: KeyAccountReview[] = accountRows.map((row) => {
+    const id = row.id as number;
+    const code = row.code as string;
+    const bal = balanceByAccount[String(id)] ?? { balance: 0, debit: 0, credit: 0 };
+    const openLines = (openByAccount[String(id)] ?? []) as Record<string, unknown>[];
+    const openItemCount = openLines.length;
+    return {
+      code,
+      name: row.name ?? null,
+      id,
+      balance: bal.balance,
+      debit: bal.debit,
+      credit: bal.credit,
+      account_type: row.account_type ?? null,
+      reconcile: row.reconcile ?? null,
+      severity: computeSeverity(code, bal.balance, openItemCount),
+      open_item_count: openItemCount,
+      top_lines: openLines.slice(0, 10)
+    };
+  });
+
+  return { accounts, warnings };
+}
+
 export function registerBookkeepingTools(server: McpServer, getProps: () => Props | undefined, queue: OdooQueue, cache: TtlCache) {
   server.registerTool(
     "bookkeeping.get_snapshot",
@@ -447,6 +633,51 @@ export function registerBookkeepingTools(server: McpServer, getProps: () => Prop
         };
 
         return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return mcpErrorFromException(err, { model: "res.company", method: "search_read" });
+      }
+    }
+  );
+
+  server.registerTool(
+    "bookkeeping.review_key_accounts",
+    {
+      title: "Review Key Balance-Sheet Accounts",
+      description:
+        "Read-only: review key balance-sheet accounts (e.g. suspense 471000, internal transfers 580000, " +
+        "compte courant d'associe 455100, VAT credit 445670) and flag closure blockers. Returns per-account " +
+        "balance, open-item count, top open lines, and a FACTUAL severity heuristic. Unknown codes -> warnings.",
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      inputSchema: {
+        company: z.string(),
+        date_to: z.string(),
+        account_codes: z.array(z.string())
+      }
+    },
+    async ({ company, date_to, account_codes }) => {
+      const before = queue.snapshot();
+      const startedAt = Date.now();
+      try {
+        const conn = requireConnection(getProps());
+
+        const companyRows = (await queue.enqueue(conn, "res.company", "search_read", {
+          domain: [["name", "=", company]],
+          fields: ["id", "name"],
+          limit: 1
+        })) as Record<string, unknown>[];
+        if (!companyRows || companyRows.length === 0) return mcpError(`Company not found: ${company}`);
+        const companyId = companyRows[0].id as number;
+
+        const { accounts, warnings } = await buildKeyAccountsReview(cache, queue, conn, companyId, account_codes, date_to);
+
+        const { odoo_calls } = queue.delta(before);
+        const metadata = {
+          odoo_calls,
+          cache_hits: cache.getMetrics().cache_hits,
+          duration_seconds: (Date.now() - startedAt) / 1000
+        };
+
+        return { content: [{ type: "text" as const, text: JSON.stringify({ accounts, warnings, metadata }, null, 2) }] };
       } catch (err) {
         return mcpErrorFromException(err, { model: "res.company", method: "search_read" });
       }
