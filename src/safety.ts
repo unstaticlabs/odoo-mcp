@@ -23,6 +23,47 @@ export interface WritePlan {
   company_id: number;
   evidence: string[];
   warnings: string[];
+  // Safe-write planner extensions (card ODOO1080). Optional so legacy plans/tests remain valid
+  // and so the token still signs the full validate-only plan when these are present.
+  status?: PlanStatus;
+  resolved_target?: ResolvedTarget;
+  existing_records?: unknown[];
+  lock_dates?: LockDates;
+  would_write?: WouldWrite;
+}
+
+// ---- Safe-write planner (validate-only) — card ODOO1080 ----
+
+export type PlanStatus = "safe" | "blocked" | "needs_lock_exception" | "duplicate_found";
+
+/** What the write would target: the resolved model plus (optionally) an id and provenance fields. */
+export interface ResolvedTarget {
+  model: string;
+  id?: number;
+  [key: string]: unknown;
+}
+
+/** The write that WOULD be issued by the matching apply tool — never executed here. */
+export interface WouldWrite {
+  model: string;
+  method: "create" | "write";
+  values: Record<string, unknown>;
+  /** Present when method === "write": the record id the write targets. */
+  id?: number;
+  /** Present for periodicity updates: the pre-write value of the changed field. */
+  old_value?: unknown;
+}
+
+/** The pure result of a per-operation planner — mirrors the tool's response body (minus the token). */
+export interface PlanResult {
+  status: PlanStatus;
+  resolved_target: ResolvedTarget;
+  existing_records: unknown[];
+  lock_dates: LockDates;
+  warnings: string[];
+  would_write: WouldWrite;
+  /** True only for a `duplicate_found` that resolves to an in-place update (token still issued). */
+  duplicate_as_update: boolean;
 }
 
 export interface AuditEntry {
@@ -277,5 +318,401 @@ export function buildAuditEntry(plan: WritePlan, result: WriteResult): AuditEntr
     reason: result.reason,
     evidence: plan.evidence,
     timestamp: result.timestamp
+  };
+}
+
+// ---- Pure per-operation planners (validate-only) ----
+
+/** `date` (an Odoo date/datetime) falls within the inclusive day range [from, to] (both YYYY-MM-DD). */
+function dayInPeriod(date: string, from: string, to: string): boolean {
+  const day = normalizeDay(date);
+  return day >= from && day <= to;
+}
+
+/** Assemble a `blocked` plan with an empty create-shaped would_write (never issued — status gates it). */
+function blockedPlan(
+  target: ResolvedTarget,
+  wouldWriteModel: string,
+  warnings: string[],
+  lockDates: LockDates = {},
+  existingRecords: unknown[] = []
+): PlanResult {
+  return {
+    status: "blocked",
+    resolved_target: target,
+    existing_records: existingRecords,
+    lock_dates: lockDates,
+    warnings,
+    would_write: { model: wouldWriteModel, method: "create", values: {} },
+    duplicate_as_update: false
+  };
+}
+
+/** Fold a lock-check verdict into a base status, accumulating human-readable warnings. */
+function applyLockStatus(
+  base: PlanStatus,
+  date: string,
+  lockDates: LockDates,
+  warnings: string[]
+): PlanStatus {
+  const lock = checkDateAgainstLocks(date, lockDates);
+  if (lock.blocked) {
+    for (const v of lock.violated_locks) {
+      if (v.field === "hard_lock_date") warnings.push(`Date ${normalizeDay(date)} is on/before hard_lock_date ${v.lock_date}; write is blocked.`);
+    }
+    return "blocked";
+  }
+  if (lock.needs_lock_exception) {
+    for (const v of lock.violated_locks) {
+      warnings.push(`Date ${normalizeDay(date)} is on/before ${v.field} ${v.lock_date}; a lock exception is required.`);
+    }
+    return "needs_lock_exception";
+  }
+  return base;
+}
+
+/**
+ * States in which an accounting record is finalized/locked; modifying one usually needs reopening it.
+ * Compared case-insensitively so version-specific casing (`posted` vs `Posted`) still matches.
+ */
+const FINALIZED_RECORD_STATES = ["posted", "sent", "done", "closed", "completed", "cancel", "cancelled", "locked"];
+
+/**
+ * Exported for unit testing. Record-state validation: inspect each record's `state` field and warn when a
+ * plan would touch a record sitting in a finalized/locked state. Records without a `state` field (many
+ * Odoo models expose none) yield no warning — this never throws or blocks on version/field gaps.
+ */
+export function recordStateWarnings(records: Array<Record<string, unknown>>, model: string): string[] {
+  const warnings: string[] = [];
+  for (const rec of records) {
+    const state = rec.state;
+    if (typeof state === "string" && FINALIZED_RECORD_STATES.includes(state.toLowerCase())) {
+      warnings.push(
+        `${model} record id ${rec.id ?? "?"} is in state "${state}"; modifying a finalized record may be rejected or require reopening it first.`
+      );
+    }
+  }
+  return warnings;
+}
+
+/**
+ * Exported for unit testing. Sign-of-amount validation for a monetary write: a non-finite amount, or a
+ * value whose sign contradicts the expected one, is surfaced as a warning (soft check — never blocks, since
+ * some report values are legitimately negative). `expectedSign` of `"positive"`/`"negative"` flags a
+ * mismatch; `"any"` only checks finiteness.
+ */
+export function amountSignWarnings(value: number, expectedSign: "positive" | "negative" | "any" = "positive", label = "value"): string[] {
+  if (!Number.isFinite(value)) return [`${label} ${value} is not a finite number; verify the amount before applying.`];
+  if (expectedSign === "positive" && value < 0) {
+    return [`${label} ${value} is negative but a positive amount is expected here; verify the sign before applying.`];
+  }
+  if (expectedSign === "negative" && value > 0) {
+    return [`${label} ${value} is positive but a negative amount is expected here; verify the sign before applying.`];
+  }
+  return [];
+}
+
+export interface ExternalValuePlanInput {
+  values: { report_line_code: string; expression_label: string; date: string; value: number; name: string };
+  /** Resolved account.report.line, or null when the code was not found. */
+  line: { id: number; code: string; name?: string } | null;
+  /** Resolved account.report.expression, or null when the label was not found on the line. */
+  expression: { id: number; label: string; engine: string } | null;
+  /** Name of the report-expression FK on account.report.external.value, or null when absent on this version. */
+  fkField: string | null;
+  /** Existing external values for the expression (planner filters by matching date). */
+  existingValues: Array<{ id: number; date?: unknown; [k: string]: unknown }>;
+  lockDates: LockDates;
+  /** Expected return period the date must fall inside (advisory), or null to skip the check. */
+  period: { date_start: string; date_end: string } | null;
+}
+
+/**
+ * Plan a create-or-update of an `account.report.external.value` (e.g. a carryover balance on
+ * `box_22._applied_carryover_balance`). Resolves duplicate-as-update, engine/period/lock validation.
+ */
+export function planExternalValue(input: ExternalValuePlanInput): PlanResult {
+  const { values, line, expression, fkField, existingValues, lockDates, period } = input;
+  const warnings: string[] = [];
+
+  if (!line) {
+    return blockedPlan(
+      { model: "account.report.line" },
+      "account.report.external.value",
+      [`Report line code "${values.report_line_code}" not found.`],
+      lockDates
+    );
+  }
+  if (!expression) {
+    return blockedPlan(
+      { model: "account.report.expression", report_line_code: line.code },
+      "account.report.external.value",
+      [`Expression label "${values.expression_label}" not found on report line "${line.code}".`],
+      lockDates
+    );
+  }
+
+  const resolvedTarget: ResolvedTarget = {
+    model: "account.report.expression",
+    id: expression.id,
+    label: expression.label,
+    engine: expression.engine,
+    report_line_code: line.code
+  };
+
+  if (expression.engine !== "external") {
+    return blockedPlan(
+      resolvedTarget,
+      "account.report.external.value",
+      [
+        `Expression "${expression.label}" on line "${line.code}" has engine "${expression.engine}", not "external"; ` +
+          "external values can only be written against external-engine expressions."
+      ],
+      lockDates
+    );
+  }
+  if (!fkField) {
+    return blockedPlan(
+      resolvedTarget,
+      "account.report.external.value",
+      ["account.report.external.value exposes no known report-expression FK field on this Odoo version; cannot plan a write."],
+      lockDates
+    );
+  }
+
+  if (period && !dayInPeriod(values.date, period.date_start, period.date_end)) {
+    warnings.push(
+      `Date ${normalizeDay(values.date)} falls outside the expected return period ${period.date_start} → ${period.date_end}.`
+    );
+  }
+
+  // Sign-of-amount validation: an external report balance is normally non-negative here.
+  warnings.push(...amountSignWarnings(values.value, "positive"));
+
+  const duplicate = existingValues.find(
+    (v) => typeof v.date === "string" && normalizeDay(v.date) === normalizeDay(values.date)
+  );
+
+  const wouldWrite: WouldWrite = duplicate
+    ? {
+        model: "account.report.external.value",
+        method: "write",
+        id: duplicate.id,
+        values: { value: values.value, name: values.name }
+      }
+    : {
+        model: "account.report.external.value",
+        method: "create",
+        values: { name: values.name, [fkField]: expression.id, date: normalizeDay(values.date), value: values.value }
+      };
+
+  const base: PlanStatus = duplicate ? "duplicate_found" : "safe";
+  const status = applyLockStatus(base, values.date, lockDates, warnings);
+  if (duplicate) {
+    // Record-state validation on the record the update would target.
+    warnings.push(...recordStateWarnings([duplicate], "account.report.external.value"));
+    warnings.push(`An external value already exists for this expression on ${normalizeDay(values.date)} (id ${duplicate.id}); planning an update.`);
+  }
+
+  return {
+    status,
+    resolved_target: resolvedTarget,
+    existing_records: duplicate ? [duplicate] : [],
+    lock_dates: lockDates,
+    warnings,
+    would_write: wouldWrite,
+    // For this operation a duplicate always maps to an in-place update.
+    duplicate_as_update: status === "duplicate_found"
+  };
+}
+
+export interface ManualReturnPlanInput {
+  companyId: number;
+  values: { return_type_xmlid: string; date_start: string; date_end: string; name?: string };
+  /** Resolved XML ID, or null when it could not be resolved. */
+  resolvedType: { model: string; res_id: number } | null;
+  returnTypeName?: string | null;
+  /** Existing account.return of the same type overlapping the period (tool-filtered). */
+  existingReturns: Array<{ id: number; [k: string]: unknown }>;
+  lockDates: LockDates;
+  /** Existing date field names on account.return (e.g. {from:"date_from", to:"date_to"}). */
+  dateFields: { from: string; to: string };
+}
+
+/** Plan a manual `account.return` creation, blocking on unresolved type and flagging overlapping duplicates. */
+export function planManualReturn(input: ManualReturnPlanInput): PlanResult {
+  const { companyId, values, resolvedType, returnTypeName, existingReturns, lockDates, dateFields } = input;
+
+  if (!resolvedType || resolvedType.model !== "account.return.type") {
+    const detail = resolvedType
+      ? `XML ID "${values.return_type_xmlid}" resolves to ${resolvedType.model}, not account.return.type.`
+      : `Could not resolve XML ID "${values.return_type_xmlid}".`;
+    return blockedPlan({ model: "account.return.type" }, "account.return", [detail], lockDates);
+  }
+
+  const resolvedTarget: ResolvedTarget = {
+    model: "account.return.type",
+    id: resolvedType.res_id,
+    name: returnTypeName ?? null
+  };
+
+  const createValues: Record<string, unknown> = {
+    [dateFields.from]: values.date_start,
+    [dateFields.to]: values.date_end,
+    type_id: resolvedType.res_id,
+    company_id: companyId
+  };
+  if (values.name) createValues.name = values.name;
+
+  const wouldWrite: WouldWrite = { model: "account.return", method: "create", values: createValues };
+  const warnings: string[] = [];
+
+  if (existingReturns.length > 0) {
+    // Record-state validation: flag any overlapping return already finalized/posted.
+    warnings.push(...recordStateWarnings(existingReturns, "account.return"));
+    warnings.push(
+      `An account.return of this type already exists overlapping ${values.date_start} → ${values.date_end} ` +
+        `(id ${existingReturns.map((r) => r.id).join(", ")}); creating another would duplicate it.`
+    );
+    return {
+      status: "duplicate_found",
+      resolved_target: resolvedTarget,
+      existing_records: existingReturns,
+      lock_dates: lockDates,
+      warnings,
+      would_write: wouldWrite,
+      // A duplicate return is NOT an in-place update — no token is issued.
+      duplicate_as_update: false
+    };
+  }
+
+  const status = applyLockStatus("safe", values.date_start, lockDates, warnings);
+  return {
+    status,
+    resolved_target: resolvedTarget,
+    existing_records: [],
+    lock_dates: lockDates,
+    warnings,
+    would_write: wouldWrite,
+    duplicate_as_update: false
+  };
+}
+
+export interface PeriodicityUpdatePlanInput {
+  values: { return_type_xmlid: string; field: string; new_value: unknown };
+  resolvedType: { model: string; res_id: number } | null;
+  returnTypeName?: string | null;
+  /** Whether `values.field` exists on account.return.type for this Odoo version. */
+  fieldExists: boolean;
+  /** The record's current value for `values.field`, reported as old_value. */
+  currentValue: unknown;
+  /** The record's `state` field when present (absent on models without a state); drives record-state validation. */
+  currentState?: unknown;
+}
+
+/** Plan a periodicity (or other) field update on an `account.return.type`, blocking on unknown fields. */
+export function planPeriodicityUpdate(input: PeriodicityUpdatePlanInput): PlanResult {
+  const { values, resolvedType, returnTypeName, fieldExists, currentValue, currentState } = input;
+
+  if (!resolvedType || resolvedType.model !== "account.return.type") {
+    const detail = resolvedType
+      ? `XML ID "${values.return_type_xmlid}" resolves to ${resolvedType.model}, not account.return.type.`
+      : `Could not resolve XML ID "${values.return_type_xmlid}".`;
+    return blockedPlan({ model: "account.return.type" }, "account.return.type", [detail]);
+  }
+
+  const resolvedTarget: ResolvedTarget = {
+    model: "account.return.type",
+    id: resolvedType.res_id,
+    name: returnTypeName ?? null,
+    [values.field]: currentValue
+  };
+
+  if (!fieldExists) {
+    return blockedPlan(
+      resolvedTarget,
+      "account.return.type",
+      [`Field "${values.field}" does not exist on account.return.type for this Odoo version.`]
+    );
+  }
+
+  // Record-state validation on the record the write would update.
+  const warnings = recordStateWarnings([{ id: resolvedType.res_id, state: currentState }], "account.return.type");
+  warnings.push(`account.return.type.${values.field} would change from ${JSON.stringify(currentValue)} to ${JSON.stringify(values.new_value)}.`);
+
+  return {
+    status: "safe",
+    resolved_target: resolvedTarget,
+    existing_records: [],
+    lock_dates: {},
+    warnings,
+    would_write: {
+      model: "account.return.type",
+      method: "write",
+      id: resolvedType.res_id,
+      values: { [values.field]: values.new_value },
+      old_value: currentValue
+    },
+    duplicate_as_update: false
+  };
+}
+
+export interface LockExceptionPlanInput {
+  companyId: number;
+  values: { company: string; field: string; exception_date: string; reason: string };
+  /** Result of checkLockExceptionSupport — the model may be absent on saas-19.2. */
+  support: { supported: boolean; model: string | null; warning?: string };
+}
+
+/** Plan a lock-exception creation, blocking when the model is unsupported on this Odoo version. */
+export function planLockException(input: LockExceptionPlanInput): PlanResult {
+  const { companyId, values, support } = input;
+
+  if (!support.supported || !support.model) {
+    return blockedPlan(
+      { model: "account.lock_exception", company_id: companyId },
+      "account.lock_exception",
+      [support.warning ?? "account.lock_exception is unavailable on this Odoo version; cannot create a lock exception."]
+    );
+  }
+
+  return {
+    status: "safe",
+    resolved_target: { model: support.model, company_id: companyId },
+    existing_records: [],
+    lock_dates: {},
+    warnings: [],
+    would_write: {
+      model: support.model,
+      method: "create",
+      values: { company_id: companyId, [values.field]: values.exception_date, reason: values.reason }
+    },
+    duplicate_as_update: false
+  };
+}
+
+/**
+ * Token gate: a confirmation token is issued only for a clean `safe` plan or a `duplicate_found` that
+ * resolves to an in-place update. `blocked` / `needs_lock_exception` never receive a token.
+ */
+export function planIssuesToken(plan: PlanResult): boolean {
+  return plan.status === "safe" || (plan.status === "duplicate_found" && plan.duplicate_as_update);
+}
+
+/** Build the canonical WritePlan the confirmation token signs over, from a planner result. */
+export function toWritePlan(operation: string, companyId: number, plan: PlanResult): WritePlan {
+  return {
+    operation,
+    model: plan.would_write.model,
+    method: plan.would_write.method,
+    values: plan.would_write.values,
+    company_id: companyId,
+    evidence: [],
+    warnings: plan.warnings,
+    status: plan.status,
+    resolved_target: plan.resolved_target,
+    existing_records: plan.existing_records,
+    lock_dates: plan.lock_dates,
+    would_write: plan.would_write
   };
 }

@@ -4,7 +4,13 @@ import type { OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 import { callOdoo } from "./odoo";
 import { OdooQueue } from "./odoo-queue";
 import { TtlCache } from "./cache";
-import { registerBookkeepingTools, registerReportLineTools, registerReturnPreviewTools, registerSourceDocumentTools } from "./tools/bookkeeping";
+import {
+  registerBookkeepingTools,
+  registerReportLineTools,
+  registerReturnPreviewTools,
+  registerSafeWritePlannerTools,
+  registerSourceDocumentTools
+} from "./tools/bookkeeping";
 import { registerReadTools } from "./tools/read";
 import { registerResourceTemplates } from "./tools/resources";
 import { registerWriteTools } from "./tools/write";
@@ -15,6 +21,8 @@ export interface Env {
   OAUTH_KV: KVNamespace;
   /** Injected by OAuthProvider into handlers it invokes; absent on the raw header path. */
   OAUTH_PROVIDER: OAuthHelpers;
+  /** HMAC secret for stateless safe-write confirmation tokens (wrangler `vars`/secret). */
+  CONFIRMATION_SECRET?: string;
 }
 
 export interface Props extends Record<string, unknown> {
@@ -25,7 +33,7 @@ export interface Props extends Record<string, unknown> {
 
 export class McpAgent extends McpAgentBase<Env, unknown, Props> {
   // Bump this on every future tool-surface change: it's the cache-busting key clients use to refetch the tool list.
-  server = new McpServer({ name: "odoo-mcp", version: "0.4.0" });
+  server = new McpServer({ name: "odoo-mcp", version: "0.5.0" });
   odooQueue = new OdooQueue(callOdoo);
   // In-memory only — resets on DO eviction, same as odooQueue above.
   cache = new TtlCache();
@@ -39,5 +47,7 @@ export class McpAgent extends McpAgentBase<Env, unknown, Props> {
     registerReturnPreviewTools(this.server, getProps, this.odooQueue, this.cache);
     registerReportLineTools(this.server, getProps, this.odooQueue, this.cache);
     registerSourceDocumentTools(this.server, getProps, this.odooQueue);
+    // Tools have no direct env access; thread the HMAC secret through as a getter.
+    registerSafeWritePlannerTools(this.server, getProps, this.odooQueue, this.cache, () => this.env.CONFIRMATION_SECRET);
   }
 }

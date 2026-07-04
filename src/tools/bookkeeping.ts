@@ -4,6 +4,18 @@ import { type CachedFieldMeta, type TtlCache, getFieldsCached, resolveXmlIdCache
 import { normalizeRecord, normalizeRecords } from "../normalizer";
 import { OdooError, type OdooConnection } from "../odoo";
 import type { OdooQueue } from "../odoo-queue";
+import {
+  checkLockExceptionSupport,
+  getLockDates,
+  issueConfirmationToken,
+  planExternalValue,
+  planIssuesToken,
+  planLockException,
+  planManualReturn,
+  planPeriodicityUpdate,
+  toWritePlan,
+  type PlanResult
+} from "../safety";
 import type { Props } from "../server";
 import { mcpError, mcpErrorFromException, requireConnection } from "./shared";
 
@@ -1491,6 +1503,334 @@ export function registerReturnPreviewTools(
         return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
       } catch (err) {
         return mcpErrorFromException(err, { model: "account.return.type", method: "search_read" });
+      }
+    }
+  );
+}
+
+// ---- Safe-write planner (validate-only) — card ODOO1080 ----
+
+const RETURN_DATE_FIELD_CANDIDATES = ["date_from", "date_to"];
+
+/** Resolve a company name to its res.company id, or null when not found. */
+async function resolveCompanyId(queue: OdooQueue, conn: OdooConnection, company: string): Promise<number | null> {
+  const rows = (await queue.enqueue(conn, "res.company", "search_read", {
+    domain: [["name", "=", company]],
+    fields: ["id", "name"],
+    limit: 1
+  })) as Array<{ id: number }>;
+  return rows?.[0]?.id ?? null;
+}
+
+/** Read a single account.return.type's name (best-effort provenance for resolved_target). */
+async function readReturnTypeName(queue: OdooQueue, conn: OdooConnection, resId: number): Promise<string | null> {
+  try {
+    const rows = (await queue.enqueue(conn, "account.return.type", "search_read", {
+      domain: [["id", "=", resId]],
+      fields: ["id", "name"],
+      limit: 1
+    })) as Array<{ name?: unknown }>;
+    const name = rows?.[0]?.name;
+    return typeof name === "string" ? name : null;
+  } catch {
+    return null;
+  }
+}
+
+async function planExternalValueOp(
+  cache: TtlCache,
+  queue: OdooQueue,
+  conn: OdooConnection,
+  companyId: number,
+  values: Record<string, unknown>
+): Promise<PlanResult> {
+  const report_line_code = String(values.report_line_code ?? "");
+  const expression_label = String(values.expression_label ?? "");
+  const date = String(values.date ?? "");
+
+  // Resolve the report line by code.
+  const lineFieldsMeta = await getFieldsCached(cache, queue, conn, "account.report.line");
+  const lineFields = pickExistingFields(ACCOUNT_REPORT_LINE_FIELD_CANDIDATES, lineFieldsMeta);
+  const lineRows = (await queue.enqueue(conn, "account.report.line", "search_read", {
+    domain: [["code", "=", report_line_code]],
+    fields: lineFields,
+    limit: 1
+  })) as Array<{ id: number; code: string; name?: string }>;
+  const line = lineRows?.[0] ?? null;
+
+  // Resolve the expression by label on that line.
+  let expression: { id: number; label: string; engine: string } | null = null;
+  if (line) {
+    const exprFieldsMeta = await getFieldsCached(cache, queue, conn, "account.report.expression");
+    const exprFields = pickExistingFields(ACCOUNT_REPORT_EXPRESSION_FIELD_CANDIDATES, exprFieldsMeta);
+    const exprRows = (await queue.enqueue(conn, "account.report.expression", "search_read", {
+      domain: [
+        ["report_line_id", "=", line.id],
+        ["label", "=", expression_label]
+      ],
+      fields: exprFields,
+      limit: 1
+    })) as Array<{ id: number; label: string; engine: string }>;
+    expression = exprRows?.[0] ?? null;
+  }
+
+  // Discover the report-expression FK field and any existing external value on the same expression.
+  const extFieldsMeta = await getFieldsCached(cache, queue, conn, "account.report.external.value");
+  const fkField = EXTERNAL_VALUE_FK_CANDIDATES.find((name) => name in extFieldsMeta) ?? null;
+  let existingValues: Array<{ id: number; date?: unknown }> = [];
+  if (expression && fkField) {
+    const extFields = pickExistingFields(["id", "date", "value", "state", fkField], extFieldsMeta);
+    existingValues = (await queue.enqueue(conn, "account.report.external.value", "search_read", {
+      domain: [[fkField, "=", expression.id]],
+      fields: extFields,
+      limit: 100
+    })) as Array<{ id: number; date?: unknown }>;
+  }
+
+  // Derive the expected return period from an account.return covering the date (advisory).
+  let period: { date_start: string; date_end: string } | null = null;
+  try {
+    const returnFieldsMeta = await getFieldsCached(cache, queue, conn, "account.return");
+    const returnFields = pickExistingFields(["id", ...RETURN_DATE_FIELD_CANDIDATES], returnFieldsMeta);
+    const returnRows = (await queue.enqueue(conn, "account.return", "search_read", {
+      domain: [
+        ["company_id", "=", companyId],
+        ["date_from", "<=", date],
+        ["date_to", ">=", date]
+      ],
+      fields: returnFields,
+      limit: 1
+    })) as Array<{ date_from?: unknown; date_to?: unknown }>;
+    const row = returnRows?.[0];
+    if (row && typeof row.date_from === "string" && typeof row.date_to === "string") {
+      period = { date_start: row.date_from.slice(0, 10), date_end: row.date_to.slice(0, 10) };
+    }
+  } catch {
+    // account.return may be absent on this Odoo version — period stays null (check skipped).
+  }
+
+  const { lockDates } = await getLockDates(queue, cache, conn, companyId);
+
+  return planExternalValue({
+    values: {
+      report_line_code,
+      expression_label,
+      date,
+      value: Number(values.value),
+      name: String(values.name ?? "")
+    },
+    line,
+    expression,
+    fkField,
+    existingValues,
+    lockDates,
+    period
+  });
+}
+
+async function planManualReturnOp(
+  cache: TtlCache,
+  queue: OdooQueue,
+  conn: OdooConnection,
+  companyId: number,
+  values: Record<string, unknown>
+): Promise<PlanResult> {
+  const xmlId = String(values.return_type_xmlid ?? "");
+  const date_start = String(values.date_start ?? "");
+  const date_end = String(values.date_end ?? "");
+  const name = typeof values.name === "string" ? values.name : undefined;
+
+  let resolvedType: { model: string; res_id: number } | null = null;
+  try {
+    resolvedType = await resolveXmlIdCached(cache, queue, conn, xmlId);
+  } catch {
+    resolvedType = null;
+  }
+
+  const returnFieldsMeta = await getFieldsCached(cache, queue, conn, "account.return");
+  // account.return uses date_from/date_to across supported versions; fall back to them if fields_get is sparse.
+  const existingDateFields = pickExistingFields(RETURN_DATE_FIELD_CANDIDATES, returnFieldsMeta);
+  const dateFields = {
+    from: existingDateFields.includes("date_from") ? "date_from" : RETURN_DATE_FIELD_CANDIDATES[0],
+    to: existingDateFields.includes("date_to") ? "date_to" : RETURN_DATE_FIELD_CANDIDATES[1]
+  };
+
+  let returnTypeName: string | null = null;
+  let existingReturns: Array<{ id: number }> = [];
+  if (resolvedType && resolvedType.model === "account.return.type") {
+    returnTypeName = await readReturnTypeName(queue, conn, resolvedType.res_id);
+    const returnFields = pickExistingFields([...ACCOUNT_RETURN_FIELD_CANDIDATES], returnFieldsMeta);
+    existingReturns = (await queue.enqueue(conn, "account.return", "search_read", {
+      domain: [
+        ["company_id", "=", companyId],
+        ["type_id", "=", resolvedType.res_id],
+        [dateFields.from, "<=", date_end],
+        [dateFields.to, ">=", date_start]
+      ],
+      fields: returnFields,
+      limit: 100
+    })) as Array<{ id: number }>;
+  }
+
+  const { lockDates } = await getLockDates(queue, cache, conn, companyId);
+
+  return planManualReturn({
+    companyId,
+    values: { return_type_xmlid: xmlId, date_start, date_end, name },
+    resolvedType,
+    returnTypeName,
+    existingReturns,
+    lockDates,
+    dateFields
+  });
+}
+
+async function planPeriodicityUpdateOp(
+  cache: TtlCache,
+  queue: OdooQueue,
+  conn: OdooConnection,
+  values: Record<string, unknown>
+): Promise<PlanResult> {
+  const xmlId = String(values.return_type_xmlid ?? "");
+  const field = String(values.field ?? "");
+  const new_value = values.new_value;
+
+  let resolvedType: { model: string; res_id: number } | null = null;
+  try {
+    resolvedType = await resolveXmlIdCached(cache, queue, conn, xmlId);
+  } catch {
+    resolvedType = null;
+  }
+
+  const typeFieldsMeta = await getFieldsCached(cache, queue, conn, "account.return.type");
+  const fieldExists = field in typeFieldsMeta;
+  const hasState = "state" in typeFieldsMeta;
+
+  let returnTypeName: string | null = null;
+  let currentValue: unknown = null;
+  let currentState: unknown = null;
+  if (resolvedType && resolvedType.model === "account.return.type") {
+    // Read id/name, the target field (for old_value), and `state` (for record-state validation) when present.
+    const readFields = Array.from(new Set(["id", "name", ...(fieldExists ? [field] : []), ...(hasState ? ["state"] : [])]));
+    const rows = (await queue.enqueue(conn, "account.return.type", "search_read", {
+      domain: [["id", "=", resolvedType.res_id]],
+      fields: readFields,
+      limit: 1
+    })) as Array<Record<string, unknown>>;
+    const row = rows?.[0];
+    if (row) {
+      returnTypeName = typeof row.name === "string" ? row.name : null;
+      currentValue = fieldExists ? (row[field] ?? null) : null;
+      currentState = hasState ? (row.state ?? null) : null;
+    }
+  }
+
+  return planPeriodicityUpdate({
+    values: { return_type_xmlid: xmlId, field, new_value },
+    resolvedType,
+    returnTypeName,
+    fieldExists,
+    currentValue,
+    currentState
+  });
+}
+
+async function planLockExceptionOp(
+  cache: TtlCache,
+  queue: OdooQueue,
+  conn: OdooConnection,
+  companyId: number,
+  company: string,
+  values: Record<string, unknown>
+): Promise<PlanResult> {
+  const support = await checkLockExceptionSupport(queue, cache, conn);
+  return planLockException({
+    companyId,
+    values: {
+      company,
+      field: String(values.field ?? ""),
+      exception_date: String(values.exception_date ?? ""),
+      reason: String(values.reason ?? "")
+    },
+    support
+  });
+}
+
+export function registerSafeWritePlannerTools(
+  server: McpServer,
+  getProps: () => Props | undefined,
+  queue: OdooQueue,
+  cache: TtlCache,
+  getSecret: () => string | undefined
+) {
+  server.registerTool(
+    "bookkeeping.plan_safe_write",
+    {
+      title: "Plan Safe Write (validate-only)",
+      description:
+        "Validate-only: NEVER writes to Odoo. Runs read-only checks (company/field existence, record state, period " +
+        "consistency, duplicates, lock dates) for a proposed bookkeeping write and returns a would-write plan plus an " +
+        "HMAC confirmation token. Supported operations: create_or_update_report_external_value, create_manual_tax_return, " +
+        "update_return_type_periodicity, create_lock_exception. A confirmation_token is issued only when status is 'safe' " +
+        "or a 'duplicate_found' that resolves to an in-place update; never for 'blocked' or 'needs_lock_exception'.",
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+      inputSchema: {
+        operation: z.enum([
+          "create_or_update_report_external_value",
+          "create_manual_tax_return",
+          "update_return_type_periodicity",
+          "create_lock_exception"
+        ]),
+        company: z.string(),
+        values: z.record(z.string(), z.unknown())
+      }
+    },
+    async ({ operation, company, values }) => {
+      try {
+        const conn = requireConnection(getProps());
+        const companyId = await resolveCompanyId(queue, conn, company);
+        if (companyId == null) return mcpError(`Company not found: ${company}`);
+
+        let plan: PlanResult;
+        switch (operation) {
+          case "create_or_update_report_external_value":
+            plan = await planExternalValueOp(cache, queue, conn, companyId, values);
+            break;
+          case "create_manual_tax_return":
+            plan = await planManualReturnOp(cache, queue, conn, companyId, values);
+            break;
+          case "update_return_type_periodicity":
+            plan = await planPeriodicityUpdateOp(cache, queue, conn, values);
+            break;
+          case "create_lock_exception":
+            plan = await planLockExceptionOp(cache, queue, conn, companyId, company, values);
+            break;
+          default:
+            return mcpError(`Unsupported operation: ${operation}`);
+        }
+
+        const result: Record<string, unknown> = {
+          status: plan.status,
+          resolved_target: plan.resolved_target,
+          existing_records: plan.existing_records,
+          lock_dates: plan.lock_dates,
+          warnings: plan.warnings,
+          would_write: plan.would_write,
+          confirmation_required: true
+        };
+
+        if (planIssuesToken(plan)) {
+          const secret = getSecret();
+          if (!secret) {
+            plan.warnings.push("CONFIRMATION_SECRET is not configured; no confirmation token was issued.");
+          } else {
+            result.confirmation_token = await issueConfirmationToken(toWritePlan(operation, companyId, plan), secret, Date.now());
+          }
+        }
+
+        return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return mcpErrorFromException(err, { model: "res.company", method: "search_read" });
       }
     }
   );
