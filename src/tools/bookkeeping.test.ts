@@ -3,7 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { TtlCache } from "../cache";
 import { callOdoo } from "../odoo";
 import { OdooQueue } from "../odoo-queue";
-import { registerBookkeepingTools } from "./bookkeeping";
+import { registerBookkeepingTools, registerSourceDocumentTools } from "./bookkeeping";
 
 const originalFetch = globalThis.fetch;
 
@@ -461,5 +461,242 @@ describe("bookkeeping.get_snapshot", () => {
     expect(returnTypeSearchRead?.body.fields).not.toContain("deadline_months");
     expect(returnTypeSearchRead?.body.fields).not.toContain("deadline_start_date");
     expect(returnTypeSearchRead?.body.fields).not.toContain("deadline_end_type");
+  });
+});
+
+// ---- Source documents & attachments tests (card ODOO1086) ----
+
+const connProps = { odooBaseUrl: "http://example.com", odooDb: "test-db", odooApiKey: "secret-bookkeeping-key" };
+
+function makeAgent() {
+  const server = new McpServer({ name: "test", version: "0.0.0" });
+  const queue = new OdooQueue(callOdoo, { minDelayMs: 0 });
+  registerSourceDocumentTools(server, () => connProps, queue);
+  return server as any;
+}
+
+function getToolHandler(agent: any, name: string) {
+  return agent._registeredTools[name].handler;
+}
+
+function jsonResponse(result: unknown, status = 200) {
+  return new Response(JSON.stringify({ result }), {
+    status,
+    headers: { "Content-Type": "application/json" }
+  });
+}
+
+describe("bookkeeping.list_source_documents", () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  test("account.move: uses the verbatim res_field trap-avoidance domain and reads the move for tagging ids", async () => {
+    const agent = makeAgent();
+    const fetchCalls: { url: string; body: any }[] = [];
+    const fetchMock = mock(async (url: string, init: any) => {
+      fetchCalls.push({ url, body: JSON.parse(init.body) });
+      if (url.endsWith("/ir.attachment/search_read")) {
+        return jsonResponse([
+          { id: 1, name: "invoice.pdf", res_field: "invoice_pdf_report_file" },
+          { id: 2, name: "original.pdf", res_field: false },
+          { id: 3, name: "other.pdf", res_field: false }
+        ]);
+      }
+      return jsonResponse([
+        { message_main_attachment_id: [2, "original.pdf"], invoice_pdf_report_id: [1, "invoice.pdf"] }
+      ]);
+    });
+    globalThis.fetch = fetchMock;
+
+    const handler = getToolHandler(agent, "bookkeeping.list_source_documents");
+    const result = await handler({ model: "account.move", record_id: 42 });
+
+    expect(result.isError).toBeUndefined();
+    expect(fetchCalls.length).toBe(2);
+    expect(fetchCalls[0].url).toContain("/ir.attachment/search_read");
+    expect(fetchCalls[0].body.domain).toEqual([
+      "&",
+      "&",
+      ["res_model", "=", "account.move"],
+      ["res_id", "=", 42],
+      "|",
+      ["res_field", "=", false],
+      ["res_field", "=", "invoice_pdf_report_file"]
+    ]);
+    expect(fetchCalls[1].url).toContain("/account.move/read");
+
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.documents.find((d: any) => d.id === 2).tag).toBe("original_source");
+    expect(payload.documents.find((d: any) => d.id === 1).tag).toBe("official_pdf");
+    expect(payload.documents.find((d: any) => d.id === 3).tag).toBe("other");
+    expect(payload.warnings).toEqual([]);
+    expect(payload.metadata).toEqual({ odoo_calls: 2, cache_hits: 0, duration_seconds: expect.any(Number) });
+  });
+
+  test("non-account.move model: uses the plain res_field=false domain and skips the account.move read", async () => {
+    const agent = makeAgent();
+    const fetchCalls: { url: string; body: any }[] = [];
+    const fetchMock = mock(async (url: string, init: any) => {
+      fetchCalls.push({ url, body: JSON.parse(init.body) });
+      return jsonResponse([{ id: 5, name: "doc.pdf", res_field: false }]);
+    });
+    globalThis.fetch = fetchMock;
+
+    const handler = getToolHandler(agent, "bookkeeping.list_source_documents");
+    const result = await handler({ model: "project.task", record_id: 7 });
+
+    expect(result.isError).toBeUndefined();
+    expect(fetchCalls.length).toBe(1);
+    expect(fetchCalls[0].body.domain).toEqual(["&", "&", ["res_model", "=", "project.task"], ["res_id", "=", 7], ["res_field", "=", false]]);
+
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.documents[0].tag).toBe("other");
+    expect(payload.metadata.odoo_calls).toBe(1);
+  });
+
+  test("search_read fields list never includes datas", async () => {
+    const agent = makeAgent();
+    let searchReadFields: string[] = [];
+    const fetchMock = mock(async (url: string, init: any) => {
+      const body = JSON.parse(init.body);
+      if (url.endsWith("/ir.attachment/search_read")) {
+        searchReadFields = body.fields;
+        return jsonResponse([]);
+      }
+      return jsonResponse([{}]);
+    });
+    globalThis.fetch = fetchMock;
+
+    const handler = getToolHandler(agent, "bookkeeping.list_source_documents");
+    await handler({ model: "account.move", record_id: 1 });
+
+    expect(searchReadFields).not.toContain("datas");
+  });
+
+  test("account.move read failure is non-fatal: attachments still returned, tagged other, with a warning", async () => {
+    const agent = makeAgent();
+    const fetchMock = mock(async (url: string) => {
+      if (url.endsWith("/ir.attachment/search_read")) {
+        return jsonResponse([{ id: 9, name: "doc.pdf", res_field: false }]);
+      }
+      return new Response(JSON.stringify({ error: { message: "computed field error" } }), { status: 500 });
+    });
+    globalThis.fetch = fetchMock;
+
+    const handler = getToolHandler(agent, "bookkeeping.list_source_documents");
+    const result = await handler({ model: "account.move", record_id: 1 });
+
+    expect(result.isError).toBeUndefined();
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.documents[0].tag).toBe("other");
+    expect(payload.warnings.length).toBe(1);
+    expect(payload.warnings[0]).toContain("account.move read failed");
+  });
+});
+
+describe("bookkeeping.fetch_attachment", () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  test("refuses without a second call when file_size exceeds the default max_bytes", async () => {
+    const agent = makeAgent();
+    const fetchMock = mock(async () => jsonResponse([{ name: "big.pdf", mimetype: "application/pdf", file_size: 99999999, type: "binary" }]));
+    globalThis.fetch = fetchMock;
+
+    const handler = getToolHandler(agent, "bookkeeping.fetch_attachment");
+    const result = await handler({ attachment_id: 1, max_bytes: 10485760 });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("99999999");
+    expect(fetchMock.mock.calls.length).toBe(1);
+  });
+
+  test("refuses without a second call when file_size exceeds a custom max_bytes", async () => {
+    const agent = makeAgent();
+    const fetchMock = mock(async () => jsonResponse([{ name: "med.pdf", mimetype: "application/pdf", file_size: 5000, type: "binary" }]));
+    globalThis.fetch = fetchMock;
+
+    const handler = getToolHandler(agent, "bookkeeping.fetch_attachment");
+    const result = await handler({ attachment_id: 1, max_bytes: 1000 });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("1000");
+    expect(fetchMock.mock.calls.length).toBe(1);
+  });
+
+  test("url-type attachment: passes through url with no bytes fetched, one call only", async () => {
+    const agent = makeAgent();
+    const fetchMock = mock(async () =>
+      jsonResponse([{ name: "link", mimetype: "application/pdf", file_size: 0, type: "url", url: "http://example.com/f.pdf" }])
+    );
+    globalThis.fetch = fetchMock;
+
+    const handler = getToolHandler(agent, "bookkeeping.fetch_attachment");
+    const result = await handler({ attachment_id: 3, max_bytes: 10485760 });
+
+    expect(result.isError).toBeUndefined();
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.url).toBe("http://example.com/f.pdf");
+    expect(payload.base64).toBeUndefined();
+    expect(payload.datas).toBeUndefined();
+    expect(fetchMock.mock.calls.length).toBe(1);
+  });
+
+  test("happy path under the cap: fetches datas on a second call and returns base64", async () => {
+    const agent = makeAgent();
+    let callCount = 0;
+    const fetchMock = mock(async () => {
+      callCount++;
+      if (callCount === 1) {
+        return jsonResponse([{ name: "small.pdf", mimetype: "application/pdf", file_size: 100, type: "binary" }]);
+      }
+      return jsonResponse([{ name: "small.pdf", mimetype: "application/pdf", file_size: 100, datas: "base64-content-here" }]);
+    });
+    globalThis.fetch = fetchMock;
+
+    const handler = getToolHandler(agent, "bookkeeping.fetch_attachment");
+    const result = await handler({ attachment_id: 4, max_bytes: 10485760 });
+
+    expect(result.isError).toBeUndefined();
+    expect(callCount).toBe(2);
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.base64).toBe("base64-content-here");
+    expect(payload.name).toBe("small.pdf");
+  });
+
+  test("no record found returns a plain mcpError", async () => {
+    const agent = makeAgent();
+    globalThis.fetch = mock(async () => jsonResponse([]));
+
+    const handler = getToolHandler(agent, "bookkeeping.fetch_attachment");
+    const result = await handler({ attachment_id: 404, max_bytes: 10485760 });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("404");
+  });
+
+  test("Odoo error surfaces as the structured JSON envelope with isError:true", async () => {
+    const agent = makeAgent();
+    globalThis.fetch = mock(async () =>
+      new Response(JSON.stringify({ error: { message: "Access Denied by Odoo" } }), { status: 403 })
+    );
+
+    const handler = getToolHandler(agent, "bookkeeping.fetch_attachment");
+    const result = await handler({ attachment_id: 1, max_bytes: 10485760 });
+
+    expect(result.isError).toBe(true);
+    const envelope = JSON.parse(result.content[0].text);
+    expect(envelope).toEqual({
+      error: "permission_denied",
+      model: "ir.attachment",
+      method: "read",
+      http_status: 403,
+      details: "Access Denied by Odoo",
+      recoverable: false
+    });
+    expect(result.content[0].text).not.toContain("secret-bookkeeping-key");
+    expect(result.content[0].text).not.toContain("Bearer");
   });
 });

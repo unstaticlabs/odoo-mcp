@@ -450,3 +450,162 @@ export function registerBookkeepingTools(server: McpServer, getProps: () => Prop
     }
   );
 }
+
+// ---- Source documents & attachments (card ODOO1086) ----
+
+const ATTACHMENT_LIST_FIELDS = ["name", "mimetype", "file_size", "checksum", "type", "url", "res_field", "create_date"];
+
+interface AttachmentRow {
+  id: number;
+  res_field: string | false;
+  [key: string]: unknown;
+}
+
+/** Odoo may return a many2one as `[id, name]`, a bare id, or `false` depending on field shape. */
+function extractRelationId(value: unknown): number | undefined {
+  if (Array.isArray(value)) return value[0] as number;
+  if (typeof value === "number") return value;
+  return undefined;
+}
+
+function tagAttachment(
+  attachment: AttachmentRow,
+  mainAttachmentId: number | undefined,
+  officialPdfId: number | undefined
+): "original_source" | "official_pdf" | "other" {
+  if (mainAttachmentId !== undefined && attachment.id === mainAttachmentId) return "original_source";
+  if (attachment.res_field === "invoice_pdf_report_file" || attachment.id === officialPdfId) return "official_pdf";
+  return "other";
+}
+
+export function registerSourceDocumentTools(server: McpServer, getProps: () => Props | undefined, queue: OdooQueue) {
+  server.registerTool(
+    "bookkeeping.list_source_documents",
+    {
+      title: "List Source Documents",
+      description:
+        "List the ir.attachment source documents on a record (e.g. account.move), tagging each as original_source, official_pdf, or other.",
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+      inputSchema: {
+        model: z.string().default("account.move"),
+        record_id: z.number().int().positive()
+      }
+    },
+    async ({ model, record_id }) => {
+      const before = queue.snapshot();
+      try {
+        const conn = requireConnection(getProps());
+        const domain =
+          model === "account.move"
+            ? [
+                "&",
+                "&",
+                ["res_model", "=", model],
+                ["res_id", "=", record_id],
+                "|",
+                ["res_field", "=", false],
+                ["res_field", "=", "invoice_pdf_report_file"]
+              ]
+            : ["&", "&", ["res_model", "=", model], ["res_id", "=", record_id], ["res_field", "=", false]];
+
+        const attachments = (await queue.enqueue(conn, "ir.attachment", "search_read", {
+          domain,
+          fields: ATTACHMENT_LIST_FIELDS
+        })) as AttachmentRow[];
+
+        const warnings: string[] = [];
+        let mainAttachmentId: number | undefined;
+        let officialPdfId: number | undefined;
+
+        if (model === "account.move") {
+          try {
+            const moves = (await queue.enqueue(conn, "account.move", "read", {
+              ids: [record_id],
+              fields: ["message_main_attachment_id", "invoice_pdf_report_id", "name", "state"]
+            })) as Array<Record<string, unknown>>;
+            const move = moves[0];
+            mainAttachmentId = extractRelationId(move?.message_main_attachment_id);
+            officialPdfId = extractRelationId(move?.invoice_pdf_report_id);
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            console.warn(`account.move read failed: ${message}`);
+            warnings.push(`account.move read failed: ${message}`);
+          }
+        }
+
+        const documents = attachments.map((attachment) => ({
+          ...attachment,
+          tag: tagAttachment(attachment, mainAttachmentId, officialPdfId)
+        }));
+
+        const { odoo_calls, total_duration_ms } = queue.delta(before);
+        const metadata = { odoo_calls, cache_hits: 0, duration_seconds: total_duration_ms / 1000 };
+
+        return { content: [{ type: "text" as const, text: JSON.stringify({ documents, warnings, metadata }, null, 2) }] };
+      } catch (err) {
+        return mcpErrorFromException(err, { model, method: "search_read" });
+      }
+    }
+  );
+
+  server.registerTool(
+    "bookkeeping.fetch_attachment",
+    {
+      title: "Fetch Attachment",
+      description:
+        "Fetch an ir.attachment's metadata and, unless it's a URL-type attachment or exceeds max_bytes, its base64-encoded content.",
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+      inputSchema: {
+        attachment_id: z.number().int().positive(),
+        max_bytes: z.number().int().positive().default(10485760)
+      }
+    },
+    async ({ attachment_id, max_bytes }) => {
+      try {
+        const conn = requireConnection(getProps());
+        const metaRows = (await queue.enqueue(conn, "ir.attachment", "read", {
+          ids: [attachment_id],
+          fields: ["name", "mimetype", "file_size", "type", "url"]
+        })) as Array<Record<string, unknown>>;
+
+        const meta = metaRows[0];
+        if (!meta) return mcpError(`No ir.attachment record found for id ${attachment_id}`);
+
+        if (meta.type === "url") {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: JSON.stringify({ name: meta.name, mimetype: meta.mimetype, file_size: meta.file_size, url: meta.url }, null, 2)
+              }
+            ]
+          };
+        }
+
+        const fileSize = meta.file_size as number;
+        if (fileSize > max_bytes) {
+          return mcpError(
+            `Attachment ${attachment_id} is ${fileSize} bytes, exceeding max_bytes (${max_bytes}). Base64 encoding inflates the payload ~1.37x against Worker memory limits, so it was not fetched. Raise max_bytes if you really need this file.`
+          );
+        }
+
+        const dataRows = (await queue.enqueue(conn, "ir.attachment", "read", {
+          ids: [attachment_id],
+          fields: ["name", "mimetype", "file_size", "type", "url", "datas"]
+        })) as Array<Record<string, unknown>>;
+        const data = dataRows[0];
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({ name: data.name, mimetype: data.mimetype, file_size: data.file_size, base64: data.datas }, null, 2)
+            }
+          ]
+        };
+      } catch (err) {
+        return mcpErrorFromException(err, { model: "ir.attachment", method: "read" });
+      }
+    }
+  );
+}
