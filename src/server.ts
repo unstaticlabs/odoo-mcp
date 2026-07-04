@@ -6,6 +6,7 @@ import { OdooQueue } from "./odoo-queue";
 import { TtlCache } from "./cache";
 import {
   registerBookkeepingTools,
+  registerReportLineTools,
   registerReturnPreviewTools,
   registerSafeWritePlannerTools,
   registerSourceDocumentTools
@@ -44,6 +45,7 @@ export class McpAgent extends McpAgentBase<Env, unknown, Props> {
     registerWriteTools(this.server, getProps, this.odooQueue);
     registerBookkeepingTools(this.server, getProps, this.odooQueue, this.cache);
     registerReturnPreviewTools(this.server, getProps, this.odooQueue, this.cache);
+    registerReportLineTools(this.server, getProps, this.odooQueue, this.cache);
     registerSourceDocumentTools(this.server, getProps, this.odooQueue);
     // Tools have no direct env access; thread the HMAC secret through as a getter.
     registerSafeWritePlannerTools(this.server, getProps, this.odooQueue, this.cache, () => this.env.CONFIRMATION_SECRET);

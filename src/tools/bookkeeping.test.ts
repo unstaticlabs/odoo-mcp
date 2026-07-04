@@ -4,14 +4,16 @@ import { TtlCache } from "../cache";
 import { callOdoo } from "../odoo";
 import { OdooQueue } from "../odoo-queue";
 import {
+  SUSPENSE_ACCOUNT_CODES,
   computeDeadline,
+  computeSeverity,
   diffExpectedReturns,
   generatePeriods,
+  isSuspenseAccount,
   normalizePeriodicity,
   registerBookkeepingTools,
   registerReturnPreviewTools,
-  registerSourceDocumentTools
-} from "./bookkeeping";
+  registerSourceDocumentTools, registerReportLineTools } from "./bookkeeping";
 
 const originalFetch = globalThis.fetch;
 
@@ -24,6 +26,13 @@ function buildHandler(queue: OdooQueue, cache: TtlCache) {
   const props = { odooBaseUrl: "http://example.com", odooDb: "test-db", odooApiKey: "secret-key" };
   registerBookkeepingTools(server, () => props, queue, cache);
   return (server as any)._registeredTools["bookkeeping.get_snapshot"].handler;
+}
+
+function buildReviewHandler(queue: OdooQueue, cache: TtlCache) {
+  const server = new McpServer({ name: "test", version: "0.0.0" });
+  const props = { odooBaseUrl: "http://example.com", odooDb: "test-db", odooApiKey: "secret-key" };
+  registerBookkeepingTools(server, () => props, queue, cache);
+  return (server as any)._registeredTools["bookkeeping.review_key_accounts"].handler;
 }
 
 interface CannedResponse {
@@ -472,6 +481,156 @@ describe("bookkeeping.get_snapshot", () => {
   });
 });
 
+describe("computeSeverity / isSuspenseAccount", () => {
+  test("suspense code with a non-zero balance is attention", () => {
+    expect(computeSeverity("471000", 100, 0)).toBe("attention");
+    expect(computeSeverity("580000", -0.5, 0)).toBe("attention");
+  });
+
+  test("suspense code with open items but zero balance is attention", () => {
+    expect(computeSeverity("471000", 0, 3)).toBe("attention");
+  });
+
+  test("fully empty account (zero balance, no open items) is ok", () => {
+    expect(computeSeverity("471000", 0, 0)).toBe("ok");
+    expect(computeSeverity("445670", 0, 0)).toBe("ok");
+    expect(computeSeverity("471000", 1e-12, 0)).toBe("ok"); // float noise tolerated
+  });
+
+  test("non-suspense account with a balance is info, never attention", () => {
+    expect(computeSeverity("445670", 5000, 0)).toBe("info");
+    expect(computeSeverity("455100", 0, 7)).toBe("info");
+  });
+
+  test("isSuspenseAccount / SUSPENSE_ACCOUNT_CODES", () => {
+    expect(isSuspenseAccount("471000")).toBe(true);
+    expect(isSuspenseAccount("580000")).toBe(true);
+    expect(isSuspenseAccount("445670")).toBe(false);
+    expect(SUSPENSE_ACCOUNT_CODES.has("471000")).toBe(true);
+    expect(SUSPENSE_ACCOUNT_CODES.has("580000")).toBe(true);
+  });
+});
+
+describe("bookkeeping.review_key_accounts", () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const SUSPENSE_ACCOUNT_OVERRIDE: Record<string, CannedResponse> = {
+    "account.account.search_read": {
+      status: 200,
+      body: [{ id: 500, code: "471000", name: "Suspense", account_type: "asset_current", reconcile: true, company_id: [1, "Acme Corp"] }]
+    },
+    "account.move.line.read_group": {
+      status: 200,
+      body: [{ account_id: [500, "Suspense"], balance: 1000, __count: 5 }]
+    },
+    "account.move.line.search_read": {
+      status: 200,
+      body: [
+        {
+          id: 600,
+          account_id: [500, "Suspense"],
+          date: "2026-03-01",
+          name: "Open Line",
+          amount_residual: 50,
+          move_id: [700, "MV1"],
+          partner_id: [800, "Partner"],
+          journal_id: [10, "Misc"]
+        }
+      ]
+    }
+  };
+
+  test("unknown code produces a warning while found accounts are still returned", async () => {
+    const { fetchMock } = buildFetchMock(SUSPENSE_ACCOUNT_OVERRIDE);
+    globalThis.fetch = fetchMock;
+    const handler = buildReviewHandler(makeQueue(), new TtlCache());
+
+    const result = await handler({ company: "Acme Corp", date_to: "2026-03-31", account_codes: ["471000", "999999"] });
+
+    expect(result.isError).toBeUndefined();
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.warnings.some((w: string) => w.includes("999999"))).toBe(true);
+    expect(parsed.accounts.length).toBe(1);
+    const account = parsed.accounts[0];
+    expect(account.code).toBe("471000");
+    expect(account.balance).toBe(1000);
+    expect(account.open_item_count).toBe(1);
+    // Suspense + non-zero balance => attention.
+    expect(account.severity).toBe("attention");
+    // top_lines are normalized objects (many2one -> {id,name}) and include the residual.
+    expect(account.top_lines[0].partner_id).toEqual({ id: 800, name: "Partner" });
+    expect(account.top_lines[0].move_id).toEqual({ id: 700, name: "MV1" });
+    expect(account.top_lines[0].amount_residual).toBe(50);
+  });
+
+  test("open lines are grouped by account and capped at 10 per account", async () => {
+    const manyLines = Array.from({ length: 12 }, (_, i) => ({
+      id: 600 + i,
+      account_id: [500, "Suspense"],
+      date: `2026-03-${String(i + 1).padStart(2, "0")}`,
+      name: `Open ${i}`,
+      amount_residual: i + 1,
+      move_id: [700 + i, `MV${i}`],
+      partner_id: [800, "Partner"],
+      journal_id: [10, "Misc"]
+    }));
+    const { fetchMock } = buildFetchMock({
+      ...SUSPENSE_ACCOUNT_OVERRIDE,
+      "account.move.line.search_read": { status: 200, body: manyLines }
+    });
+    globalThis.fetch = fetchMock;
+    const handler = buildReviewHandler(makeQueue(), new TtlCache());
+
+    const result = await handler({ company: "Acme Corp", date_to: "2026-03-31", account_codes: ["471000"] });
+
+    expect(result.isError).toBeUndefined();
+    const parsed = JSON.parse(result.content[0].text);
+    const account = parsed.accounts[0];
+    expect(account.top_lines.length).toBeLessThanOrEqual(10);
+    expect(account.top_lines.length).toBe(10);
+    expect(account.open_item_count).toBe(12);
+    expect(account.top_lines.every((l: any) => l.account_id.id === 500)).toBe(true);
+  });
+
+  test("company not found returns a plain mcpError", async () => {
+    const { fetchMock } = buildFetchMock({ "res.company.search_read": { status: 200, body: [] } });
+    globalThis.fetch = fetchMock;
+    const handler = buildReviewHandler(makeQueue(), new TtlCache());
+
+    const result = await handler({ company: "Nope", date_to: "2026-03-31", account_codes: ["471000"] });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("Nope");
+  });
+
+  test("issues a bounded number of live Odoo calls once fields_get is cached", async () => {
+    const { fetchMock, calls } = buildFetchMock(SUSPENSE_ACCOUNT_OVERRIDE);
+    globalThis.fetch = fetchMock;
+    const queue = makeQueue();
+    const cache = new TtlCache();
+    const handler = buildReviewHandler(queue, cache);
+
+    // Warm the fields_get cache.
+    await handler({ company: "Acme Corp", date_to: "2026-03-31", account_codes: ["471000"] });
+
+    const before = queue.snapshot();
+    const result = await handler({ company: "Acme Corp", date_to: "2026-03-31", account_codes: ["471000"] });
+    const delta = queue.delta(before);
+
+    expect(result.isError).toBeUndefined();
+    const parsed = JSON.parse(result.content[0].text);
+    // res.company search_read + account.account search_read + move.line read_group + move.line search_read.
+    expect(parsed.metadata.odoo_calls).toBe(4);
+    expect(delta.odoo_calls).toBe(4);
+    // No fields_get on the warm call.
+    expect(delta.calls.some((c) => c.method === "fields_get")).toBe(false);
+    expect(calls.length).toBeGreaterThan(0);
+    expect(parsed.metadata.duration_seconds).toEqual(expect.any(Number));
+  });
+});
+
 // ---- Source documents & attachments tests (card ODOO1086) ----
 
 const connProps = { odooBaseUrl: "http://example.com", odooDb: "test-db", odooApiKey: "secret-bookkeeping-key" };
@@ -885,5 +1044,265 @@ describe("preview_returns pure functions", () => {
     const diffed = diffExpectedReturns(expected, existing);
     expect(diffed[0].exists).toBe(true);
     expect(diffed[1].exists).toBe(false);
+  });
+});
+
+// ---- explain_report_line tests (card ODOO1076) ----
+
+function buildExplainHandler(queue: OdooQueue, cache: TtlCache) {
+  const server = new McpServer({ name: "test", version: "0.0.0" });
+  const props = { odooBaseUrl: "http://example.com", odooDb: "test-db", odooApiKey: "secret-key" };
+  registerReportLineTools(server, () => props, queue, cache);
+  return (server as any)._registeredTools["bookkeeping.explain_report_line"].handler;
+}
+
+/** Parses `.../json/2/<model>/<method>` + JSON body — the same shape buildFetchMock decodes, for custom routers. */
+function parseCall(url: string, init: any): { model: string; method: string; body: any } {
+  const marker = "/json/2/";
+  const rest = url.slice(url.indexOf(marker) + marker.length);
+  const lastSlash = rest.lastIndexOf("/");
+  return { model: rest.slice(0, lastSlash), method: rest.slice(lastSlash + 1), body: JSON.parse(init.body) };
+}
+
+function findClause(domain: any[], field: string): any[] | undefined {
+  return domain.find((c) => Array.isArray(c) && c[0] === field);
+}
+
+// A `previous_return_period` external expression: the box_22 carryover trap.
+const BOX22_OVERRIDES: Record<string, CannedResponse> = {
+  "account.report.search_read": { status: 200, body: [{ id: 100, name: "CA12", country_id: [75, "France"] }] },
+  "account.report.line.search_read": {
+    status: 200,
+    body: [{ id: 200, report_id: [100, "CA12"], code: "box_22", name: "Carryover", parent_id: false, sequence: 1 }]
+  },
+  "account.report.expression.search_read": {
+    status: 200,
+    body: [
+      {
+        id: 300,
+        report_line_id: [200, "box_22"],
+        label: "_applied_carryover_balance",
+        engine: "external",
+        formula: "",
+        subformula: "",
+        date_scope: "previous_return_period"
+      }
+    ]
+  }
+};
+
+const EXPLAIN_ARGS = {
+  company: "Acme Corp",
+  report_name: "CA12",
+  line_code: "box_22",
+  date_from: "2025-10-01",
+  date_to: "2026-09-30"
+};
+
+
+describe("bookkeeping.explain_report_line", () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  test("box_22: external value in the previous_return_period scope lands in included, out-of-scope lands in excluded and is named in the diagnosis", async () => {
+    const { fetchMock } = buildFetchMock({
+      ...BOX22_OVERRIDES,
+      "account.report.external.value.search_read": {
+        status: 200,
+        body: [
+          { id: 400, date: "2025-06-30", value: 1000, target_report_expression_id: [300, "_applied_carryover_balance"], company_id: [1, "Acme Corp"] },
+          { id: 401, date: "2024-09-30", value: 500, target_report_expression_id: [300, "_applied_carryover_balance"], company_id: [1, "Acme Corp"] }
+        ]
+      }
+    });
+    globalThis.fetch = fetchMock;
+    const handler = buildExplainHandler(makeQueue(), new TtlCache());
+
+    const result = await handler(EXPLAIN_ARGS);
+
+    expect(result.isError).toBeUndefined();
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.line.code).toBe("box_22");
+    const expr = parsed.expressions[0];
+    expect(expr.included_external_values.map((v: any) => v.id)).toEqual([400]);
+    expect(expr.excluded_external_values.map((v: any) => v.id)).toEqual([401]);
+    expect(parsed.diagnosis).toContain("1 external value(s) dated within 2024-10-01..2025-09-30");
+    expect(parsed.diagnosis).toContain("2024-09-30");
+    expect(parsed.diagnosis).toContain("out of scope");
+  });
+
+  test("box_22 missing case: an empty external-value query reports 0 in-scope values in the diagnosis", async () => {
+    const { fetchMock } = buildFetchMock({
+      ...BOX22_OVERRIDES,
+      "account.report.external.value.search_read": { status: 200, body: [] }
+    });
+    globalThis.fetch = fetchMock;
+    const handler = buildExplainHandler(makeQueue(), new TtlCache());
+
+    const result = await handler(EXPLAIN_ARGS);
+
+    expect(result.isError).toBeUndefined();
+    const parsed = JSON.parse(result.content[0].text);
+    const expr = parsed.expressions[0];
+    expect(expr.included_external_values).toEqual([]);
+    expect(expr.excluded_external_values).toEqual([]);
+    expect(parsed.diagnosis).toContain("0 external value(s) dated within 2024-10-01..2025-09-30");
+    expect(parsed.diagnosis).not.toContain("out of scope");
+  });
+
+  test("older Odoo: a missing external-value FK field degrades into a warning rather than throwing", async () => {
+    const { fetchMock } = buildFetchMock({
+      ...BOX22_OVERRIDES,
+      "account.report.external.value.fields_get": {
+        status: 200,
+        body: {
+          id: { type: "integer" },
+          date: { type: "date" },
+          value: { type: "float" },
+          company_id: { type: "many2one", relation: "res.company" }
+          // both target_report_expression_id and report_expression_id intentionally absent
+        }
+      }
+    });
+    globalThis.fetch = fetchMock;
+    const handler = buildExplainHandler(makeQueue(), new TtlCache());
+
+    const result = await handler(EXPLAIN_ARGS);
+
+    expect(result.isError).toBeUndefined();
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.warnings.some((w: string) => w.includes("no known report-expression FK field"))).toBe(true);
+    expect(parsed.expressions[0].included_external_values).toBeUndefined();
+  });
+
+  test("tax_tags: resolves tag names and attaches a single read_group balance sum", async () => {
+    const { fetchMock, calls } = buildFetchMock({
+      "account.report.expression.search_read": {
+        status: 200,
+        body: [
+          {
+            id: 300,
+            report_line_id: [200, "L1"],
+            label: "balance",
+            engine: "tax_tags",
+            formula: "10+11",
+            subformula: "",
+            date_scope: "l10n_period"
+          }
+        ]
+      },
+      "account.account.tag.search_read": {
+        status: 200,
+        body: [
+          { id: 10, name: "+FR95" },
+          { id: 11, name: "-FR96" }
+        ]
+      }
+    });
+    globalThis.fetch = fetchMock;
+    const handler = buildExplainHandler(makeQueue(), new TtlCache());
+
+    const result = await handler({ ...EXPLAIN_ARGS, report_name: "Tax Report", line_code: "L1" });
+
+    expect(result.isError).toBeUndefined();
+    const parsed = JSON.parse(result.content[0].text);
+    const expr = parsed.expressions[0];
+    expect(expr.tax_tags).toEqual(["+FR95", "-FR96"]);
+    expect(expr.tax_tag_balance).toBe(1000);
+    const readGroups = calls.filter((c) => c.model === "account.move.line" && c.method === "read_group");
+    expect(readGroups.length).toBe(1);
+    expect(readGroups[0].body.groupby).toEqual([]);
+  });
+
+  test("aggregation: builds a one-level-deep formula_trace listing the referenced line codes", async () => {
+    const fetchMock = mock(async (url: string, init: any) => {
+      const { model, method, body } = parseCall(url, init);
+      const ok = (result: unknown) => new Response(JSON.stringify({ result }), { status: 200 });
+
+      if (method === "fields_get") return ok(BASE_RESPONSES[`${model}.fields_get`].body);
+      if (model === "res.company") return ok([{ id: 1, name: "Acme Corp" }]);
+      if (model === "account.report") return ok([{ id: 100, name: "CA12" }]);
+
+      if (model === "account.report.line") {
+        const code = findClause(body.domain, "code");
+        if (code && code[1] === "=") return ok([{ id: 200, report_id: [100, "CA12"], code: "AGG", name: "Aggregate" }]);
+        if (code && code[1] === "in")
+          return ok([
+            { id: 201, report_id: [100, "CA12"], code: "SUBA", name: "Sub A" },
+            { id: 202, report_id: [100, "CA12"], code: "SUBB", name: "Sub B" }
+          ]);
+        return ok([]);
+      }
+
+      if (model === "account.report.expression") {
+        const rl = findClause(body.domain, "report_line_id");
+        if (rl && rl[1] === "=")
+          return ok([
+            { id: 300, report_line_id: [200, "AGG"], label: "balance", engine: "aggregation", formula: "SUBA.balance + SUBB.balance", subformula: "", date_scope: "l10n_period" }
+          ]);
+        return ok([
+          { id: 301, report_line_id: [201, "SUBA"], label: "balance", engine: "tax_tags", formula: "", subformula: "", date_scope: "l10n_period" },
+          { id: 302, report_line_id: [202, "SUBB"], label: "balance", engine: "tax_tags", formula: "", subformula: "", date_scope: "l10n_period" }
+        ]);
+      }
+
+      return new Response(JSON.stringify({ error: { message: `unexpected ${model}.${method}` } }), { status: 404 });
+    });
+    globalThis.fetch = fetchMock;
+    const handler = buildExplainHandler(makeQueue(), new TtlCache());
+
+    const result = await handler({ ...EXPLAIN_ARGS, line_code: "AGG" });
+
+    expect(result.isError).toBeUndefined();
+    const parsed = JSON.parse(result.content[0].text);
+    const codes = parsed.formula_trace.map((t: any) => t.code).sort();
+    expect(codes).toEqual(["SUBA", "SUBB"]);
+    for (const trace of parsed.formula_trace) {
+      expect(trace.expressions.length).toBeGreaterThan(0);
+      // one level deep: trace entries carry expressions, not nested traces
+      expect(trace.formula_trace).toBeUndefined();
+    }
+    expect(parsed.diagnosis).toContain("SUBA");
+    expect(parsed.diagnosis).toContain("SUBB");
+  });
+
+  test("unknown line_code returns an mcpError listing the report's available codes", async () => {
+    const fetchMock = mock(async (url: string, init: any) => {
+      const { model, method, body } = parseCall(url, init);
+      const ok = (result: unknown) => new Response(JSON.stringify({ result }), { status: 200 });
+
+      if (method === "fields_get") return ok(BASE_RESPONSES[`${model}.fields_get`].body);
+      if (model === "res.company") return ok([{ id: 1, name: "Acme Corp" }]);
+      if (model === "account.report") return ok([{ id: 100, name: "CA12" }]);
+      if (model === "account.report.line") {
+        const code = findClause(body.domain, "code");
+        if (code) return ok([]); // the specific code lookup misses
+        return ok([
+          { id: 200, report_id: [100, "CA12"], code: "box_20", name: "Line 20" },
+          { id: 201, report_id: [100, "CA12"], code: "box_22", name: "Line 22" }
+        ]);
+      }
+      return new Response(JSON.stringify({ error: { message: `unexpected ${model}.${method}` } }), { status: 404 });
+    });
+    globalThis.fetch = fetchMock;
+    const handler = buildExplainHandler(makeQueue(), new TtlCache());
+
+    const result = await handler({ ...EXPLAIN_ARGS, line_code: "does_not_exist" });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("does_not_exist");
+    expect(result.content[0].text).toContain("box_20");
+    expect(result.content[0].text).toContain("box_22");
+  });
+
+  test("unknown company / report short-circuit with a plain mcpError", async () => {
+    const { fetchMock } = buildFetchMock({ "res.company.search_read": { status: 200, body: [] } });
+    globalThis.fetch = fetchMock;
+    const handler = buildExplainHandler(makeQueue(), new TtlCache());
+
+    const result = await handler(EXPLAIN_ARGS);
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("Company not found");
   });
 });
