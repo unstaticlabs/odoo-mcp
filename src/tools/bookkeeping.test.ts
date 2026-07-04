@@ -4,9 +4,12 @@ import { TtlCache } from "../cache";
 import { callOdoo } from "../odoo";
 import { OdooQueue } from "../odoo-queue";
 import {
+  SUSPENSE_ACCOUNT_CODES,
   computeDeadline,
+  computeSeverity,
   diffExpectedReturns,
   generatePeriods,
+  isSuspenseAccount,
   normalizePeriodicity,
   registerBookkeepingTools,
   registerReturnPreviewTools,
@@ -24,6 +27,13 @@ function buildHandler(queue: OdooQueue, cache: TtlCache) {
   const props = { odooBaseUrl: "http://example.com", odooDb: "test-db", odooApiKey: "secret-key" };
   registerBookkeepingTools(server, () => props, queue, cache);
   return (server as any)._registeredTools["bookkeeping.get_snapshot"].handler;
+}
+
+function buildReviewHandler(queue: OdooQueue, cache: TtlCache) {
+  const server = new McpServer({ name: "test", version: "0.0.0" });
+  const props = { odooBaseUrl: "http://example.com", odooDb: "test-db", odooApiKey: "secret-key" };
+  registerBookkeepingTools(server, () => props, queue, cache);
+  return (server as any)._registeredTools["bookkeeping.review_key_accounts"].handler;
 }
 
 interface CannedResponse {
@@ -469,6 +479,156 @@ describe("bookkeeping.get_snapshot", () => {
     expect(returnTypeSearchRead?.body.fields).not.toContain("deadline_months");
     expect(returnTypeSearchRead?.body.fields).not.toContain("deadline_start_date");
     expect(returnTypeSearchRead?.body.fields).not.toContain("deadline_end_type");
+  });
+});
+
+describe("computeSeverity / isSuspenseAccount", () => {
+  test("suspense code with a non-zero balance is attention", () => {
+    expect(computeSeverity("471000", 100, 0)).toBe("attention");
+    expect(computeSeverity("580000", -0.5, 0)).toBe("attention");
+  });
+
+  test("suspense code with open items but zero balance is attention", () => {
+    expect(computeSeverity("471000", 0, 3)).toBe("attention");
+  });
+
+  test("fully empty account (zero balance, no open items) is ok", () => {
+    expect(computeSeverity("471000", 0, 0)).toBe("ok");
+    expect(computeSeverity("445670", 0, 0)).toBe("ok");
+    expect(computeSeverity("471000", 1e-12, 0)).toBe("ok"); // float noise tolerated
+  });
+
+  test("non-suspense account with a balance is info, never attention", () => {
+    expect(computeSeverity("445670", 5000, 0)).toBe("info");
+    expect(computeSeverity("455100", 0, 7)).toBe("info");
+  });
+
+  test("isSuspenseAccount / SUSPENSE_ACCOUNT_CODES", () => {
+    expect(isSuspenseAccount("471000")).toBe(true);
+    expect(isSuspenseAccount("580000")).toBe(true);
+    expect(isSuspenseAccount("445670")).toBe(false);
+    expect(SUSPENSE_ACCOUNT_CODES.has("471000")).toBe(true);
+    expect(SUSPENSE_ACCOUNT_CODES.has("580000")).toBe(true);
+  });
+});
+
+describe("bookkeeping.review_key_accounts", () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const SUSPENSE_ACCOUNT_OVERRIDE: Record<string, CannedResponse> = {
+    "account.account.search_read": {
+      status: 200,
+      body: [{ id: 500, code: "471000", name: "Suspense", account_type: "asset_current", reconcile: true, company_id: [1, "Acme Corp"] }]
+    },
+    "account.move.line.read_group": {
+      status: 200,
+      body: [{ account_id: [500, "Suspense"], balance: 1000, __count: 5 }]
+    },
+    "account.move.line.search_read": {
+      status: 200,
+      body: [
+        {
+          id: 600,
+          account_id: [500, "Suspense"],
+          date: "2026-03-01",
+          name: "Open Line",
+          amount_residual: 50,
+          move_id: [700, "MV1"],
+          partner_id: [800, "Partner"],
+          journal_id: [10, "Misc"]
+        }
+      ]
+    }
+  };
+
+  test("unknown code produces a warning while found accounts are still returned", async () => {
+    const { fetchMock } = buildFetchMock(SUSPENSE_ACCOUNT_OVERRIDE);
+    globalThis.fetch = fetchMock;
+    const handler = buildReviewHandler(makeQueue(), new TtlCache());
+
+    const result = await handler({ company: "Acme Corp", date_to: "2026-03-31", account_codes: ["471000", "999999"] });
+
+    expect(result.isError).toBeUndefined();
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.warnings.some((w: string) => w.includes("999999"))).toBe(true);
+    expect(parsed.accounts.length).toBe(1);
+    const account = parsed.accounts[0];
+    expect(account.code).toBe("471000");
+    expect(account.balance).toBe(1000);
+    expect(account.open_item_count).toBe(1);
+    // Suspense + non-zero balance => attention.
+    expect(account.severity).toBe("attention");
+    // top_lines are normalized objects (many2one -> {id,name}) and include the residual.
+    expect(account.top_lines[0].partner_id).toEqual({ id: 800, name: "Partner" });
+    expect(account.top_lines[0].move_id).toEqual({ id: 700, name: "MV1" });
+    expect(account.top_lines[0].amount_residual).toBe(50);
+  });
+
+  test("open lines are grouped by account and capped at 10 per account", async () => {
+    const manyLines = Array.from({ length: 12 }, (_, i) => ({
+      id: 600 + i,
+      account_id: [500, "Suspense"],
+      date: `2026-03-${String(i + 1).padStart(2, "0")}`,
+      name: `Open ${i}`,
+      amount_residual: i + 1,
+      move_id: [700 + i, `MV${i}`],
+      partner_id: [800, "Partner"],
+      journal_id: [10, "Misc"]
+    }));
+    const { fetchMock } = buildFetchMock({
+      ...SUSPENSE_ACCOUNT_OVERRIDE,
+      "account.move.line.search_read": { status: 200, body: manyLines }
+    });
+    globalThis.fetch = fetchMock;
+    const handler = buildReviewHandler(makeQueue(), new TtlCache());
+
+    const result = await handler({ company: "Acme Corp", date_to: "2026-03-31", account_codes: ["471000"] });
+
+    expect(result.isError).toBeUndefined();
+    const parsed = JSON.parse(result.content[0].text);
+    const account = parsed.accounts[0];
+    expect(account.top_lines.length).toBeLessThanOrEqual(10);
+    expect(account.top_lines.length).toBe(10);
+    expect(account.open_item_count).toBe(12);
+    expect(account.top_lines.every((l: any) => l.account_id.id === 500)).toBe(true);
+  });
+
+  test("company not found returns a plain mcpError", async () => {
+    const { fetchMock } = buildFetchMock({ "res.company.search_read": { status: 200, body: [] } });
+    globalThis.fetch = fetchMock;
+    const handler = buildReviewHandler(makeQueue(), new TtlCache());
+
+    const result = await handler({ company: "Nope", date_to: "2026-03-31", account_codes: ["471000"] });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("Nope");
+  });
+
+  test("issues a bounded number of live Odoo calls once fields_get is cached", async () => {
+    const { fetchMock, calls } = buildFetchMock(SUSPENSE_ACCOUNT_OVERRIDE);
+    globalThis.fetch = fetchMock;
+    const queue = makeQueue();
+    const cache = new TtlCache();
+    const handler = buildReviewHandler(queue, cache);
+
+    // Warm the fields_get cache.
+    await handler({ company: "Acme Corp", date_to: "2026-03-31", account_codes: ["471000"] });
+
+    const before = queue.snapshot();
+    const result = await handler({ company: "Acme Corp", date_to: "2026-03-31", account_codes: ["471000"] });
+    const delta = queue.delta(before);
+
+    expect(result.isError).toBeUndefined();
+    const parsed = JSON.parse(result.content[0].text);
+    // res.company search_read + account.account search_read + move.line read_group + move.line search_read.
+    expect(parsed.metadata.odoo_calls).toBe(4);
+    expect(delta.odoo_calls).toBe(4);
+    // No fields_get on the warm call.
+    expect(delta.calls.some((c) => c.method === "fields_get")).toBe(false);
+    expect(calls.length).toBeGreaterThan(0);
+    expect(parsed.metadata.duration_seconds).toEqual(expect.any(Number));
   });
 });
 
