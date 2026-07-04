@@ -9,9 +9,12 @@ import {
   countRecords,
   mcpError,
   mcpErrorFromException,
+  mcpStructured,
   pickSmartFields,
   requireConnection,
-  searchRecords
+  searchRecords,
+  zOdooRecord,
+  zOdooRecords
 } from "./shared";
 import { deriveWorkflowStatus, normalizeRecords } from "../normalizer";
 import { type CachedFieldMeta, type TtlCache, getFieldsCached } from "../cache";
@@ -82,12 +85,15 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
       inputSchema: {
         domain: z.array(z.any()).default([]),
         fields: z.array(z.string()).default(DEFAULT_TASK_FIELDS)
+      },
+      outputSchema: {
+        records: zOdooRecords.describe("Matching project.task records")
       }
     },
     async ({ domain, fields }) => {
       try {
         const { rows: tasks } = await searchRecords(queue, requireConnection(getProps()), "project.task", domain, fields, 100);
-        return { content: [{ type: "text" as const, text: JSON.stringify(tasks, null, 2) }] };
+        return mcpStructured({ records: tasks as Record<string, unknown>[] }, JSON.stringify(tasks, null, 2));
       } catch (err) {
         return mcpErrorFromException(err, { model: "project.task", method: "search_read" });
       }
@@ -100,16 +106,19 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
       title: "List Models",
       description: "Read-only: list enabled/installed Odoo models (name and technical model name).",
       annotations: { readOnlyHint: true, openWorldHint: false },
-      inputSchema: {}
+      inputSchema: {},
+      outputSchema: {
+        records: zOdooRecords.describe("Installed models (technical `model` name, plus `name` when available)")
+      }
     },
     async () => {
       const conn = requireConnection(getProps());
       try {
         const { rows } = await searchRecords(queue, conn, "ir.model", [], ["model", "name"], 100);
-        return { content: [{ type: "text" as const, text: JSON.stringify(rows, null, 2) }] };
+        return mcpStructured({ records: rows as Record<string, unknown>[] }, JSON.stringify(rows, null, 2));
       } catch {
         const fallback = CORE_MODEL_ALLOWLIST.map((model) => ({ model }));
-        return { content: [{ type: "text" as const, text: JSON.stringify(fallback, null, 2) }] };
+        return mcpStructured({ records: fallback }, JSON.stringify(fallback, null, 2));
       }
     }
   );
@@ -127,13 +136,16 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
         limit: z.number().int().min(1).max(100).default(10),
         order: z.string().optional(),
         offset: z.number().int().min(0).default(0)
+      },
+      outputSchema: {
+        records: zOdooRecords.describe("Matching records with the requested (or smart-default) fields")
       }
     },
     async ({ model, domain, fields, limit, order, offset }) => {
       if (!model || !model.trim()) return mcpError("model must be a non-empty string");
       try {
         const { rows } = await searchRecords(queue, requireConnection(getProps()), model, domain, fields, limit, order, offset);
-        return { content: [{ type: "text" as const, text: JSON.stringify(rows, null, 2) }] };
+        return mcpStructured({ records: rows as Record<string, unknown>[] }, JSON.stringify(rows, null, 2));
       } catch (err) {
         return mcpErrorFromException(err, { model, method: "search_read" });
       }
@@ -149,13 +161,16 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
       inputSchema: {
         model: z.string(),
         domain: z.array(z.any()).default([])
+      },
+      outputSchema: {
+        count: z.number().int().describe("Number of records matching the domain")
       }
     },
     async ({ model, domain }) => {
       if (!model || !model.trim()) return mcpError("model must be a non-empty string");
       try {
         const count = await countRecords(queue, requireConnection(getProps()), model, domain);
-        return { content: [{ type: "text" as const, text: JSON.stringify({ count }) }] };
+        return mcpStructured({ count }, JSON.stringify({ count }));
       } catch (err) {
         return mcpError(err instanceof Error ? err.message : "search_count failed");
       }
@@ -182,6 +197,9 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
         aggregates: z.array(z.string()).min(1),
         lazy: z.boolean().default(true),
         orderby: z.string().optional()
+      },
+      outputSchema: {
+        groups: zOdooRecords.describe("read_group result rows: one object per group with the groupby keys and aggregate values")
       }
     },
     async ({ model, domain, groupby, aggregates, lazy, orderby }) => {
@@ -194,7 +212,7 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
           lazy,
           ...(orderby ? { orderby } : {})
         });
-        return { content: [{ type: "text" as const, text: JSON.stringify(rows, null, 2) }] };
+        return mcpStructured({ groups: rows as Record<string, unknown>[] }, JSON.stringify(rows, null, 2));
       } catch (err) {
         return mcpErrorFromException(err, { model, method: "read_group" });
       }
@@ -217,6 +235,9 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
         model: z.string(),
         record_id: z.number(),
         fields: z.array(z.string()).nullable().default(null)
+      },
+      outputSchema: {
+        record: zOdooRecord.nullable().describe("The record (with `_workflow_status` when derivable), or null when the id does not exist")
       }
     },
     async ({ model, record_id, fields }) => {
@@ -232,12 +253,12 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
           1
         )) as { rows: unknown[]; fieldsMeta: unknown };
         if (!Array.isArray(rows) || rows.length === 0) {
-          return { content: [{ type: "text" as const, text: JSON.stringify([], null, 2) }] };
+          return mcpStructured({ record: null }, JSON.stringify([], null, 2));
         }
         const record = rows[0] as Record<string, unknown>;
         const workflowStatus = deriveWorkflowStatus(record);
         const result = workflowStatus != null ? { ...record, _workflow_status: workflowStatus } : record;
-        return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+        return mcpStructured({ record: result }, JSON.stringify(result, null, 2));
       } catch (err) {
         return mcpErrorFromException(err, { model, method: "search_read" });
       }
@@ -257,6 +278,9 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
         model: z.string(),
         ids: z.array(z.number().int().positive()).min(1),
         fields: z.array(z.string()).nullable().default(null)
+      },
+      outputSchema: {
+        records: zOdooRecords.describe("Found records in Odoo search_read order (missing ids are silently absent)")
       }
     },
     async ({ model, ids, fields }) => {
@@ -270,7 +294,7 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
           fields,
           Math.min(ids.length, 100)
         );
-        return { content: [{ type: "text" as const, text: JSON.stringify(rows, null, 2) }] };
+        return mcpStructured({ records: rows as Record<string, unknown>[] }, JSON.stringify(rows, null, 2));
       } catch (err) {
         return mcpErrorFromException(err, { model, method: "search_read" });
       }
@@ -295,6 +319,15 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
         include_chatter: z.boolean().default(true),
         include_attachments: z.boolean().default(true),
         relation_limit: z.number().int().min(1).max(50).default(10)
+      },
+      outputSchema: {
+        record: zOdooRecord.nullable().describe("The normalized record, or null when the id does not exist"),
+        relations: z
+          .record(z.string(), z.unknown())
+          .optional()
+          .describe("Per requested relation field: related records, or an {error} object (bad field / call budget)"),
+        chatter: z.unknown().optional().describe("Latest mail.message entries, or an {error} object; absent when include_chatter=false"),
+        attachments: z.unknown().optional().describe("ir.attachment metadata, or an {error} object; absent when include_attachments=false")
       }
     },
     async ({ model, record_id, relations, include_chatter, include_attachments, relation_limit }) => {
@@ -318,7 +351,7 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
           limit: 1
         })) as Record<string, unknown>[];
         if (!Array.isArray(rows) || rows.length === 0) {
-          return { content: [{ type: "text" as const, text: JSON.stringify({ record: null }, null, 2) }] };
+          return mcpStructured({ record: null });
         }
         rawRecord = rows[0];
       } catch (err) {
@@ -410,14 +443,7 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
         }
       }
 
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify({ record, relations: relationResults, chatter, attachments }, null, 2)
-          }
-        ]
-      };
+      return mcpStructured({ record, relations: relationResults, chatter, attachments });
     }
   );
 
@@ -431,6 +457,11 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
       inputSchema: {
         model: z.string(),
         fields: z.array(z.string()).nullable().default(null)
+      },
+      outputSchema: {
+        fields: z
+          .record(z.string(), z.record(z.string(), z.unknown()))
+          .describe("fields_get result: field name → attributes (type, string, readonly, required, selection, relation, ...)")
       }
     },
     async ({ model, fields }) => {
@@ -440,7 +471,10 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
           attributes: ["type", "string", "readonly", "required", "store", "selection", "relation", "help", "searchable", "sortable"],
           ...(fields && fields.length > 0 ? { allfields: fields } : {})
         });
-        return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+        return mcpStructured(
+          { fields: result as Record<string, Record<string, unknown>> },
+          JSON.stringify(result, null, 2)
+        );
       } catch (err) {
         return mcpErrorFromException(err, { model, method: "fields_get" });
       }
@@ -456,6 +490,19 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
         "Read-only: discover valid action methods (e.g. action_post, button_draft) for an Odoo model, combining form-view buttons with a curated list. Discovery only — execute these via call_model_method; they change record state.",
       inputSchema: {
         model: z.string()
+      },
+      outputSchema: {
+        actions: z
+          .array(
+            z.object({
+              method: z.string().describe("Model method name to pass to call_model_method"),
+              label: z.string().optional().describe("Human-readable button label"),
+              confirm: z.string().optional().describe("Confirmation prompt Odoo shows before this action"),
+              source: z.enum(["view", "curated"]).describe("Discovered from the form view or from the curated map")
+            })
+          )
+          .describe("Action methods available on this model"),
+        note: z.string().optional().describe("Present when view discovery failed and only curated actions are returned")
       }
     },
     async ({ model }) => {
@@ -475,9 +522,7 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
 
       const curated = CURATED_MODEL_ACTIONS[model] ?? [];
       const actions = mergeModelActions(curated, viewActions);
-      return {
-        content: [{ type: "text" as const, text: JSON.stringify({ actions, ...(note ? { note } : {}) }, null, 2) }]
-      };
+      return mcpStructured({ actions, ...(note ? { note } : {}) });
     }
   );
 
@@ -492,7 +537,13 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
         "(each call goes through the rate-limited queue, so requesting all 5 sections takes ~5x the per-call delay).",
       inputSchema: {
         include: z.array(z.enum(["modules", "custom_models", "studio_fields", "server_actions", "automations"])).optional()
-      }
+      },
+      outputSchema: Object.fromEntries(
+        ALL_DESCRIBE_SECTIONS.map((key) => [
+          key,
+          zDescribeSection.optional().describe(`${key} section: {count, records}, or {error} if the query failed; absent when not requested`)
+        ])
+      )
     },
     async ({ include }) => {
       const conn = requireConnection(getProps());
@@ -509,7 +560,7 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
         }
       }
 
-      return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+      return mcpStructured(result);
     }
   );
 }
@@ -549,3 +600,8 @@ const DESCRIBE_SECTIONS = {
 
 type DescribeSection = keyof typeof DESCRIBE_SECTIONS;
 const ALL_DESCRIBE_SECTIONS = Object.keys(DESCRIBE_SECTIONS) as DescribeSection[];
+
+const zDescribeSection = z.union([
+  z.object({ count: z.number().int(), records: zOdooRecords }),
+  z.object({ error: z.string() })
+]);

@@ -14,6 +14,7 @@ import {
   registerBookkeepingTools,
   registerReturnPreviewTools,
   registerSourceDocumentTools, registerReportLineTools } from "./bookkeeping";
+import { validatedToolHandler } from "./structured-test-util";
 
 const originalFetch = globalThis.fetch;
 
@@ -25,14 +26,14 @@ function buildHandler(queue: OdooQueue, cache: TtlCache) {
   const server = new McpServer({ name: "test", version: "0.0.0" });
   const props = { odooBaseUrl: "http://example.com", odooDb: "test-db", odooApiKey: "secret-key" };
   registerBookkeepingTools(server, () => props, queue, cache);
-  return (server as any)._registeredTools["bookkeeping.get_snapshot"].handler;
+  return validatedToolHandler(server, "bookkeeping.get_snapshot");
 }
 
 function buildReviewHandler(queue: OdooQueue, cache: TtlCache) {
   const server = new McpServer({ name: "test", version: "0.0.0" });
   const props = { odooBaseUrl: "http://example.com", odooDb: "test-db", odooApiKey: "secret-key" };
   registerBookkeepingTools(server, () => props, queue, cache);
-  return (server as any)._registeredTools["bookkeeping.review_key_accounts"].handler;
+  return validatedToolHandler(server, "bookkeeping.review_key_accounts");
 }
 
 interface CannedResponse {
@@ -643,7 +644,7 @@ function makeAgent() {
 }
 
 function getToolHandler(agent: any, name: string) {
-  return agent._registeredTools[name].handler;
+  return validatedToolHandler(agent, name);
 }
 
 function jsonResponse(result: unknown, status = 200) {
@@ -874,7 +875,7 @@ function buildPreviewHandler(queue: OdooQueue, cache: TtlCache) {
   const server = new McpServer({ name: "test", version: "0.0.0" });
   const props = { odooBaseUrl: "http://example.com", odooDb: "test-db", odooApiKey: "secret-key" };
   registerReturnPreviewTools(server, () => props, queue, cache);
-  return (server as any)._registeredTools["bookkeeping.preview_returns"].handler;
+  return validatedToolHandler(server, "bookkeeping.preview_returns");
 }
 
 const VAT_XMLID = "l10n_fr_reports.vat_return_type";
@@ -1053,7 +1054,7 @@ function buildExplainHandler(queue: OdooQueue, cache: TtlCache) {
   const server = new McpServer({ name: "test", version: "0.0.0" });
   const props = { odooBaseUrl: "http://example.com", odooDb: "test-db", odooApiKey: "secret-key" };
   registerReportLineTools(server, () => props, queue, cache);
-  return (server as any)._registeredTools["bookkeeping.explain_report_line"].handler;
+  return validatedToolHandler(server, "bookkeeping.explain_report_line");
 }
 
 /** Parses `.../json/2/<model>/<method>` + JSON body — the same shape buildFetchMock decodes, for custom routers. */

@@ -1,3 +1,4 @@
+import { z } from "zod";
 import { OdooError, type OdooConnection } from "../odoo";
 import type { OdooQueue } from "../odoo-queue";
 import type { Props } from "../server";
@@ -42,6 +43,34 @@ export function requireConnection(props: Props | undefined): OdooConnection {
 export function mcpError(text: string) {
   return { content: [{ type: "text" as const, text }], isError: true as const };
 }
+
+/**
+ * Success result carrying both renderings of the same payload: `structuredContent` (validated
+ * against the tool's outputSchema by the SDK) and a text `content` block. Pass `text` to keep a
+ * legacy text shape (e.g. a bare JSON array) that differs from the structured envelope —
+ * existing text-only consumers keep their format, schema-aware clients get the typed object.
+ *
+ * NOTE: once a tool declares an outputSchema, the SDK rejects any non-error result WITHOUT
+ * structuredContent — every success path of such a tool must go through this helper (or set
+ * structuredContent itself). Error results (`isError: true`) are exempt.
+ */
+export function mcpStructured<T extends Record<string, unknown>>(output: T, text?: string) {
+  return {
+    content: [{ type: "text" as const, text: text ?? JSON.stringify(output, null, 2) }],
+    structuredContent: output
+  };
+}
+
+/** A normalized Odoo record: field names to arbitrary JSON values (fields are caller-chosen). */
+export const zOdooRecord = z.record(z.string(), z.unknown());
+
+/** Loose list of Odoo records — row internals are dynamic, so only the envelope is typed. */
+export const zOdooRecords = z.array(zOdooRecord);
+
+/** `{ model, records }` provenance wrapper used across bookkeeping scopes (see withModel). */
+export const zRecordContainer = z.object({ model: z.string(), records: z.array(z.unknown()) });
+
+export const zWarnings = z.array(z.string()).describe("Non-fatal issues encountered while assembling the result");
 
 export interface ErrorEnvelope {
   error: string;

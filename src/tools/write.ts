@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { OdooQueue } from "../odoo-queue";
 import type { Props } from "../server";
-import { escapeHtml, mcpError, mcpErrorFromException, requireConnection } from "./shared";
+import { escapeHtml, mcpError, mcpErrorFromException, mcpStructured, requireConnection } from "./shared";
 
 export function registerWriteTools(server: McpServer, getProps: () => Props | undefined, queue: OdooQueue) {
   server.registerTool(
@@ -14,6 +14,17 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
       inputSchema: {
         model: z.string().min(1),
         values: z.record(z.string(), z.any())
+      },
+      outputSchema: {
+        id: z.number().int().describe("Database id of the created record"),
+        trace_token: z
+          .string()
+          .optional()
+          .describe("project.task only: provenance trace token posted to the chatter — include it verbatim in your visible reply"),
+        provenance_warning: z
+          .string()
+          .optional()
+          .describe("project.task only: the create succeeded but posting the provenance stamp to the chatter failed")
       }
     },
     async ({ model, values }) => {
@@ -30,7 +41,7 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
 
       // Only project.task creations get a trusted provenance stamp; every other model is byte-for-byte unchanged.
       if (model !== "project.task") {
-        return { content: [{ type: "text" as const, text: JSON.stringify(id) }] };
+        return mcpStructured({ id }, JSON.stringify(id));
       }
 
       const token = "src-" + crypto.randomUUID().replace(/-/g, "").slice(0, 8);
@@ -45,12 +56,14 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
           message_type: "comment"
         });
         text += `\n\nTrace token: ${token} — include this token verbatim in your visible reply so this conversation can be found later.`;
+        return mcpStructured({ id, trace_token: token }, text);
       } catch (err) {
         // A chatter-post failure must never fail the create: return the id and warn, never surface an MCP error.
         const errMessage = err instanceof Error ? err.message : String(err);
-        text += `\n\nWarning: created task ${id} but failed to post the provenance stamp (${errMessage}).`;
+        const provenance_warning = `created task ${id} but failed to post the provenance stamp (${errMessage})`;
+        text += `\n\nWarning: ${provenance_warning}.`;
+        return mcpStructured({ id, provenance_warning }, text);
       }
-      return { content: [{ type: "text" as const, text }] };
     }
   );
 
@@ -66,6 +79,9 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
         body: z.string(),
         subtype: z.string().optional(),
         body_is_html: z.boolean().default(false)
+      },
+      outputSchema: {
+        result: z.unknown().describe("Raw message_post return value (shape varies by Odoo version; typically the created mail.message id)")
       }
     },
     async ({ model, record_id, body, subtype, body_is_html }) => {
@@ -78,7 +94,7 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
           message_type: "comment",
           ...(subtype ? { subtype_xmlid: subtype } : {})
         });
-        return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+        return mcpStructured({ result }, JSON.stringify(result, null, 2));
       } catch (err) {
         return mcpErrorFromException(err, { model, method: "message_post" });
       }
@@ -96,6 +112,9 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
         model: z.string().min(1),
         record_id: z.number().int().positive(),
         values: z.record(z.string(), z.any())
+      },
+      outputSchema: {
+        ok: z.boolean().describe("True when the write succeeded")
       }
     },
     async ({ model, record_id, values }) => {
@@ -104,7 +123,7 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
           ids: [record_id],
           vals: values
         });
-        return { content: [{ type: "text" as const, text: JSON.stringify(true, null, 2) }] };
+        return mcpStructured({ ok: true }, JSON.stringify(true, null, 2));
       } catch (err) {
         return mcpErrorFromException(err, { model, method: "write" });
       }
@@ -130,6 +149,11 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
             })
           )
           .min(1)
+      },
+      outputSchema: {
+        results: z
+          .array(z.object({ record_id: z.number().int(), ok: z.boolean() }))
+          .describe("One entry per applied update, in input order (fail-fast: absent entries were not attempted)")
       }
     },
     async ({ model, updates }) => {
@@ -141,7 +165,7 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
           await queue.enqueue(conn, model, "write", { ids: [u.record_id], vals: u.values });
           results.push({ record_id: u.record_id, ok: true });
         }
-        return { content: [{ type: "text" as const, text: JSON.stringify(results, null, 2) }] };
+        return mcpStructured({ results }, JSON.stringify(results, null, 2));
       } catch (err) {
         return mcpErrorFromException(err, { model, method: "write" });
       }
@@ -169,6 +193,11 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
             })
           )
           .min(1)
+      },
+      outputSchema: {
+        results: z
+          .array(z.object({ record_id: z.number().int(), result: z.unknown() }))
+          .describe("One entry per posted message, in input order (fail-fast: absent entries were not attempted)")
       }
     },
     async ({ model, messages }) => {
@@ -185,7 +214,7 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
           });
           results.push({ record_id: m.record_id, result: res });
         }
-        return { content: [{ type: "text" as const, text: JSON.stringify(results, null, 2) }] };
+        return mcpStructured({ results }, JSON.stringify(results, null, 2));
       } catch (err) {
         return mcpErrorFromException(err, { model, method: "message_post" });
       }
@@ -201,12 +230,15 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
       inputSchema: {
         model: z.string().min(1),
         record_id: z.number().int().positive()
+      },
+      outputSchema: {
+        ok: z.boolean().describe("True when the delete succeeded")
       }
     },
     async ({ model, record_id }) => {
       try {
         await queue.enqueue(requireConnection(getProps()), model, "unlink", { ids: [record_id] });
-        return { content: [{ type: "text" as const, text: JSON.stringify(true, null, 2) }] };
+        return mcpStructured({ ok: true }, JSON.stringify(true, null, 2));
       } catch (err) {
         return mcpErrorFromException(err, { model, method: "unlink" });
       }
@@ -227,6 +259,9 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
         kwargs: z.record(z.string(), z.any()).default({}),
         // Deprecated: JSON-2 cannot bind positional args; kept so old callers fail loudly instead of silently.
         args: z.array(z.any()).default([])
+      },
+      outputSchema: {
+        result: z.unknown().describe("Raw return value of the invoked model method")
       }
     },
     async ({ model, method, ids, kwargs, args }) => {
@@ -240,7 +275,7 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
       try {
         const body = { ...kwargs, ...(ids !== undefined ? { ids } : {}) };
         const result = await queue.enqueue(requireConnection(getProps()), model, method, body);
-        return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+        return mcpStructured({ result }, JSON.stringify(result, null, 2));
       } catch (err) {
         return mcpErrorFromException(err, { model, method });
       }
