@@ -8,7 +8,9 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
   server.registerTool(
     "create_record",
     {
+      title: "Create Record",
       description: "Write: create a single Odoo record of the given model.",
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
       inputSchema: {
         model: z.string().min(1),
         values: z.record(z.string(), z.any())
@@ -29,7 +31,9 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
   server.registerTool(
     "post_message",
     {
+      title: "Post Chatter Message",
       description: "Write: post a message (chatter log/comment) to a single Odoo record.",
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
       inputSchema: {
         model: z.string(),
         record_id: z.number().int(),
@@ -58,8 +62,10 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
   server.registerTool(
     "update_record",
     {
+      title: "Update Record",
       description:
         "Write: update fields on a single Odoo record by id. x2many fields need Odoo command tuples (e.g. [[6,0,ids]], [[4,id]], [[3,id]]).",
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
       inputSchema: {
         model: z.string().min(1),
         record_id: z.number().int().positive(),
@@ -82,7 +88,9 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
   server.registerTool(
     "delete_record",
     {
+      title: "Delete Record",
       description: "Write: delete a single Odoo record by id.",
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
       inputSchema: {
         model: z.string().min(1),
         record_id: z.number().int().positive()
@@ -101,8 +109,10 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
   server.registerTool(
     "call_model_method",
     {
+      title: "Call Model Method (advanced)",
       description:
         "Escape hatch: call an arbitrary Odoo model method. Odoo's JSON-2 API has NO positional args — every body key is bound as a named kwarg (record-bound methods take a top-level `ids`). Pass record ids via `ids` and all other parameters via `kwargs`.",
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
       inputSchema: {
         model: z.string(),
         method: z.string(),

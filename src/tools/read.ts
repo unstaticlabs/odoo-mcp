@@ -65,7 +65,9 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
   server.registerTool(
     "projects.list_tasks",
     {
+      title: "List Project Tasks",
       description: "Read-only: list Odoo project.task records matching a domain.",
+      annotations: { readOnlyHint: true, openWorldHint: false },
       inputSchema: {
         domain: z.array(z.any()).default([]),
         fields: z.array(z.string()).default(DEFAULT_TASK_FIELDS)
@@ -84,7 +86,9 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
   server.registerTool(
     "list_models",
     {
+      title: "List Models",
       description: "Read-only: list enabled/installed Odoo models (name and technical model name).",
+      annotations: { readOnlyHint: true, openWorldHint: false },
       inputSchema: {}
     },
     async () => {
@@ -102,7 +106,9 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
   server.registerTool(
     "search_records",
     {
+      title: "Search Records",
       description: "Read-only: model-agnostic Odoo search_read.",
+      annotations: { readOnlyHint: true, openWorldHint: false },
       inputSchema: {
         model: z.string(),
         domain: z.array(z.any()).default([]),
@@ -126,7 +132,9 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
   server.registerTool(
     "search_count",
     {
+      title: "Search Count",
       description: "Read-only: model-agnostic Odoo search_count — count records matching a domain without fetching them.",
+      annotations: { readOnlyHint: true, openWorldHint: false },
       inputSchema: {
         model: z.string(),
         domain: z.array(z.any()).default([])
@@ -146,6 +154,7 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
   server.registerTool(
     "aggregate_records",
     {
+      title: "Aggregate Records",
       description:
         "Read-only: model-agnostic Odoo read_group (grouped aggregation). `groupby` and `aggregates` entries " +
         "follow Odoo's read_group `field:agg` syntax (e.g. `amount_total:sum`, `invoice_date:month`, `__count`).\n\n" +
@@ -154,6 +163,7 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
         '"groupby": ["invoice_date:month"], "aggregates": ["amount_total:sum"] }\n\n' +
         "Example 2 — count expenses per employee:\n" +
         '{ "model": "hr.expense", "groupby": ["employee_id"], "aggregates": ["__count"] }',
+      annotations: { readOnlyHint: true, openWorldHint: false },
       inputSchema: {
         model: z.string(),
         domain: z.array(z.any()).default([]),
@@ -183,6 +193,7 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
   server.registerTool(
     "get_record",
     {
+      title: "Get Record",
       description:
         "Read-only: fetch a single Odoo record by id. Many transactional models expose a workflow/lifecycle " +
         "field (here called `_workflow_status`, though its real name varies — commonly `state` or `stage_id`) " +
@@ -190,6 +201,7 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
         "where this field is `'draft'` are unconfirmed and generally safe to edit or remove via `update_record`/" +
         "`delete_record`; records past `draft` are higher risk — Odoo may block the write or it may trigger real " +
         "side effects (linked accounting entries, downstream automations), so check this field before mutating.",
+      annotations: { readOnlyHint: true, openWorldHint: false },
       inputSchema: {
         model: z.string(),
         record_id: z.number(),
@@ -224,8 +236,10 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
   server.registerTool(
     "get_fields",
     {
+      title: "Get Fields",
       description:
         "Read-only: get field schema for an Odoo model. Fields with readonly=true cannot be written via update_record; selection lists the allowed values.",
+      annotations: { readOnlyHint: true, openWorldHint: false },
       inputSchema: {
         model: z.string(),
         fields: z.array(z.string()).nullable().default(null)
@@ -248,6 +262,8 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
   server.registerTool(
     "list_model_actions",
     {
+      title: "List Model Actions",
+      annotations: { readOnlyHint: true, openWorldHint: false },
       description:
         "Read-only: discover valid action methods (e.g. action_post, button_draft) for an Odoo model, combining form-view buttons with a curated list. Discovery only — execute these via call_model_method; they change record state.",
       inputSchema: {
@@ -280,6 +296,8 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
   server.registerTool(
     "describe_database",
     {
+      title: "Describe Database",
+      annotations: { readOnlyHint: true, openWorldHint: false },
       description:
         "Read-only: summarize what this Odoo instance contains — installed modules, custom/Studio models, " +
         "Studio-added fields, server actions, and automated actions. Costs one Odoo call per requested section " +

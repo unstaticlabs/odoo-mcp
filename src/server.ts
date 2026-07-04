@@ -23,7 +23,8 @@ export interface Props extends Record<string, unknown> {
 }
 
 export class McpAgent extends McpAgentBase<Env, unknown, Props> {
-  server = new McpServer({ name: "odoo-mcp", version: "0.1.0" });
+  // Bump this on every future tool-surface change: it's the cache-busting key clients use to refetch the tool list.
+  server = new McpServer({ name: "odoo-mcp", version: "0.2.0" });
   odooQueue = new OdooQueue(callOdoo);
   // In-memory only — resets on DO eviction, same as odooQueue above.
   cache = new TtlCache();

@@ -1912,6 +1912,25 @@ describe("countRecords", () => {
   });
 });
 
+describe("tool metadata (title/annotations)", () => {
+  test("every registered tool has a title and annotations; no write tool is marked read-only", async () => {
+    const agent = await buildWriteToolAgent();
+    const tools = Object.values(agent.server._registeredTools) as any[];
+
+    expect(tools.length).toBeGreaterThan(0);
+    for (const tool of tools) {
+      expect(tool.title).toBeTruthy();
+      expect(tool.annotations).toBeTruthy();
+      expect(tool.annotations.openWorldHint).toBe(false);
+    }
+
+    const writeToolNames = ["create_record", "post_message", "update_record", "delete_record", "call_model_method"];
+    for (const name of writeToolNames) {
+      expect(agent.server._registeredTools[name].annotations.readOnlyHint).not.toBe(true);
+    }
+  });
+});
+
 describe("search_count", () => {
   afterEach(() => {
     globalThis.fetch = originalFetch;
