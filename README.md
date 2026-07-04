@@ -34,11 +34,13 @@ The server never logs, stores, or echoes your key.
 
 | Tool | Kind | Parameters |
 |---|---|---|
-| `search_records` | read | `model` (string), `domain` (array, default `[]`), `fields` (string[] \| null → smart defaults), `limit` (1–100, default 10) |
+| `search_records` | read | `model` (string), `domain` (array, default `[]`), `fields` (string[] \| null → smart defaults), `limit` (1–100, default 10), `order` (string, optional, e.g. `"name desc"`), `offset` (int ≥ 0, default 0) |
+| `search_count` | read | `model` (string), `domain` (array, default `[]`) → `{ count }` via `search_count`, without fetching records |
 | `get_record` | read | `model` (string), `record_id` (positive int), `fields` (string[] \| null → smart defaults) |
 | `list_models` | read | — |
 | `get_fields` | read | `model` (string) → field name/type/label schema |
 | `projects.list_tasks` | read | `domain` (array), `fields` (string[]) — convenience wrapper over `project.task` |
+| `aggregate_records` | read | `model` (string), `domain` (array), `groupby` (string[], Odoo `field:agg` syntax e.g. `invoice_date:month`), `aggregates` (string[], e.g. `amount_total:sum`, `__count`), `lazy` (bool, default true), `orderby` (string, optional) — wraps Odoo `read_group` |
 | `create_record` | write | `model` (string), `values` (object) |
 | `update_record` | write | `model` (string), `record_id` (positive int), `values` (object; x2many use Odoo command tuples, e.g. `[[6,0,ids]]`, `[[4,id]]`, `[[3,id]]`) |
 | `delete_record` | write | `model` (string), `record_id` (positive int) |

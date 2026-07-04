@@ -101,19 +101,28 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
   server.registerTool(
     "call_model_method",
     {
-      description: "Escape hatch: call an arbitrary Odoo model method with raw positional args and keyword args.",
+      description:
+        "Escape hatch: call an arbitrary Odoo model method. Odoo's JSON-2 API has NO positional args — every body key is bound as a named kwarg (record-bound methods take a top-level `ids`). Pass record ids via `ids` and all other parameters via `kwargs`.",
       inputSchema: {
         model: z.string(),
         method: z.string(),
-        args: z.array(z.any()).default([]),
-        kwargs: z.record(z.string(), z.any()).default({})
+        ids: z.array(z.number().int()).optional(),
+        kwargs: z.record(z.string(), z.any()).default({}),
+        // Deprecated: JSON-2 cannot bind positional args; kept so old callers fail loudly instead of silently.
+        args: z.array(z.any()).default([])
       }
     },
-    async ({ model, method, args, kwargs }) => {
+    async ({ model, method, ids, kwargs, args }) => {
       if (!model || !model.trim()) return mcpError("model must be a non-empty string");
       if (!method || !method.trim()) return mcpError("method must be a non-empty string");
+      if (args.length > 0) {
+        return mcpError(
+          "Odoo JSON-2 has no positional args: every body key is bound as a named kwarg, so an 'args' key fails with 422 unless the method literally has an 'args' parameter. Move these values into 'kwargs' (and record ids into 'ids')."
+        );
+      }
       try {
-        const result = await queue.enqueue(requireConnection(getProps()), model, method, { ...kwargs, args });
+        const body = { ...kwargs, ...(ids !== undefined ? { ids } : {}) };
+        const result = await queue.enqueue(requireConnection(getProps()), model, method, body);
         return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
       } catch (err) {
         return mcpError(err instanceof Error ? err.message : "call_model_method failed");

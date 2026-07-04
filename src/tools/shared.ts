@@ -5,9 +5,10 @@ import type { Props } from "../server";
 export const DEFAULT_TASK_FIELDS = ["id", "name", "stage_id", "project_id"];
 export const DEFAULT_GENERIC_FIELDS = ["id", "display_name"];
 
-interface OdooFieldMeta {
+export interface OdooFieldMeta {
   type: string;
   store?: boolean;
+  selection?: [string, string][];
 }
 
 const TECHNICAL_FIELD_NAMES = new Set(["create_uid", "create_date", "write_uid", "write_date", "__last_update"]);
@@ -58,15 +59,20 @@ export async function searchRecords(
   model: string,
   domain: unknown[],
   fields: string[] | null,
-  limit: number
-): Promise<unknown> {
+  limit: number,
+  order?: string,
+  offset?: number
+): Promise<{ rows: unknown; fieldsMeta: Record<string, OdooFieldMeta> | null }> {
   const cappedLimit = Math.min(limit, 100);
-  const resolvedFields = await resolveFields(queue, conn, model, fields);
-  return queue.enqueue(conn, model, "search_read", {
+  const { fields: resolvedFields, fieldsMeta } = await resolveFields(queue, conn, model, fields);
+  const rows = await queue.enqueue(conn, model, "search_read", {
     domain,
     fields: resolvedFields,
-    limit: cappedLimit
+    limit: cappedLimit,
+    offset: offset ?? 0,
+    ...(order ? { order } : {})
   });
+  return { rows, fieldsMeta };
 }
 
 export async function countRecords(queue: OdooQueue, conn: OdooConnection, model: string, domain: unknown[]): Promise<number> {
@@ -93,18 +99,18 @@ async function resolveFields(
   conn: OdooConnection,
   model: string,
   fields: string[] | null
-): Promise<string[]> {
+): Promise<{ fields: string[]; fieldsMeta: Record<string, OdooFieldMeta> | null }> {
   if (fields !== null && fields.length === 1 && fields[0] === ALL_FIELDS_SENTINEL) {
-    return []; // empty fields array => Odoo search_read returns all fields natively
+    return { fields: [], fieldsMeta: null }; // empty fields array => Odoo search_read returns all fields natively
   }
-  if (fields !== null) return fields;
+  if (fields !== null) return { fields, fieldsMeta: null };
 
   try {
     const meta = (await queue.enqueue(conn, model, "fields_get", {
-      attributes: ["type", "store"]
+      attributes: ["type", "store", "selection"]
     })) as Record<string, OdooFieldMeta>;
-    return pickSmartFields(meta);
+    return { fields: pickSmartFields(meta), fieldsMeta: meta };
   } catch {
-    return DEFAULT_GENERIC_FIELDS; // fields_get failed (e.g. bad model) — fall back rather than error the whole search
+    return { fields: DEFAULT_GENERIC_FIELDS, fieldsMeta: null }; // fields_get failed (e.g. bad model) — fall back rather than error the whole search
   }
 }

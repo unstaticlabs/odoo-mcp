@@ -35,6 +35,7 @@ const {
   parseButtonsFromArch,
   mergeModelActions,
   CURATED_MODEL_ACTIONS,
+  deriveWorkflowStatus,
   McpAgent,
   default: handler
 } = await import("./index");
@@ -563,6 +564,39 @@ describe("normalizer", () => {
   });
 });
 
+describe("deriveWorkflowStatus", () => {
+  test("record with state string returns the state", () => {
+    expect(deriveWorkflowStatus({ state: "draft" })).toBe("draft");
+  });
+
+  test("record with stage_id tuple returns the label", () => {
+    expect(deriveWorkflowStatus({ stage_id: [3, "Done"] })).toBe("Done");
+  });
+
+  test("state takes precedence over stage_id when both are present", () => {
+    expect(deriveWorkflowStatus({ state: "confirmed", stage_id: [3, "Done"] })).toBe("confirmed");
+  });
+
+  test("record with neither field returns null", () => {
+    expect(deriveWorkflowStatus({ id: 1 })).toBeNull();
+  });
+
+  test("falsy state values (empty string, 0, false) return null", () => {
+    expect(deriveWorkflowStatus({ state: "" })).toBeNull();
+    expect(deriveWorkflowStatus({ state: 0 })).toBeNull();
+    expect(deriveWorkflowStatus({ state: false })).toBeNull();
+  });
+
+  test("stage_id false (Odoo's no-relation convention) returns null", () => {
+    expect(deriveWorkflowStatus({ stage_id: false })).toBeNull();
+  });
+
+  test("stage_id malformed (not a [id, label] tuple) returns null", () => {
+    expect(deriveWorkflowStatus({ stage_id: [3] })).toBeNull();
+    expect(deriveWorkflowStatus({ stage_id: "Done" })).toBeNull();
+  });
+});
+
 describe("searchRecords", () => {
   afterEach(() => {
     globalThis.fetch = originalFetch;
@@ -599,7 +633,7 @@ describe("searchRecords", () => {
     expect(fetchCalls.length).toBe(2);
     // First call should be fields_get
     expect(fetchCalls[0].url).toContain("/fields_get");
-    expect(fetchCalls[0].body).toEqual({ attributes: ["type", "store"] });
+    expect(fetchCalls[0].body).toEqual({ attributes: ["type", "store", "selection"] });
     // Second call should be search_read with resolved smart fields
     expect(fetchCalls[1].url).toContain("/search_read");
     expect(fetchCalls[1].body.fields).toEqual(["id", "name", "display_name"]);
@@ -707,6 +741,110 @@ describe("searchRecords", () => {
     expect(fetchCalls.length).toBe(1);
     expect(fetchCalls[0].url).toContain("/search_read");
     expect(fetchCalls[0].body.limit).toBe(1);
+  });
+
+  test("forwards order into search_read kwargs when provided", async () => {
+    const conn = { url: "http://example.com", db: "test-db", apiKey: "secret-key" };
+    let fetchCalls: { url: string; body: any }[] = [];
+    const fetchMock = mock(async (url: string, init: any) => {
+      const body = JSON.parse(init.body);
+      fetchCalls.push({ url, body });
+      return new Response(JSON.stringify({ result: [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+    globalThis.fetch = fetchMock;
+
+    await searchRecords(makeQueue(), conn, "test.model", [], ["id", "name"], 10, "name desc");
+
+    expect(fetchCalls.length).toBe(1);
+    expect(fetchCalls[0].body.order).toBe("name desc");
+  });
+
+  test("forwards offset into search_read kwargs when provided", async () => {
+    const conn = { url: "http://example.com", db: "test-db", apiKey: "secret-key" };
+    let fetchCalls: { url: string; body: any }[] = [];
+    const fetchMock = mock(async (url: string, init: any) => {
+      const body = JSON.parse(init.body);
+      fetchCalls.push({ url, body });
+      return new Response(JSON.stringify({ result: [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+    globalThis.fetch = fetchMock;
+
+    await searchRecords(makeQueue(), conn, "test.model", [], ["id", "name"], 10, undefined, 20);
+
+    expect(fetchCalls.length).toBe(1);
+    expect(fetchCalls[0].body.offset).toBe(20);
+  });
+
+  test("defaults offset to 0 when not provided", async () => {
+    const conn = { url: "http://example.com", db: "test-db", apiKey: "secret-key" };
+    let fetchCalls: { url: string; body: any }[] = [];
+    const fetchMock = mock(async (url: string, init: any) => {
+      const body = JSON.parse(init.body);
+      fetchCalls.push({ url, body });
+      return new Response(JSON.stringify({ result: [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+    globalThis.fetch = fetchMock;
+
+    await searchRecords(makeQueue(), conn, "test.model", [], ["id", "name"], 10);
+
+    expect(fetchCalls.length).toBe(1);
+    expect(fetchCalls[0].body.offset).toBe(0);
+  });
+
+  test("exposes fetched fieldsMeta on the return value when fields is null", async () => {
+    const conn = { url: "http://example.com", db: "test-db", apiKey: "secret-key" };
+    const fetchMock = mock(async (url: string, init: any) => {
+      if (url.endsWith("/fields_get")) {
+        return new Response(
+          JSON.stringify({
+            result: {
+              id: { type: "integer", store: true },
+              name: { type: "char", store: true },
+              display_name: { type: "char", store: true },
+              image: { type: "binary", store: true }
+            }
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      return new Response(JSON.stringify({ result: [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+    globalThis.fetch = fetchMock;
+
+    const result = await searchRecords(makeQueue(), conn, "test.model", [], null, 10);
+    expect(result.fieldsMeta).toEqual({
+      id: { type: "integer", store: true },
+      name: { type: "char", store: true },
+      display_name: { type: "char", store: true },
+      image: { type: "binary", store: true }
+    });
+    expect(result.rows).toEqual([]);
+  });
+
+  test("returns fieldsMeta: null when explicit fields list is passed", async () => {
+    const conn = { url: "http://example.com", db: "test-db", apiKey: "secret-key" };
+    const fetchMock = mock(async () => {
+      return new Response(JSON.stringify({ result: [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+    globalThis.fetch = fetchMock;
+
+    const result = await searchRecords(makeQueue(), conn, "test.model", [], ["id", "name"], 10);
+    expect(result.fieldsMeta).toBeNull();
   });
 });
 
@@ -1142,6 +1280,63 @@ describe("aggregate_records tool callOdoo call shape", () => {
   });
 });
 
+describe("get_fields tool callOdoo call shape", () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  test("calls fields_get with the full metadata attributes list", async () => {
+    const agent = await buildWriteToolAgent();
+    let fetchCalls: { url: string; body: any }[] = [];
+    const fetchMock = mock(async (url: string, init: any) => {
+      fetchCalls.push({ url, body: JSON.parse(init.body) });
+      return new Response(JSON.stringify({ result: { name: { type: "char", string: "Name" } } }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+    globalThis.fetch = fetchMock;
+
+    const handler = getToolHandler(agent, "get_fields");
+    await handler({ model: "project.task" });
+
+    expect(fetchCalls.length).toBe(1);
+    expect(fetchCalls[0].url).toContain("/project.task/fields_get");
+    expect(fetchCalls[0].body.attributes).toEqual([
+      "type",
+      "string",
+      "readonly",
+      "required",
+      "store",
+      "selection",
+      "relation",
+      "help",
+      "searchable",
+      "sortable"
+    ]);
+    expect(fetchCalls[0].body.allfields).toBeUndefined();
+  });
+
+  test("forwards an explicit fields allowlist as allfields", async () => {
+    const agent = await buildWriteToolAgent();
+    let fetchCalls: { url: string; body: any }[] = [];
+    const fetchMock = mock(async (url: string, init: any) => {
+      fetchCalls.push({ url, body: JSON.parse(init.body) });
+      return new Response(JSON.stringify({ result: { name: { type: "char", string: "Name" } } }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+    globalThis.fetch = fetchMock;
+
+    const handler = getToolHandler(agent, "get_fields");
+    await handler({ model: "project.task", fields: ["name", "stage_id"] });
+
+    expect(fetchCalls.length).toBe(1);
+    expect(fetchCalls[0].body.allfields).toEqual(["name", "stage_id"]);
+  });
+});
+
 describe("call_model_method tool callOdoo call shape", () => {
   afterEach(() => {
     globalThis.fetch = originalFetch;
@@ -1414,7 +1609,9 @@ describe("search_records limit zod schema", () => {
     model: z.string(),
     domain: z.array(z.any()).default([]),
     fields: z.array(z.string()).nullable().default(null),
-    limit: z.number().int().min(1).max(100).default(10)
+    limit: z.number().int().min(1).max(100).default(10),
+    order: z.string().optional(),
+    offset: z.number().int().min(0).default(0)
   });
 
   test("accepts valid limits and defaults to 10", () => {
@@ -1443,6 +1640,41 @@ describe("search_records limit zod schema", () => {
 
     const res4 = schema.safeParse({ model: "res.partner", limit: -5 });
     expect(res4.success).toBe(false);
+  });
+
+  test("order is optional and absent when not provided", () => {
+    const res = schema.safeParse({ model: "res.partner" });
+    expect(res.success).toBe(true);
+    if (res.success) {
+      expect(res.data.order).toBeUndefined();
+    }
+  });
+
+  test("order passes through a valid string", () => {
+    const res = schema.safeParse({ model: "res.partner", order: "name desc" });
+    expect(res.success).toBe(true);
+    if (res.success) {
+      expect(res.data.order).toBe("name desc");
+    }
+  });
+
+  test("offset defaults to 0 and accepts non-negative integers", () => {
+    const res1 = schema.safeParse({ model: "res.partner" });
+    expect(res1.success).toBe(true);
+    if (res1.success) {
+      expect(res1.data.offset).toBe(0);
+    }
+
+    const res2 = schema.safeParse({ model: "res.partner", offset: 20 });
+    expect(res2.success).toBe(true);
+    if (res2.success) {
+      expect(res2.data.offset).toBe(20);
+    }
+  });
+
+  test("rejects negative offset", () => {
+    const res = schema.safeParse({ model: "res.partner", offset: -1 });
+    expect(res.success).toBe(false);
   });
 });
 
@@ -1485,6 +1717,46 @@ describe("countRecords", () => {
 
     expect(error).toBeDefined();
     expect(error?.message).toContain("model must be a non-empty string");
+    expect(fetchMock.mock.calls.length).toBe(0);
+  });
+});
+
+describe("search_count", () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  test("calls search_count RPC and returns { count } matching the mocked value", async () => {
+    const agent = await buildWriteToolAgent();
+    let fetchCalls: { url: string; body: any }[] = [];
+    const fetchMock = mock(async (url: string, init: any) => {
+      fetchCalls.push({ url, body: JSON.parse(init.body) });
+      return new Response(JSON.stringify({ result: 42 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+    globalThis.fetch = fetchMock;
+
+    const handler = getToolHandler(agent, "search_count");
+    const result = await handler({ model: "project.task", domain: [["active", "=", true]] });
+
+    expect(fetchCalls.length).toBe(1);
+    expect(fetchCalls[0].url).toContain("/project.task/search_count");
+    expect(fetchCalls[0].body).toEqual({ domain: [["active", "=", true]] });
+    expect(JSON.parse(result.content[0].text)).toEqual({ count: 42 });
+  });
+
+  test("rejects an empty model without calling fetch", async () => {
+    const agent = await buildWriteToolAgent();
+    const fetchMock = mock(() => Promise.reject(new Error("should not be called")));
+    globalThis.fetch = fetchMock;
+
+    const handler = getToolHandler(agent, "search_count");
+    const result = await handler({ model: "  ", domain: [] });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("model must be a non-empty string");
     expect(fetchMock.mock.calls.length).toBe(0);
   });
 });
@@ -1673,7 +1945,8 @@ describe("resources", () => {
       expect(fetchCalls[0].body).toEqual({
         domain: [["active", "=", true]],
         fields: ["id", "name"],
-        limit: 5
+        limit: 5,
+        offset: 0
       });
       expect(JSON.parse(result.contents[0].text)).toEqual([{ id: 1 }]);
     });
@@ -1807,7 +2080,7 @@ describe("resources", () => {
   });
 
   describe("odoo://{model}/fields", () => {
-    test("calls fields_get with type/string attributes, matching the get_fields tool", async () => {
+    test("calls fields_get with the full metadata attributes, matching the get_fields tool", async () => {
       const agent = await buildAgent();
       let fetchCalls: { url: string; body: any }[] = [];
       const fetchMock = mock(async (url: string, init: any) => {
@@ -1825,7 +2098,10 @@ describe("resources", () => {
 
       expect(fetchCalls.length).toBe(1);
       expect(fetchCalls[0].url).toContain("/project.task/fields_get");
-      expect(fetchCalls[0].body).toEqual({ attributes: ["type", "string"] });
+      expect(fetchCalls[0].body).toEqual({
+        attributes: ["type", "string", "readonly", "required", "store", "selection", "relation", "help", "searchable", "sortable"]
+      });
+      expect(fetchCalls[0].body.allfields).toBeUndefined();
       expect(JSON.parse(result.contents[0].text)).toEqual({ name: { type: "char", string: "Name" } });
     });
 
@@ -1869,6 +2145,84 @@ describe("resources", () => {
     for (const method of calledMethods) {
       expect(["create", "write", "unlink"]).not.toContain(method);
     }
+  });
+});
+
+describe("describe_database", () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  function mockOdoo(perModel: Record<string, unknown[] | Error>) {
+    return mock(async (url: string) => {
+      const model = Object.keys(perModel).find((m) => url.includes(`/json/2/${m}/search_read`));
+      const outcome = model ? perModel[model] : undefined;
+      if (outcome instanceof Error) {
+        return new Response(JSON.stringify({ error: { message: outcome.message } }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+      return new Response(JSON.stringify({ result: outcome ?? [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+  }
+
+  test("default run returns all 5 sections with counts", async () => {
+    const agent = await buildWriteToolAgent();
+    globalThis.fetch = mockOdoo({
+      "ir.module.module": [{ name: "sale", shortdesc: "Sales" }],
+      "ir.model": [{ model: "x_custom", name: "Custom" }],
+      "ir.model.fields": [{ model: "res.partner", name: "x_studio_foo", ttype: "char", field_description: "Foo" }],
+      "ir.actions.server": [{ name: "Action", model_id: [1, "res.partner"], state: "code" }],
+      "base.automation": [{ name: "Auto", trigger: "on_create", model_id: [1, "res.partner"], active: true }]
+    });
+
+    const handler = getToolHandler(agent, "describe_database");
+    const result = await handler({});
+    const body = JSON.parse(result.content[0].text);
+
+    expect(Object.keys(body).sort()).toEqual(
+      ["automations", "custom_models", "modules", "server_actions", "studio_fields"].sort()
+    );
+    expect(body.modules.count).toBe(1);
+    expect(body.automations.count).toBe(1);
+    expect(result.isError).toBeUndefined();
+  });
+
+  test("include filters to a subset of sections", async () => {
+    const agent = await buildWriteToolAgent();
+    globalThis.fetch = mockOdoo({ "ir.module.module": [{ name: "sale", shortdesc: "Sales" }] });
+
+    const handler = getToolHandler(agent, "describe_database");
+    const result = await handler({ include: ["modules"] });
+    const body = JSON.parse(result.content[0].text);
+
+    expect(Object.keys(body)).toEqual(["modules"]);
+    expect(body.modules.count).toBe(1);
+  });
+
+  test("one section erroring does not fail the others", async () => {
+    const agent = await buildWriteToolAgent();
+    globalThis.fetch = mockOdoo({
+      "ir.module.module": [{ name: "sale", shortdesc: "Sales" }],
+      "ir.model": [{ model: "x_custom", name: "Custom" }],
+      "ir.model.fields": [],
+      "ir.actions.server": [],
+      "base.automation": new Error("Invalid model name 'base.automation'")
+    });
+
+    const handler = getToolHandler(agent, "describe_database");
+    const result = await handler({});
+    const body = JSON.parse(result.content[0].text);
+
+    expect(body.automations.error).toContain("base.automation");
+    expect(body.automations.count).toBeUndefined();
+    expect(body.modules.count).toBe(1);
+    expect(body.custom_models.count).toBe(1);
+    expect(result.isError).toBeUndefined();
   });
 });
 
@@ -2212,5 +2566,88 @@ describe("OAuth shim (ChatGPT path)", () => {
     expect(res.status).toBe(200);
     const json = (await res.json()) as any;
     expect(json.props.odooApiKey).toBe("raw-header-key");
+  });
+});
+
+describe("call_model_method JSON-2 body contract", () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  test("body contains only kwargs (+ ids) — never an 'args' key", async () => {
+    const agent = await buildWriteToolAgent();
+    const fetchCalls: { url: string; body: any }[] = [];
+    globalThis.fetch = mock(async (url: string, init: any) => {
+      fetchCalls.push({ url, body: JSON.parse(init.body) });
+      return new Response(JSON.stringify({ result: "ok" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+
+    const handler = getToolHandler(agent, "call_model_method");
+    const result = await handler({
+      model: "ir.attachment",
+      method: "read",
+      ids: [7, 8],
+      kwargs: { fields: ["name", "mimetype"] },
+      args: []
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(fetchCalls.length).toBe(1);
+    expect(fetchCalls[0].url).toContain("/ir.attachment/read");
+    // JSON-2 binds every body key as a named kwarg: an injected args:[] would 422
+    // on any method without an 'args' parameter (verified live on saas-19.2).
+    expect(fetchCalls[0].body).toEqual({ fields: ["name", "mimetype"], ids: [7, 8] });
+    expect("args" in fetchCalls[0].body).toBe(false);
+  });
+
+  test("omits ids from the body when not provided", async () => {
+    const agent = await buildWriteToolAgent();
+    const fetchCalls: { body: any }[] = [];
+    globalThis.fetch = mock(async (_url: string, init: any) => {
+      fetchCalls.push({ body: JSON.parse(init.body) });
+      return new Response(JSON.stringify({ result: "ok" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+
+    const handler = getToolHandler(agent, "call_model_method");
+    await handler({ model: "res.partner", method: "search_read", kwargs: { domain: [], limit: 1 }, args: [] });
+
+    expect(fetchCalls[0].body).toEqual({ domain: [], limit: 1 });
+    expect("ids" in fetchCalls[0].body).toBe(false);
+  });
+
+  test("explicit ids wins over an ids key inside kwargs", async () => {
+    const agent = await buildWriteToolAgent();
+    const fetchCalls: { body: any }[] = [];
+    globalThis.fetch = mock(async (_url: string, init: any) => {
+      fetchCalls.push({ body: JSON.parse(init.body) });
+      return new Response(JSON.stringify({ result: "ok" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+
+    const handler = getToolHandler(agent, "call_model_method");
+    await handler({ model: "project.task", method: "write", ids: [5], kwargs: { ids: [999], vals: { name: "x" } }, args: [] });
+
+    expect(fetchCalls[0].body).toEqual({ ids: [5], vals: { name: "x" } });
+  });
+
+  test("non-empty positional args fail loudly without calling Odoo", async () => {
+    const agent = await buildWriteToolAgent();
+    const fetchMock = mock(() => Promise.reject(new Error("should not be called")));
+    globalThis.fetch = fetchMock;
+
+    const handler = getToolHandler(agent, "call_model_method");
+    const result = await handler({ model: "res.partner", method: "read", args: [[1, 2]], kwargs: {} });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("no positional args");
+    expect(fetchMock.mock.calls.length).toBe(0);
   });
 });

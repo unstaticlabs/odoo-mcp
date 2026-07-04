@@ -7,8 +7,10 @@ export { OdooQueue } from "./odoo-queue";
 export { pickSmartFields, searchRecords, escapeHtml, countRecords } from "./tools/shared";
 export { parseButtonsFromArch, mergeModelActions } from "./tools/read";
 export { CURATED_MODEL_ACTIONS } from "./tools/actions-map";
-export { normalizeRecord, normalizeRecords } from "./normalizer";
+export { normalizeRecord, normalizeRecords, deriveWorkflowStatus } from "./normalizer";
 export type { OdooFieldMeta, FieldsMeta, NormalizeOptions } from "./normalizer";
+export { TtlCache, getFieldsCached, resolveXmlIdCached, cachedSearchRead, TTL_METADATA_MS, TTL_STRUCTURE_MS, TTL_BALANCE_MS } from "./cache";
+export type { CachedFieldMeta, XmlIdResolution } from "./cache";
 export { validateOdooCredentials } from "./oauth";
 export { McpAgent };
 
