@@ -29,6 +29,7 @@ export interface Props extends Record<string, unknown> {
   odooBaseUrl: string;
   odooDb: string;
   odooApiKey: string;
+  clientName?: string;
 }
 
 export class McpAgent extends McpAgentBase<Env, unknown, Props> {

@@ -61,6 +61,32 @@ function getToolHandler(agent: any, name: string) {
   return agent.server._registeredTools[name].handler;
 }
 
+/** Records every enqueue call and can force a message_post rejection, so tests never touch fetch. */
+function makeStubQueue({ createId = 42, failMessagePost = false }: { createId?: number; failMessagePost?: boolean } = {}) {
+  const calls: { conn: unknown; model: string; method: string; args: any }[] = [];
+  return {
+    calls,
+    enqueue(conn: unknown, model: string, method: string, args: any) {
+      calls.push({ conn, model, method, args });
+      if (method === "create") return Promise.resolve([createId]);
+      if (method === "message_post") {
+        return failMessagePost ? Promise.reject(new Error("odoo message_post boom")) : Promise.resolve(123);
+      }
+      return Promise.resolve(true);
+    }
+  };
+}
+
+/** Builds a write-tool agent whose queue is the given stub (must be wired before init so the closure captures it). */
+async function buildAgentWithQueue(queue: unknown, propsOverride?: unknown) {
+  const AgentCtor = McpAgent as any;
+  const agent = new AgentCtor();
+  agent.odooQueue = queue;
+  agent.props = propsOverride ?? { odooBaseUrl: "http://example.com", odooDb: "test-db", odooApiKey: "secret-key" };
+  await agent.init();
+  return agent;
+}
+
 describe("callOdoo", () => {
   afterEach(() => {
     globalThis.fetch = originalFetch;
@@ -1025,6 +1051,98 @@ describe("write tool callOdoo call shapes", () => {
     expect(error?.message).not.toContain("secret-write-key-99999");
     expect(error?.message).not.toContain("sensitive-value-xyz");
     expect(error?.message).not.toContain("Bearer");
+  });
+});
+
+describe("create_record provenance stamping", () => {
+  const STAMP_RE = /\[agent-source\] engineering_task corr=src-[0-9a-f]{8} via=\S+/;
+
+  test("project.task happy path: exactly create then message_post targeting the new id", async () => {
+    const queue = makeStubQueue({ createId: 42 });
+    const agent = await buildAgentWithQueue(queue);
+    const handler = getToolHandler(agent, "create_record");
+
+    const result = await handler({ model: "project.task", values: { name: "New Task" } });
+
+    expect(queue.calls.length).toBe(2);
+    expect(queue.calls[0].method).toBe("create");
+    expect(queue.calls[0].args).toEqual({ vals_list: [{ name: "New Task" }] });
+    expect(queue.calls[1].method).toBe("message_post");
+    expect(queue.calls[1].model).toBe("project.task");
+    expect(queue.calls[1].args.ids).toEqual([42]);
+    expect(queue.calls[1].args.message_type).toBe("comment");
+    expect(queue.calls[1].args.body).toMatch(STAMP_RE);
+    expect(result.isError).toBeUndefined();
+  });
+
+  test("result text includes the new id, the same token as the chatter body, and the echo instruction", async () => {
+    const queue = makeStubQueue({ createId: 77 });
+    const agent = await buildAgentWithQueue(queue);
+    const handler = getToolHandler(agent, "create_record");
+
+    const result = await handler({ model: "project.task", values: { name: "X" } });
+    const text = result.content[0].text as string;
+    const bodyToken = (queue.calls[1].args.body as string).match(/src-[0-9a-f]{8}/)![0];
+
+    expect(text).toContain("77");
+    expect(text).toContain(bodyToken);
+    expect(text).toContain("include this token verbatim");
+  });
+
+  test("other model: single enqueue, no token, no marker post", async () => {
+    const queue = makeStubQueue({ createId: 5 });
+    const agent = await buildAgentWithQueue(queue);
+    const handler = getToolHandler(agent, "create_record");
+
+    const result = await handler({ model: "res.partner", values: { name: "Acme" } });
+    const text = result.content[0].text as string;
+
+    expect(queue.calls.length).toBe(1);
+    expect(queue.calls[0].method).toBe("create");
+    expect(text).toContain("5");
+    expect(text).not.toContain("Trace token");
+    expect(text).not.toContain("[agent-source]");
+  });
+
+  test("post failure isolation: still returns id + warning, isError not set", async () => {
+    const queue = makeStubQueue({ createId: 88, failMessagePost: true });
+    const agent = await buildAgentWithQueue(queue);
+    const handler = getToolHandler(agent, "create_record");
+
+    const result = await handler({ model: "project.task", values: { name: "X" } });
+    const text = result.content[0].text as string;
+
+    expect(text).toContain("88");
+    expect(text).toContain("failed to post the provenance stamp");
+    expect(result.isError).toBeUndefined();
+  });
+
+  test("via=unknown fallback when no clientName prop and no client version", async () => {
+    const queue = makeStubQueue({ createId: 9 });
+    const agent = await buildAgentWithQueue(queue, {
+      odooBaseUrl: "http://example.com",
+      odooDb: "test-db",
+      odooApiKey: "secret-key"
+    });
+    expect(agent.server.server.getClientVersion()).toBeUndefined();
+    const handler = getToolHandler(agent, "create_record");
+
+    await handler({ model: "project.task", values: { name: "X" } });
+
+    expect(queue.calls[1].args.body as string).toMatch(/ via=unknown$/);
+  });
+
+  test("uniqueness: two consecutive project.task creates produce different tokens", async () => {
+    const queue = makeStubQueue({ createId: 1 });
+    const agent = await buildAgentWithQueue(queue);
+    const handler = getToolHandler(agent, "create_record");
+
+    await handler({ model: "project.task", values: { name: "A" } });
+    await handler({ model: "project.task", values: { name: "B" } });
+
+    const t1 = (queue.calls[1].args.body as string).match(/src-[0-9a-f]{8}/)![0];
+    const t2 = (queue.calls[3].args.body as string).match(/src-[0-9a-f]{8}/)![0];
+    expect(t1).not.toBe(t2);
   });
 });
 
@@ -2704,7 +2822,7 @@ describe("OAuth shim (ChatGPT path)", () => {
     const redirectRes = await submitAuthorizeForm(env, oauthReq, {
       odoo_url: "https://acme.odoo.com",
       odoo_db: "acme-prod",
-      odoo_api_key: "shim-secret-key-424242"
+      odoo_api_key: "shim-secret-key-example"
     });
     expect(redirectRes.status).toBe(302);
     const location = new URL(redirectRes.headers.get("Location")!);
@@ -2716,7 +2834,7 @@ describe("OAuth shim (ChatGPT path)", () => {
     // The validation call hit Odoo with the submitted credentials.
     const validationCall = fetchMock.mock.calls[0] as any;
     expect(String(validationCall[0])).toBe("https://acme.odoo.com/json/2/res.users/fields_get");
-    expect(validationCall[1].headers.Authorization).toBe("Bearer shim-secret-key-424242");
+    expect(validationCall[1].headers.Authorization).toBe("Bearer shim-secret-key-example");
     expect(validationCall[1].headers["X-Odoo-Database"]).toBe("acme-prod");
 
     globalThis.fetch = originalFetch;
@@ -2756,7 +2874,8 @@ describe("OAuth shim (ChatGPT path)", () => {
     expect(echoed.props).toEqual({
       odooBaseUrl: "https://acme.odoo.com",
       odooDb: "acme-prod",
-      odooApiKey: "shim-secret-key-424242"
+      odooApiKey: "shim-secret-key-example",
+      clientName: "ChatGPT"
     });
 
     // Refresh grant issues a fresh usable access token.
