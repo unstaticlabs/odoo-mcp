@@ -187,7 +187,7 @@ async function handleAuthorizePost(request: Request, env: Env): Promise<Response
     });
   }
 
-  const props: Props = { odooBaseUrl, odooDb, odooApiKey };
+  const props: Props = { odooBaseUrl, odooDb, odooApiKey, clientName };
   const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({
     request: authRequest,
     userId: `${new URL(odooBaseUrl).host}/${odooDb}`,
