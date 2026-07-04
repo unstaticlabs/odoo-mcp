@@ -9,6 +9,67 @@ export interface OdooConnection {
   apiKey: string;
 }
 
+export type OdooErrorCode =
+  | "unauthorized"
+  | "permission_denied"
+  | "model_or_method_not_found"
+  | "invalid_request"
+  | "rate_limited"
+  | "odoo_server_error"
+  | "timeout"
+  | "network_error"
+  | "unknown";
+
+const RECOVERABLE_CODES = new Set<OdooErrorCode>(["timeout", "rate_limited", "network_error"]);
+
+/** Pure classification from HTTP status / failure kind to a stable, machine-readable error code. */
+export function classifyOdooError(httpStatus: number | null, isTimeout: boolean, isNetworkError: boolean): OdooErrorCode {
+  if (isTimeout) return "timeout";
+  if (isNetworkError) return "network_error";
+  if (httpStatus === 401) return "unauthorized";
+  if (httpStatus === 403) return "permission_denied";
+  if (httpStatus === 404) return "model_or_method_not_found";
+  if (httpStatus === 400) return "invalid_request";
+  if (httpStatus === 429) return "rate_limited";
+  if (httpStatus !== null && httpStatus >= 500 && httpStatus < 600) return "odoo_server_error";
+  return "unknown";
+}
+
+export function isRecoverable(code: OdooErrorCode): boolean {
+  return RECOVERABLE_CODES.has(code);
+}
+
+export interface OdooErrorParams {
+  message: string;
+  code: OdooErrorCode;
+  httpStatus: number | null;
+  model: string;
+  method: string;
+  details: string;
+  recoverable?: boolean;
+}
+
+/** Thrown by callOdoo on every failure path so tool handlers can classify errors instead of pattern-matching strings. */
+export class OdooError extends Error {
+  code: OdooErrorCode;
+  httpStatus: number | null;
+  model: string;
+  method: string;
+  details: string;
+  recoverable: boolean;
+
+  constructor(params: OdooErrorParams) {
+    super(params.message);
+    this.name = "OdooError";
+    this.code = params.code;
+    this.httpStatus = params.httpStatus;
+    this.model = params.model;
+    this.method = params.method;
+    this.details = params.details;
+    this.recoverable = params.recoverable ?? isRecoverable(params.code);
+  }
+}
+
 function extractOdooErrorMessage(payload: unknown): string | undefined {
   if (!payload || typeof payload !== "object") return undefined;
   const record = payload as Record<string, unknown>;
@@ -62,9 +123,27 @@ export async function callOdoo(
         if (attempt < ODOO_MAX_ATTEMPTS) {
           continue;
         }
-        throw new Error(`Odoo request to ${model}.${method} timed out after ${timeoutMs}ms`);
+        const message = `Odoo request to ${model}.${method} timed out after ${timeoutMs}ms`;
+        throw new OdooError({
+          message,
+          code: "timeout",
+          httpStatus: null,
+          model,
+          method,
+          details: message,
+          recoverable: true
+        });
       }
-      throw new Error(`Odoo request to ${model}.${method} failed: network error`);
+      const message = `Odoo request to ${model}.${method} failed: network error`;
+      throw new OdooError({
+        message,
+        code: "network_error",
+        httpStatus: null,
+        model,
+        method,
+        details: message,
+        recoverable: true
+      });
     } finally {
       clearTimeout(timer);
     }
@@ -84,12 +163,26 @@ export async function callOdoo(
 
     if (!response.ok) {
       const detail = extractOdooErrorMessage(payload) ?? response.statusText;
-      throw new Error(`Odoo ${model}.${method} failed (${response.status}): ${detail}`);
+      throw new OdooError({
+        message: `Odoo ${model}.${method} failed (${response.status}): ${detail}`,
+        code: classifyOdooError(response.status, false, false),
+        httpStatus: response.status,
+        model,
+        method,
+        details: detail
+      });
     }
 
     if (payload && typeof payload === "object" && "error" in (payload as Record<string, unknown>)) {
       const detail = extractOdooErrorMessage(payload) ?? "unknown error";
-      throw new Error(`Odoo ${model}.${method} returned an error: ${detail}`);
+      throw new OdooError({
+        message: `Odoo ${model}.${method} returned an error: ${detail}`,
+        code: "unknown",
+        httpStatus: response.status,
+        model,
+        method,
+        details: detail
+      });
     }
 
     if (payload && typeof payload === "object" && "result" in (payload as Record<string, unknown>)) {
@@ -98,5 +191,12 @@ export async function callOdoo(
     return payload;
   }
 
-  throw new Error(`Odoo request to ${model}.${method} failed`);
+  throw new OdooError({
+    message: `Odoo request to ${model}.${method} failed`,
+    code: "unknown",
+    httpStatus: null,
+    model,
+    method,
+    details: `Odoo request to ${model}.${method} failed`
+  });
 }

@@ -2,7 +2,8 @@ import OAuthProvider from "@cloudflare/workers-oauth-provider";
 import { McpAgent, type Env, type Props } from "./server";
 import { oauthDefaultHandler } from "./oauth";
 
-export { callOdoo } from "./odoo";
+export { callOdoo, OdooError, classifyOdooError, isRecoverable } from "./odoo";
+export type { OdooErrorCode } from "./odoo";
 export { OdooQueue } from "./odoo-queue";
 export { pickSmartFields, searchRecords, escapeHtml, countRecords } from "./tools/shared";
 export { parseButtonsFromArch, mergeModelActions } from "./tools/read";

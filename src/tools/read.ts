@@ -3,7 +3,7 @@ import { z } from "zod";
 import type { OdooQueue } from "../odoo-queue";
 import type { Props } from "../server";
 import { CURATED_MODEL_ACTIONS, type CuratedAction } from "./actions-map";
-import { CORE_MODEL_ALLOWLIST, DEFAULT_TASK_FIELDS, countRecords, mcpError, requireConnection, searchRecords } from "./shared";
+import { CORE_MODEL_ALLOWLIST, DEFAULT_TASK_FIELDS, countRecords, mcpError, mcpErrorFromException, requireConnection, searchRecords } from "./shared";
 import { deriveWorkflowStatus } from "../normalizer";
 
 export interface ModelAction {
@@ -76,7 +76,7 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
         const { rows: tasks } = await searchRecords(queue, requireConnection(getProps()), "project.task", domain, fields, 100);
         return { content: [{ type: "text" as const, text: JSON.stringify(tasks, null, 2) }] };
       } catch (err) {
-        return mcpError(err instanceof Error ? err.message : "projects.list_tasks failed");
+        return mcpErrorFromException(err, { model: "project.task", method: "search_read" });
       }
     }
   );
@@ -118,7 +118,7 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
         const { rows } = await searchRecords(queue, requireConnection(getProps()), model, domain, fields, limit, order, offset);
         return { content: [{ type: "text" as const, text: JSON.stringify(rows, null, 2) }] };
       } catch (err) {
-        return mcpError(err instanceof Error ? err.message : "search_records failed");
+        return mcpErrorFromException(err, { model, method: "search_read" });
       }
     }
   );
@@ -175,7 +175,7 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
         });
         return { content: [{ type: "text" as const, text: JSON.stringify(rows, null, 2) }] };
       } catch (err) {
-        return mcpError(err instanceof Error ? err.message : "aggregate_records failed");
+        return mcpErrorFromException(err, { model, method: "read_group" });
       }
     }
   );
@@ -209,14 +209,14 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
           1
         )) as { rows: unknown[]; fieldsMeta: unknown };
         if (!Array.isArray(rows) || rows.length === 0) {
-          return mcpError(`No ${model} record found for id ${record_id}`);
+          return { content: [{ type: "text" as const, text: JSON.stringify([], null, 2) }] };
         }
         const record = rows[0] as Record<string, unknown>;
         const workflowStatus = deriveWorkflowStatus(record);
         const result = workflowStatus != null ? { ...record, _workflow_status: workflowStatus } : record;
         return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
       } catch (err) {
-        return mcpError(err instanceof Error ? err.message : "get_record failed");
+        return mcpErrorFromException(err, { model, method: "search_read" });
       }
     }
   );
@@ -240,7 +240,7 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
         });
         return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
       } catch (err) {
-        return mcpError(err instanceof Error ? err.message : "get_fields failed");
+        return mcpErrorFromException(err, { model, method: "fields_get" });
       }
     }
   );

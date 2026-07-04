@@ -1,4 +1,4 @@
-import type { OdooConnection } from "../odoo";
+import { OdooError, type OdooConnection } from "../odoo";
 import type { OdooQueue } from "../odoo-queue";
 import type { Props } from "../server";
 
@@ -41,6 +41,53 @@ export function requireConnection(props: Props | undefined): OdooConnection {
 
 export function mcpError(text: string) {
   return { content: [{ type: "text" as const, text }], isError: true as const };
+}
+
+export interface ErrorEnvelope {
+  error: string;
+  model: string | null;
+  method: string | null;
+  http_status: number | null;
+  details: string;
+  recoverable: boolean;
+}
+
+export interface ErrorContext {
+  model?: string;
+  method?: string;
+}
+
+function buildErrorEnvelope(err: unknown, context: ErrorContext): ErrorEnvelope {
+  if (err instanceof OdooError) {
+    return {
+      error: err.code,
+      model: err.model,
+      method: err.method,
+      http_status: err.httpStatus,
+      details: err.details,
+      recoverable: err.recoverable
+    };
+  }
+  return {
+    error: "unknown",
+    model: context.model ?? null,
+    method: context.method ?? null,
+    http_status: null,
+    details: err instanceof Error ? err.message : String(err),
+    recoverable: false
+  };
+}
+
+/** Machine-classifiable JSON error envelope for MCP tool results (isError:true). */
+export function mcpErrorFromException(err: unknown, context: ErrorContext = {}) {
+  const envelope = buildErrorEnvelope(err, context);
+  return { content: [{ type: "text" as const, text: JSON.stringify(envelope) }], isError: true as const };
+}
+
+/** Same JSON envelope, but shaped for the MCP resource-read contract (`contents`, no `isError`). */
+export function resourceErrorFromException(uri: URL, err: unknown, context: ErrorContext = {}) {
+  const envelope = buildErrorEnvelope(err, context);
+  return { contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify(envelope) }] };
 }
 
 /** Exported for unit testing (see callOdoo export pattern). */
