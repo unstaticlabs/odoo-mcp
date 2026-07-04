@@ -25,6 +25,7 @@ mock.module("cloudflare:workers", () => {
 
 const {
   callOdoo,
+  OdooError,
   OdooQueue,
   pickSmartFields,
   searchRecords,
@@ -32,6 +33,9 @@ const {
   countRecords,
   normalizeRecord,
   normalizeRecords,
+  parseButtonsFromArch,
+  mergeModelActions,
+  CURATED_MODEL_ACTIONS,
   deriveWorkflowStatus,
   McpAgent,
   default: handler
@@ -242,6 +246,99 @@ describe("callOdoo", () => {
     expect(error).toBeDefined();
     expect(error?.message).toContain("failed (400): Bad Request");
     expect(fetchMock.mock.calls.length).toBe(1);
+  });
+});
+
+describe("OdooError classification", () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const conn = { url: "http://example.com", db: "test-db", apiKey: "secret-classify-key" };
+
+  const statusCases: Array<{ status: number; code: string; recoverable: boolean }> = [
+    { status: 401, code: "unauthorized", recoverable: false },
+    { status: 403, code: "permission_denied", recoverable: false },
+    { status: 404, code: "model_or_method_not_found", recoverable: false },
+    { status: 400, code: "invalid_request", recoverable: false },
+    { status: 500, code: "odoo_server_error", recoverable: false }
+  ];
+
+  for (const { status, code, recoverable } of statusCases) {
+    test(`classifies HTTP ${status} as ${code} (recoverable=${recoverable})`, async () => {
+      globalThis.fetch = mock(() =>
+        Promise.resolve(new Response(JSON.stringify({ error: { message: `boom-${status}` } }), { status }))
+      );
+
+      let error: any;
+      try {
+        await callOdoo(conn, "account.move", "write", { ids: [1] });
+      } catch (err) {
+        error = err;
+      }
+
+      expect(error).toBeInstanceOf(OdooError);
+      expect(error.code).toBe(code);
+      expect(error.httpStatus).toBe(status);
+      expect(error.recoverable).toBe(recoverable);
+      expect(error.model).toBe("account.move");
+      expect(error.method).toBe("write");
+    });
+  }
+
+  test("classifies exhausted 429 retries as rate_limited (recoverable)", async () => {
+    globalThis.fetch = mock(() => Promise.resolve(new Response("Too Many Requests", { status: 429 })));
+
+    let error: any;
+    try {
+      await callOdoo(conn, "account.move", "write", { ids: [1] });
+    } catch (err) {
+      error = err;
+    }
+
+    expect(error).toBeInstanceOf(OdooError);
+    expect(error.code).toBe("rate_limited");
+    expect(error.httpStatus).toBe(429);
+    expect(error.recoverable).toBe(true);
+  });
+
+  test("classifies a timeout as timeout (recoverable)", async () => {
+    globalThis.fetch = mock((_url: any, init: any) => {
+      const signal = init?.signal;
+      return new Promise((_resolve, reject) => {
+        signal?.addEventListener("abort", () => reject(new DOMException("The operation was aborted.", "AbortError")));
+      });
+    });
+
+    let error: any;
+    try {
+      await callOdoo(conn, "account.move", "write", { ids: [1] }, 10);
+    } catch (err) {
+      error = err;
+    }
+
+    expect(error).toBeInstanceOf(OdooError);
+    expect(error.code).toBe("timeout");
+    expect(error.httpStatus).toBeNull();
+    expect(error.recoverable).toBe(true);
+  });
+
+  test("classifies a network error (fetch rejects, non-Abort) as network_error (recoverable)", async () => {
+    globalThis.fetch = mock(() => Promise.reject(new Error("Failed to fetch due to network issues")));
+
+    let error: any;
+    try {
+      await callOdoo(conn, "account.move", "write", { ids: [1] });
+    } catch (err) {
+      error = err;
+    }
+
+    expect(error).toBeInstanceOf(OdooError);
+    expect(error.code).toBe("network_error");
+    expect(error.httpStatus).toBeNull();
+    expect(error.recoverable).toBe(true);
+    expect(error.details).not.toContain("secret-classify-key");
+    expect(error.details).not.toContain("Bearer");
   });
 });
 
@@ -1478,6 +1575,226 @@ describe("call_model_method tool callOdoo call shape", () => {
   });
 });
 
+describe("parseButtonsFromArch", () => {
+  test("extracts type=object buttons with name/string/confirm, excludes type=action buttons, dedupes by name", () => {
+    const arch = `
+      <form>
+        <header>
+          <button name="action_post" type="object" string="Post"/>
+          <button name="button_cancel" type="object" string="Cancel" confirm="Are you sure?"/>
+          <button name="button_cancel" type="object" string="Duplicate Cancel"/>
+          <button name="do_report" type="action" string="Print"/>
+        </header>
+      </form>
+    `;
+
+    const actions = parseButtonsFromArch(arch);
+
+    expect(actions).toEqual([
+      { method: "action_post", label: "Post", source: "view" },
+      { method: "button_cancel", label: "Cancel", confirm: "Are you sure?", source: "view" }
+    ]);
+    expect(actions.some((a: any) => a.method === "do_report")).toBe(false);
+  });
+
+  test("returns an empty array for missing/empty arch", () => {
+    expect(parseButtonsFromArch(undefined)).toEqual([]);
+    expect(parseButtonsFromArch(null)).toEqual([]);
+    expect(parseButtonsFromArch("")).toEqual([]);
+  });
+});
+
+describe("mergeModelActions", () => {
+  test("view entry wins on duplicate method, curated entries retained, no duplicate methods", () => {
+    const curated = CURATED_MODEL_ACTIONS["account.move"];
+    const viewActions = [
+      { method: "action_post", label: "Post Entry (view)", source: "view" as const },
+      { method: "action_new_view_only_method", label: "New", source: "view" as const }
+    ];
+
+    const merged = mergeModelActions(curated, viewActions);
+
+    const byMethod = new Map(merged.map((a: any) => [a.method, a]));
+    expect(byMethod.get("action_post")).toEqual({ method: "action_post", label: "Post Entry (view)", source: "view" });
+    expect(byMethod.get("button_draft")).toEqual({ method: "button_draft", source: "curated" });
+    expect(byMethod.get("button_cancel")).toEqual({ method: "button_cancel", source: "curated" });
+    expect(byMethod.get("action_new_view_only_method")).toEqual({
+      method: "action_new_view_only_method",
+      label: "New",
+      source: "view"
+    });
+
+    const methods = merged.map((a: any) => a.method);
+    expect(new Set(methods).size).toBe(methods.length);
+  });
+});
+
+describe("list_model_actions tool", () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  test("combines curated actions with form-view buttons, view wins on overlap", async () => {
+    const agent = await buildWriteToolAgent();
+    let fetchCalls: { url: string; body: any }[] = [];
+    const arch =
+      '<form><header>' +
+      '<button name="action_post" type="object" string="Post (from view)"/>' +
+      '<button name="do_print" type="action" string="Print"/>' +
+      "</header></form>";
+    const fetchMock = mock(async (url: string, init: any) => {
+      fetchCalls.push({ url, body: JSON.parse(init.body) });
+      return new Response(JSON.stringify({ result: { views: { form: { arch } } } }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+    globalThis.fetch = fetchMock;
+
+    const handler = getToolHandler(agent, "list_model_actions");
+    const result = await handler({ model: "account.move" });
+
+    expect(result.isError).toBeUndefined();
+    expect(fetchCalls.length).toBe(1);
+    expect(fetchCalls[0].url).toContain("/account.move/get_views");
+    expect(fetchCalls[0].body).toEqual({ views: [[false, "form"]] });
+
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.note).toBeUndefined();
+    const byMethod = new Map(payload.actions.map((a: any) => [a.method, a]));
+    expect(byMethod.get("action_post")).toEqual({ method: "action_post", label: "Post (from view)", source: "view" });
+    expect(byMethod.get("button_draft")).toEqual({ method: "button_draft", source: "curated" });
+    expect(byMethod.get("do_print")).toBeUndefined();
+  });
+
+  test("falls back to curated-only actions with a note when get_views fails, without isError", async () => {
+    const agent = await buildWriteToolAgent();
+    const fetchMock = mock(() => Promise.reject(new Error("network unreachable")));
+    globalThis.fetch = fetchMock;
+
+    const handler = getToolHandler(agent, "list_model_actions");
+    const result = await handler({ model: "sale.order" });
+
+    expect(result.isError).toBeUndefined();
+    const payload = JSON.parse(result.content[0].text);
+    expect(typeof payload.note).toBe("string");
+    expect(payload.actions).toEqual([
+      { method: "action_confirm", source: "curated" },
+      { method: "action_cancel", source: "curated" }
+    ]);
+  });
+
+  test("rejects empty-string model without calling fetch", async () => {
+    const agent = await buildWriteToolAgent();
+    const fetchMock = mock(() => Promise.reject(new Error("should not be called")));
+    globalThis.fetch = fetchMock;
+
+    const handler = getToolHandler(agent, "list_model_actions");
+    const result = await handler({ model: "" });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("model must be a non-empty string");
+    expect(fetchMock.mock.calls.length).toBe(0);
+  });
+});
+
+describe("JSON error envelope (tool handlers)", () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  test("update_record surfaces a 403 as a permission_denied JSON envelope with isError:true", async () => {
+    const agent = await buildWriteToolAgent();
+    globalThis.fetch = mock(() =>
+      Promise.resolve(new Response(JSON.stringify({ error: { message: "Access Denied by Odoo" } }), { status: 403 }))
+    );
+
+    const handler = getToolHandler(agent, "update_record");
+    const result = await handler({ model: "account.move", record_id: 1, values: { state: "posted" } });
+
+    expect(result.isError).toBe(true);
+    const envelope = JSON.parse(result.content[0].text);
+    expect(envelope).toEqual({
+      error: "permission_denied",
+      model: "account.move",
+      method: "write",
+      http_status: 403,
+      details: "Access Denied by Odoo",
+      recoverable: false
+    });
+    expect(result.content[0].text).not.toContain("secret-key");
+    expect(result.content[0].text).not.toContain("Bearer");
+  });
+
+  test("a timed-out call classifies as timeout with recoverable:true", async () => {
+    const agent = await buildWriteToolAgent();
+    // Rejects immediately with AbortError, so callOdoo's retry loop exhausts
+    // without waiting on the real (default 15s) abort timer to fire.
+    globalThis.fetch = mock(() => Promise.reject(new DOMException("Aborted", "AbortError")));
+
+    const handler = getToolHandler(agent, "search_records");
+    const result = await handler({ model: "account.move", domain: [], fields: ["id"], limit: 10 });
+
+    expect(result.isError).toBe(true);
+    const envelope = JSON.parse(result.content[0].text);
+    expect(envelope.error).toBe("timeout");
+    expect(envelope.recoverable).toBe(true);
+    expect(result.content[0].text).not.toContain("secret-key");
+    expect(result.content[0].text).not.toContain("Bearer");
+  });
+
+  test("search_records returns a success result of [] (not isError) for zero matching rows", async () => {
+    const agent = await buildWriteToolAgent();
+    globalThis.fetch = mock(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ result: [] }), { status: 200, headers: { "Content-Type": "application/json" } })
+      )
+    );
+
+    const handler = getToolHandler(agent, "search_records");
+    const result = await handler({ model: "account.move", domain: [["id", "=", -1]], fields: ["id"], limit: 10 });
+
+    expect(result.isError).toBeUndefined();
+    expect(JSON.parse(result.content[0].text)).toEqual([]);
+  });
+
+  test("get_record returns a success result of [] (not isError) when the record does not exist", async () => {
+    const agent = await buildWriteToolAgent();
+    globalThis.fetch = mock(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ result: [] }), { status: 200, headers: { "Content-Type": "application/json" } })
+      )
+    );
+
+    const handler = getToolHandler(agent, "get_record");
+    const result = await handler({ model: "account.move", record_id: 999, fields: ["id"] });
+
+    expect(result.isError).toBeUndefined();
+    expect(JSON.parse(result.content[0].text)).toEqual([]);
+  });
+
+  test("a plain (non-OdooError) thrown exception classifies as unknown, not recoverable", async () => {
+    const AgentCtor = McpAgent as any;
+    const agent = new AgentCtor();
+    agent.odooQueue = makeQueue();
+    agent.props = undefined; // requireConnection() throws a plain Error, never reaching callOdoo
+    await agent.init();
+    const fetchMock = mock(() => Promise.reject(new Error("should not be called")));
+    globalThis.fetch = fetchMock;
+
+    const handler = getToolHandler(agent, "update_record");
+    const result = await handler({ model: "account.move", record_id: 1, values: { state: "posted" } });
+
+    expect(result.isError).toBe(true);
+    const envelope = JSON.parse(result.content[0].text);
+    expect(envelope.error).toBe("unknown");
+    expect(envelope.model).toBe("account.move");
+    expect(envelope.method).toBe("write");
+    expect(envelope.recoverable).toBe(false);
+    expect(fetchMock.mock.calls.length).toBe(0);
+  });
+});
+
 describe("search_records limit zod schema", () => {
   const schema = z.object({
     model: z.string(),
@@ -1730,7 +2047,7 @@ describe("resources", () => {
       expect(JSON.parse(result.contents[0].text)).toEqual({ id: 42, name: "Task 42" });
     });
 
-    test("throws a clear error for an empty model without calling fetch", async () => {
+    test("returns a JSON error envelope for an empty model without calling fetch", async () => {
       const agent = await buildAgent();
       const fetchMock = mock(() => Promise.reject(new Error("should not be called")));
       globalThis.fetch = fetchMock;
@@ -1738,18 +2055,15 @@ describe("resources", () => {
       const template = getTemplate(agent, "record");
       const uri = new URL("odoo:///record/42");
 
-      let error: Error | undefined;
-      try {
-        await template.readCallback(uri, { model: "", id: "42" }, {});
-      } catch (err) {
-        error = err as Error;
-      }
+      const result = await template.readCallback(uri, { model: "", id: "42" }, {});
+      const envelope = JSON.parse(result.contents[0].text);
 
-      expect(error?.message).toContain("model must be a non-empty string");
+      expect(envelope.error).toBe("unknown");
+      expect(envelope.details).toContain("model must be a non-empty string");
       expect(fetchMock.mock.calls.length).toBe(0);
     });
 
-    test("throws a clear error for a non-positive/non-numeric id without calling fetch", async () => {
+    test("returns a JSON error envelope for a non-positive/non-numeric id without calling fetch", async () => {
       const agent = await buildAgent();
       const fetchMock = mock(() => Promise.reject(new Error("should not be called")));
       globalThis.fetch = fetchMock;
@@ -1757,18 +2071,18 @@ describe("resources", () => {
       const template = getTemplate(agent, "record");
 
       for (const badId of ["0", "-1", "abc", ""]) {
-        let error: Error | undefined;
-        try {
-          await template.readCallback(new URL(`odoo://project.task/record/${badId || "x"}`), { model: "project.task", id: badId }, {});
-        } catch (err) {
-          error = err as Error;
-        }
-        expect(error?.message).toContain("id must be a positive integer");
+        const result = await template.readCallback(
+          new URL(`odoo://project.task/record/${badId || "x"}`),
+          { model: "project.task", id: badId },
+          {}
+        );
+        const envelope = JSON.parse(result.contents[0].text);
+        expect(envelope.details).toContain("id must be a positive integer");
       }
       expect(fetchMock.mock.calls.length).toBe(0);
     });
 
-    test("throws a clear not-found error when no record matches", async () => {
+    test("returns a JSON error envelope when no record matches", async () => {
       const agent = await buildAgent();
       const fetchMock = mock(async () => {
         return new Response(JSON.stringify({ result: [] }), {
@@ -1780,17 +2094,13 @@ describe("resources", () => {
 
       const template = getTemplate(agent, "record");
 
-      let error: Error | undefined;
-      try {
-        await template.readCallback(new URL("odoo://project.task/record/999"), { model: "project.task", id: "999" }, {});
-      } catch (err) {
-        error = err as Error;
-      }
+      const result = await template.readCallback(new URL("odoo://project.task/record/999"), { model: "project.task", id: "999" }, {});
+      const envelope = JSON.parse(result.contents[0].text);
 
-      expect(error?.message).toContain("No project.task record found for id 999");
+      expect(envelope.details).toContain("No project.task record found for id 999");
     });
 
-    test("does not leak the API key on error", async () => {
+    test("does not leak the API key on error, and classifies 403 as permission_denied", async () => {
       const agent = await buildAgent();
       const fetchMock = mock(() =>
         Promise.resolve(new Response(JSON.stringify({ error: { message: "Access Denied" } }), { status: 403 }))
@@ -1799,16 +2109,20 @@ describe("resources", () => {
 
       const template = getTemplate(agent, "record");
 
-      let error: Error | undefined;
-      try {
-        await template.readCallback(new URL("odoo://project.task/record/1"), { model: "project.task", id: "1" }, {});
-      } catch (err) {
-        error = err as Error;
-      }
+      const result = await template.readCallback(new URL("odoo://project.task/record/1"), { model: "project.task", id: "1" }, {});
+      const text = result.contents[0].text;
+      const envelope = JSON.parse(text);
 
-      expect(error).toBeDefined();
-      expect(error?.message).not.toContain("secret-resource-key");
-      expect(error?.message).not.toContain("Bearer");
+      expect(envelope).toEqual({
+        error: "permission_denied",
+        model: "project.task",
+        method: "search_read",
+        http_status: 403,
+        details: "Access Denied",
+        recoverable: false
+      });
+      expect(text).not.toContain("secret-resource-key");
+      expect(text).not.toContain("Bearer");
     });
   });
 
@@ -1871,25 +2185,22 @@ describe("resources", () => {
       expect(searchReadCall?.body.limit).toBe(10);
     });
 
-    test("throws a clear error for an empty model without calling fetch", async () => {
+    test("returns a JSON error envelope for an empty model without calling fetch", async () => {
       const agent = await buildAgent();
       const fetchMock = mock(() => Promise.reject(new Error("should not be called")));
       globalThis.fetch = fetchMock;
 
       const template = getTemplate(agent, "search");
 
-      let error: Error | undefined;
-      try {
-        await template.readCallback(new URL("odoo:///search"), { model: "" }, {});
-      } catch (err) {
-        error = err as Error;
-      }
+      const result = await template.readCallback(new URL("odoo:///search"), { model: "" }, {});
+      const envelope = JSON.parse(result.contents[0].text);
 
-      expect(error?.message).toContain("model must be a non-empty string");
+      expect(envelope.error).toBe("unknown");
+      expect(envelope.details).toContain("model must be a non-empty string");
       expect(fetchMock.mock.calls.length).toBe(0);
     });
 
-    test("throws a clear error for a malformed domain query param", async () => {
+    test("returns a JSON error envelope for a malformed domain query param", async () => {
       const agent = await buildAgent();
       const fetchMock = mock(() => Promise.reject(new Error("should not be called")));
       globalThis.fetch = fetchMock;
@@ -1898,14 +2209,10 @@ describe("resources", () => {
       const uri = new URL("odoo://project.task/search");
       uri.searchParams.set("domain", "not-json");
 
-      let error: Error | undefined;
-      try {
-        await template.readCallback(uri, { model: "project.task" }, {});
-      } catch (err) {
-        error = err as Error;
-      }
+      const result = await template.readCallback(uri, { model: "project.task" }, {});
+      const envelope = JSON.parse(result.contents[0].text);
 
-      expect(error?.message).toContain("domain query param must be valid JSON array");
+      expect(envelope.details).toContain("domain query param must be valid JSON array");
       expect(fetchMock.mock.calls.length).toBe(0);
     });
   });
@@ -1953,21 +2260,18 @@ describe("resources", () => {
       expect(fetchCalls[0].body).toEqual({ domain: [] });
     });
 
-    test("throws a clear error for an empty model without calling fetch", async () => {
+    test("returns a JSON error envelope for an empty model without calling fetch", async () => {
       const agent = await buildAgent();
       const fetchMock = mock(() => Promise.reject(new Error("should not be called")));
       globalThis.fetch = fetchMock;
 
       const template = getTemplate(agent, "count");
 
-      let error: Error | undefined;
-      try {
-        await template.readCallback(new URL("odoo:///count"), { model: "" }, {});
-      } catch (err) {
-        error = err as Error;
-      }
+      const result = await template.readCallback(new URL("odoo:///count"), { model: "" }, {});
+      const envelope = JSON.parse(result.contents[0].text);
 
-      expect(error?.message).toContain("model must be a non-empty string");
+      expect(envelope.error).toBe("unknown");
+      expect(envelope.details).toContain("model must be a non-empty string");
       expect(fetchMock.mock.calls.length).toBe(0);
     });
   });
@@ -1998,21 +2302,18 @@ describe("resources", () => {
       expect(JSON.parse(result.contents[0].text)).toEqual({ name: { type: "char", string: "Name" } });
     });
 
-    test("throws a clear error for an empty model without calling fetch", async () => {
+    test("returns a JSON error envelope for an empty model without calling fetch", async () => {
       const agent = await buildAgent();
       const fetchMock = mock(() => Promise.reject(new Error("should not be called")));
       globalThis.fetch = fetchMock;
 
       const template = getTemplate(agent, "fields");
 
-      let error: Error | undefined;
-      try {
-        await template.readCallback(new URL("odoo:///fields"), { model: "" }, {});
-      } catch (err) {
-        error = err as Error;
-      }
+      const result = await template.readCallback(new URL("odoo:///fields"), { model: "" }, {});
+      const envelope = JSON.parse(result.contents[0].text);
 
-      expect(error?.message).toContain("model must be a non-empty string");
+      expect(envelope.error).toBe("unknown");
+      expect(envelope.details).toContain("model must be a non-empty string");
       expect(fetchMock.mock.calls.length).toBe(0);
     });
   });

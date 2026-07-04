@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { OdooQueue } from "../odoo-queue";
 import type { Props } from "../server";
-import { escapeHtml, mcpError, requireConnection } from "./shared";
+import { escapeHtml, mcpError, mcpErrorFromException, requireConnection } from "./shared";
 
 export function registerWriteTools(server: McpServer, getProps: () => Props | undefined, queue: OdooQueue) {
   server.registerTool(
@@ -23,7 +23,7 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
         })) as number[];
         return { content: [{ type: "text" as const, text: JSON.stringify(ids[0], null, 2) }] };
       } catch (err) {
-        return mcpError(err instanceof Error ? err.message : "create_record failed");
+        return mcpErrorFromException(err, { model, method: "create" });
       }
     }
   );
@@ -54,7 +54,7 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
         });
         return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
       } catch (err) {
-        return mcpError(err instanceof Error ? err.message : "post_message failed");
+        return mcpErrorFromException(err, { model, method: "message_post" });
       }
     }
   );
@@ -80,7 +80,7 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
         });
         return { content: [{ type: "text" as const, text: JSON.stringify(true, null, 2) }] };
       } catch (err) {
-        return mcpError(err instanceof Error ? err.message : "update_record failed");
+        return mcpErrorFromException(err, { model, method: "write" });
       }
     }
   );
@@ -101,7 +101,7 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
         await queue.enqueue(requireConnection(getProps()), model, "unlink", { ids: [record_id] });
         return { content: [{ type: "text" as const, text: JSON.stringify(true, null, 2) }] };
       } catch (err) {
-        return mcpError(err instanceof Error ? err.message : "delete_record failed");
+        return mcpErrorFromException(err, { model, method: "unlink" });
       }
     }
   );
@@ -135,7 +135,7 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
         const result = await queue.enqueue(requireConnection(getProps()), model, method, body);
         return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
       } catch (err) {
-        return mcpError(err instanceof Error ? err.message : "call_model_method failed");
+        return mcpErrorFromException(err, { model, method });
       }
     }
   );
