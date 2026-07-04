@@ -3,8 +3,19 @@ import { z } from "zod";
 import type { OdooQueue } from "../odoo-queue";
 import type { Props } from "../server";
 import { CURATED_MODEL_ACTIONS, type CuratedAction } from "./actions-map";
-import { CORE_MODEL_ALLOWLIST, DEFAULT_TASK_FIELDS, countRecords, mcpError, mcpErrorFromException, requireConnection, searchRecords } from "./shared";
-import { deriveWorkflowStatus } from "../normalizer";
+import {
+  CORE_MODEL_ALLOWLIST,
+  DEFAULT_TASK_FIELDS,
+  countRecords,
+  mcpError,
+  mcpErrorFromException,
+  pickSmartFields,
+  requireConnection,
+  searchRecords
+} from "./shared";
+import { deriveWorkflowStatus, normalizeRecords } from "../normalizer";
+import { type CachedFieldMeta, type TtlCache, getFieldsCached } from "../cache";
+import { OdooError } from "../odoo";
 
 export interface ModelAction {
   method: string;
@@ -61,7 +72,7 @@ export function mergeModelActions(curated: CuratedAction[], viewActions: ModelAc
   return Array.from(merged.values());
 }
 
-export function registerReadTools(server: McpServer, getProps: () => Props | undefined, queue: OdooQueue) {
+export function registerReadTools(server: McpServer, getProps: () => Props | undefined, queue: OdooQueue, cache: TtlCache) {
   server.registerTool(
     "projects.list_tasks",
     {
@@ -230,6 +241,150 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
       } catch (err) {
         return mcpErrorFromException(err, { model, method: "search_read" });
       }
+    }
+  );
+
+  server.registerTool(
+    "expand_record",
+    {
+      title: "Expand Record",
+      description:
+        "Read-only: fetch a record plus its related context (x2many relations, chatter, attachments) in one call, " +
+        "replacing the get_record → search_records → ... relation-chasing chain. Each hop through OdooQueue costs " +
+        "≥1s, so this tool caps itself at 8 Odoo calls per invocation; once the cap is hit, remaining sections " +
+        'degrade to {"error": "call budget exceeded (max 8 Odoo calls per invocation)"} instead of failing the ' +
+        "whole call.",
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      inputSchema: {
+        model: z.string(),
+        record_id: z.number(),
+        relations: z.array(z.string()).default([]),
+        include_chatter: z.boolean().default(true),
+        include_attachments: z.boolean().default(true),
+        relation_limit: z.number().int().min(1).max(50).default(10)
+      }
+    },
+    async ({ model, record_id, relations, include_chatter, include_attachments, relation_limit }) => {
+      if (!model || !model.trim()) return mcpError("model must be a non-empty string");
+      if (!Number.isInteger(record_id) || record_id <= 0) return mcpError("record_id must be a positive integer");
+
+      const conn = requireConnection(getProps());
+      const MAX_ODOO_CALLS = 8;
+      const startSnapshot = queue.snapshot();
+      const callsUsed = () => queue.delta(startSnapshot).odoo_calls;
+      const budgetError = () => ({ error: `call budget exceeded (max ${MAX_ODOO_CALLS} Odoo calls per invocation)` });
+
+      let fieldsMeta: Record<string, CachedFieldMeta>;
+      let rawRecord: Record<string, unknown>;
+      try {
+        fieldsMeta = await getFieldsCached(cache, queue, conn, model);
+        const smartFields = pickSmartFields(fieldsMeta);
+        const rows = (await queue.enqueue(conn, model, "search_read", {
+          domain: [["id", "=", record_id]],
+          fields: smartFields,
+          limit: 1
+        })) as Record<string, unknown>[];
+        if (!Array.isArray(rows) || rows.length === 0) {
+          return { content: [{ type: "text" as const, text: JSON.stringify({ record: null }, null, 2) }] };
+        }
+        rawRecord = rows[0];
+      } catch (err) {
+        return mcpErrorFromException(err, { model, method: "search_read" });
+      }
+
+      const record = normalizeRecords([rawRecord], fieldsMeta)[0];
+
+      const relationResults: Record<string, unknown> = {};
+      for (const field of relations) {
+        if (callsUsed() >= MAX_ODOO_CALLS) {
+          relationResults[field] = budgetError();
+          continue;
+        }
+        const meta = fieldsMeta[field];
+        if (!meta || (meta.type !== "one2many" && meta.type !== "many2many") || !meta.relation) {
+          relationResults[field] = { error: `field '${field}' is not a relational (x2many) field on ${model}` };
+          continue;
+        }
+        const rawIds = rawRecord[field];
+        if (!Array.isArray(rawIds) || rawIds.length === 0) {
+          relationResults[field] = [];
+          continue;
+        }
+        const ids = (rawIds as number[]).slice(0, relation_limit);
+        const comodel = meta.relation;
+        try {
+          const rows = (await queue.enqueue(conn, comodel, "search_read", {
+            domain: [["id", "in", ids]],
+            fields: ["id", "display_name", "state"]
+          })) as Record<string, unknown>[];
+          relationResults[field] = normalizeRecords(rows);
+        } catch (err) {
+          if (err instanceof OdooError && callsUsed() < MAX_ODOO_CALLS) {
+            try {
+              const rows = (await queue.enqueue(conn, comodel, "search_read", {
+                domain: [["id", "in", ids]],
+                fields: ["id", "display_name"]
+              })) as Record<string, unknown>[];
+              relationResults[field] = normalizeRecords(rows);
+            } catch (err2) {
+              relationResults[field] = { error: err2 instanceof Error ? err2.message : String(err2) };
+            }
+          } else {
+            relationResults[field] = { error: err instanceof Error ? err.message : String(err) };
+          }
+        }
+      }
+
+      let chatter: unknown;
+      if (include_chatter) {
+        if (callsUsed() >= MAX_ODOO_CALLS) {
+          chatter = budgetError();
+        } else {
+          try {
+            const rows = (await queue.enqueue(conn, "mail.message", "search_read", {
+              domain: [
+                ["model", "=", model],
+                ["res_id", record_id]
+              ],
+              fields: ["date", "author_id", "body", "message_type"],
+              limit: 20,
+              order: "date desc"
+            })) as Record<string, unknown>[];
+            chatter = normalizeRecords(rows);
+          } catch (err) {
+            chatter = { error: err instanceof Error ? err.message : String(err) };
+          }
+        }
+      }
+
+      let attachments: unknown;
+      if (include_attachments) {
+        if (callsUsed() >= MAX_ODOO_CALLS) {
+          attachments = budgetError();
+        } else {
+          try {
+            const rows = (await queue.enqueue(conn, "ir.attachment", "search_read", {
+              domain: [
+                ["res_model", "=", model],
+                ["res_id", record_id]
+              ],
+              fields: ["name", "mimetype", "file_size", "create_date"]
+            })) as Record<string, unknown>[];
+            attachments = normalizeRecords(rows);
+          } catch (err) {
+            attachments = { error: err instanceof Error ? err.message : String(err) };
+          }
+        }
+      }
+
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({ record, relations: relationResults, chatter, attachments }, null, 2)
+          }
+        ]
+      };
     }
   );
 

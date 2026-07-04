@@ -31,7 +31,7 @@ export class McpAgent extends McpAgentBase<Env, unknown, Props> {
 
   async init() {
     const getProps = () => this.props;
-    registerReadTools(this.server, getProps, this.odooQueue);
+    registerReadTools(this.server, getProps, this.odooQueue, this.cache);
     registerResourceTemplates(this.server, getProps, this.odooQueue);
     registerWriteTools(this.server, getProps, this.odooQueue);
   }
