@@ -245,6 +245,39 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
   );
 
   server.registerTool(
+    "batch_read",
+    {
+      title: "Batch Read Records",
+      description:
+        "Read-only: fetch multiple Odoo records of one model by id in a single call. " +
+        "`fields` omitted/null → smart default fields; a string array → exactly those fields. " +
+        "At most 100 ids are read (extra ids are ignored); return order follows Odoo search_read, not input order.",
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      inputSchema: {
+        model: z.string(),
+        ids: z.array(z.number().int().positive()).min(1),
+        fields: z.array(z.string()).nullable().default(null)
+      }
+    },
+    async ({ model, ids, fields }) => {
+      if (!model || !model.trim()) return mcpError("model must be a non-empty string");
+      try {
+        const { rows } = await searchRecords(
+          queue,
+          requireConnection(getProps()),
+          model,
+          [["id", "in", ids]],
+          fields,
+          Math.min(ids.length, 100)
+        );
+        return { content: [{ type: "text" as const, text: JSON.stringify(rows, null, 2) }] };
+      } catch (err) {
+        return mcpErrorFromException(err, { model, method: "search_read" });
+      }
+    }
+  );
+
+  server.registerTool(
     "expand_record",
     {
       title: "Expand Record",
@@ -344,7 +377,7 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
             const rows = (await queue.enqueue(conn, "mail.message", "search_read", {
               domain: [
                 ["model", "=", model],
-                ["res_id", record_id]
+                ["res_id", "=", record_id]
               ],
               fields: ["date", "author_id", "body", "message_type"],
               limit: 20,

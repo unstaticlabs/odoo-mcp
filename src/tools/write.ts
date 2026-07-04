@@ -86,6 +86,87 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
   );
 
   server.registerTool(
+    "batch_update",
+    {
+      title: "Batch Update Records",
+      description:
+        "Write: update multiple Odoo records of one model in one call. Each `updates` entry targets one " +
+        "record_id with its own `values`. x2many fields need Odoo command tuples (e.g. [[6,0,ids]], [[4,id]], [[3,id]]). " +
+        "Fail-fast: a mid-loop error aborts remaining updates; already-applied writes are NOT rolled back.",
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+      inputSchema: {
+        model: z.string().min(1),
+        updates: z
+          .array(
+            z.object({
+              record_id: z.number().int().positive(),
+              values: z.record(z.string(), z.any())
+            })
+          )
+          .min(1)
+      }
+    },
+    async ({ model, updates }) => {
+      if (!model || !model.trim()) return mcpError("model must be a non-empty string");
+      try {
+        const conn = requireConnection(getProps());
+        const results: { record_id: number; ok: boolean }[] = [];
+        for (const u of updates) {
+          await queue.enqueue(conn, model, "write", { ids: [u.record_id], vals: u.values });
+          results.push({ record_id: u.record_id, ok: true });
+        }
+        return { content: [{ type: "text" as const, text: JSON.stringify(results, null, 2) }] };
+      } catch (err) {
+        return mcpErrorFromException(err, { model, method: "write" });
+      }
+    }
+  );
+
+  server.registerTool(
+    "batch_post_message",
+    {
+      title: "Batch Post Chatter Messages",
+      description:
+        "Write: post a chatter message to multiple Odoo records of one model. message_post is per-record. " +
+        "Each `messages` entry posts to one record_id. Bodies are HTML-escaped unless body_is_html is true. " +
+        "Fail-fast: a mid-loop error aborts remaining posts; already-posted messages are NOT rolled back.",
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+      inputSchema: {
+        model: z.string(),
+        messages: z
+          .array(
+            z.object({
+              record_id: z.number().int().positive(),
+              body: z.string(),
+              subtype: z.string().optional(),
+              body_is_html: z.boolean().default(false)
+            })
+          )
+          .min(1)
+      }
+    },
+    async ({ model, messages }) => {
+      if (!model || !model.trim()) return mcpError("model must be a non-empty string");
+      try {
+        const conn = requireConnection(getProps());
+        const results: unknown[] = [];
+        for (const m of messages) {
+          const res = await queue.enqueue(conn, model, "message_post", {
+            ids: [m.record_id],
+            body: m.body_is_html ? m.body : escapeHtml(m.body),
+            message_type: "comment",
+            ...(m.subtype ? { subtype_xmlid: m.subtype } : {})
+          });
+          results.push({ record_id: m.record_id, result: res });
+        }
+        return { content: [{ type: "text" as const, text: JSON.stringify(results, null, 2) }] };
+      } catch (err) {
+        return mcpErrorFromException(err, { model, method: "message_post" });
+      }
+    }
+  );
+
+  server.registerTool(
     "delete_record",
     {
       title: "Delete Record",

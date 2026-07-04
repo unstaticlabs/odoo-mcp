@@ -2992,3 +2992,286 @@ describe("call_model_method JSON-2 body contract", () => {
     expect(fetchMock.mock.calls.length).toBe(0);
   });
 });
+
+describe("batch_read tool", () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  test("issues a single search_read with an `id in` domain and returns the rows as JSON", async () => {
+    const agent = await buildWriteToolAgent();
+    const fetchCalls: { url: string; body: any }[] = [];
+    const rows = [
+      { id: 1, name: "Alpha" },
+      { id: 2, name: "Beta" }
+    ];
+    globalThis.fetch = mock(async (url: string, init: any) => {
+      fetchCalls.push({ url, body: JSON.parse(init.body) });
+      return new Response(JSON.stringify({ result: rows }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+
+    const handler = getToolHandler(agent, "batch_read");
+    // Explicit fields => searchRecords skips fields_get, so exactly one search_read call.
+    const result = await handler({ model: "res.partner", ids: [1, 2], fields: ["id", "name"] });
+
+    expect(fetchCalls.length).toBe(1);
+    expect(fetchCalls[0].url).toContain("/res.partner/search_read");
+    expect(fetchCalls[0].body.domain).toEqual([["id", "in", [1, 2]]]);
+    expect(fetchCalls[0].body.fields).toEqual(["id", "name"]);
+    expect(fetchCalls[0].body.limit).toBe(2);
+    expect(result.isError).toBeUndefined();
+    expect(JSON.parse(result.content[0].text)).toEqual(rows);
+  });
+
+  test("caps the search_read limit at 100 even for more than 100 ids", async () => {
+    const agent = await buildWriteToolAgent();
+    const fetchCalls: { url: string; body: any }[] = [];
+    globalThis.fetch = mock(async (url: string, init: any) => {
+      fetchCalls.push({ url, body: JSON.parse(init.body) });
+      return new Response(JSON.stringify({ result: [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+
+    const ids = Array.from({ length: 150 }, (_, i) => i + 1);
+    const handler = getToolHandler(agent, "batch_read");
+    await handler({ model: "res.partner", ids, fields: ["id"] });
+
+    expect(fetchCalls.length).toBe(1);
+    expect(fetchCalls[0].body.limit).toBe(100);
+  });
+
+  test("rejects empty-string model without calling fetch", async () => {
+    const agent = await buildWriteToolAgent();
+    const fetchMock = mock(() => Promise.reject(new Error("should not be called")));
+    globalThis.fetch = fetchMock;
+
+    const handler = getToolHandler(agent, "batch_read");
+    const result = await handler({ model: "  ", ids: [1], fields: ["id"] });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("model must be a non-empty string");
+    expect(fetchMock.mock.calls.length).toBe(0);
+  });
+
+  test("surfaces isError with the error detail when the queue call fails", async () => {
+    const agent = await buildWriteToolAgent();
+    globalThis.fetch = mock(() =>
+      Promise.resolve(new Response(JSON.stringify({ error: { message: "Boom-read" } }), { status: 400 }))
+    );
+
+    const handler = getToolHandler(agent, "batch_read");
+    const result = await handler({ model: "res.partner", ids: [1], fields: ["id"] });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("Boom-read");
+    expect(result.content[0].text).toContain("invalid_request");
+  });
+});
+
+describe("batch_update tool", () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  test("issues one write per entry with { ids:[id], vals } and returns per-record ok results", async () => {
+    const agent = await buildWriteToolAgent();
+    const fetchCalls: { url: string; body: any }[] = [];
+    globalThis.fetch = mock(async (url: string, init: any) => {
+      fetchCalls.push({ url, body: JSON.parse(init.body) });
+      return new Response(JSON.stringify({ result: true }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+
+    const handler = getToolHandler(agent, "batch_update");
+    const result = await handler({
+      model: "project.task",
+      updates: [
+        { record_id: 1, values: { name: "One" } },
+        { record_id: 2, values: { name: "Two" } }
+      ]
+    });
+
+    expect(fetchCalls.length).toBe(2);
+    expect(fetchCalls[0].url).toContain("/project.task/write");
+    expect(fetchCalls[0].body).toEqual({ ids: [1], vals: { name: "One" } });
+    expect(fetchCalls[1].body).toEqual({ ids: [2], vals: { name: "Two" } });
+    expect(result.isError).toBeUndefined();
+    expect(JSON.parse(result.content[0].text)).toEqual([
+      { record_id: 1, ok: true },
+      { record_id: 2, ok: true }
+    ]);
+  });
+
+  test("rejects empty-string model without calling fetch", async () => {
+    const agent = await buildWriteToolAgent();
+    const fetchMock = mock(() => Promise.reject(new Error("should not be called")));
+    globalThis.fetch = fetchMock;
+
+    const handler = getToolHandler(agent, "batch_update");
+    const result = await handler({ model: "   ", updates: [{ record_id: 1, values: { name: "x" } }] });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("model must be a non-empty string");
+    expect(fetchMock.mock.calls.length).toBe(0);
+  });
+
+  test("fail-fast: a mid-loop error aborts remaining writes and returns isError", async () => {
+    const agent = await buildWriteToolAgent();
+    let callCount = 0;
+    const fetchMock = mock(() => {
+      callCount++;
+      if (callCount === 1) {
+        return Promise.resolve(
+          new Response(JSON.stringify({ result: true }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" }
+          })
+        );
+      }
+      return Promise.resolve(new Response(JSON.stringify({ error: { message: "Boom-write" } }), { status: 400 }));
+    });
+    globalThis.fetch = fetchMock;
+
+    const handler = getToolHandler(agent, "batch_update");
+    const result = await handler({
+      model: "project.task",
+      updates: [
+        { record_id: 1, values: { name: "One" } },
+        { record_id: 2, values: { name: "Two" } },
+        { record_id: 3, values: { name: "Three" } }
+      ]
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("Boom-write");
+    // Aborts after the failing second write — the third is never attempted.
+    expect(fetchMock.mock.calls.length).toBe(2);
+  });
+});
+
+describe("batch_post_message tool", () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  test("HTML-escapes bodies by default and posts message_type comment per record", async () => {
+    const agent = await buildWriteToolAgent();
+    const fetchCalls: { url: string; body: any }[] = [];
+    globalThis.fetch = mock(async (url: string, init: any) => {
+      fetchCalls.push({ url, body: JSON.parse(init.body) });
+      return new Response(JSON.stringify({ result: 99 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+
+    const handler = getToolHandler(agent, "batch_post_message");
+    const result = await handler({
+      model: "project.task",
+      messages: [{ record_id: 1, body: "<b>hi</b>", body_is_html: false }]
+    });
+
+    expect(fetchCalls.length).toBe(1);
+    expect(fetchCalls[0].url).toContain("/project.task/message_post");
+    expect(fetchCalls[0].body).toEqual({
+      ids: [1],
+      body: "&lt;b&gt;hi&lt;/b&gt;",
+      message_type: "comment"
+    });
+    expect(fetchCalls[0].body.subtype_xmlid).toBeUndefined();
+    expect(result.isError).toBeUndefined();
+    expect(JSON.parse(result.content[0].text)).toEqual([{ record_id: 1, result: 99 }]);
+  });
+
+  test("body_is_html true passes the body verbatim and subtype maps to subtype_xmlid", async () => {
+    const agent = await buildWriteToolAgent();
+    const fetchCalls: { url: string; body: any }[] = [];
+    globalThis.fetch = mock(async (url: string, init: any) => {
+      fetchCalls.push({ url, body: JSON.parse(init.body) });
+      return new Response(JSON.stringify({ result: 1 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+
+    const handler = getToolHandler(agent, "batch_post_message");
+    await handler({
+      model: "project.task",
+      messages: [
+        { record_id: 7, body: "<p>already <b>HTML</b></p>", body_is_html: true, subtype: "mail.mt_note" }
+      ]
+    });
+
+    expect(fetchCalls[0].body).toEqual({
+      ids: [7],
+      body: "<p>already <b>HTML</b></p>",
+      message_type: "comment",
+      subtype_xmlid: "mail.mt_note"
+    });
+  });
+
+  test("posts to each record in order (per-record looping)", async () => {
+    const agent = await buildWriteToolAgent();
+    const fetchCalls: { url: string; body: any }[] = [];
+    globalThis.fetch = mock(async (url: string, init: any) => {
+      fetchCalls.push({ url, body: JSON.parse(init.body) });
+      return new Response(JSON.stringify({ result: fetchCalls.length }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+
+    const handler = getToolHandler(agent, "batch_post_message");
+    const result = await handler({
+      model: "project.task",
+      messages: [
+        { record_id: 1, body: "one", body_is_html: false },
+        { record_id: 2, body: "two", body_is_html: false }
+      ]
+    });
+
+    expect(fetchCalls.length).toBe(2);
+    expect(fetchCalls[0].body.ids).toEqual([1]);
+    expect(fetchCalls[1].body.ids).toEqual([2]);
+    expect(JSON.parse(result.content[0].text)).toEqual([
+      { record_id: 1, result: 1 },
+      { record_id: 2, result: 2 }
+    ]);
+  });
+
+  test("rejects empty-string model without calling fetch", async () => {
+    const agent = await buildWriteToolAgent();
+    const fetchMock = mock(() => Promise.reject(new Error("should not be called")));
+    globalThis.fetch = fetchMock;
+
+    const handler = getToolHandler(agent, "batch_post_message");
+    const result = await handler({ model: "", messages: [{ record_id: 1, body: "hi", body_is_html: false }] });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("model must be a non-empty string");
+    expect(fetchMock.mock.calls.length).toBe(0);
+  });
+
+  test("surfaces isError with the error detail when a post fails", async () => {
+    const agent = await buildWriteToolAgent();
+    globalThis.fetch = mock(() =>
+      Promise.resolve(new Response(JSON.stringify({ error: { message: "Boom-post" } }), { status: 400 }))
+    );
+
+    const handler = getToolHandler(agent, "batch_post_message");
+    const result = await handler({
+      model: "project.task",
+      messages: [{ record_id: 1, body: "hi", body_is_html: false }]
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("Boom-post");
+  });
+});
