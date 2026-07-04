@@ -43,6 +43,8 @@ const MOVE_LINE_REVIEW_FIELD_CANDIDATES = [
   "journal_id",
   "reconciled"
 ];
+const ACCOUNT_ACCOUNT_TAG_FIELD_CANDIDATES = ["id", "name"];
+const MOVE_LINE_TAX_TAG_FK_CANDIDATES = ["tax_tag_ids"];
 
 /** Exported for unit testing. Intersects candidate field names with a model's fields_get result. */
 export function pickExistingFields(candidates: string[], fieldsMeta: Record<string, unknown>): string[] {
@@ -54,6 +56,67 @@ export function isInPeriod(date: unknown, dateFrom: string, dateTo: string): boo
   if (typeof date !== "string" || !date) return false;
   const day = date.slice(0, 10);
   return day >= dateFrom && day <= dateTo;
+}
+
+const MS_PER_DAY = 86_400_000;
+
+function isoToMs(iso: string): number {
+  return Date.parse(`${iso.slice(0, 10)}T00:00:00Z`);
+}
+
+function msToIso(ms: number): string {
+  const d = new Date(ms);
+  const year = d.getUTCFullYear();
+  const month = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(d.getUTCDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+/**
+ * Exported for unit testing. The return period immediately preceding [dateFrom, dateTo]: it ends the day
+ * before dateFrom and spans the same length. For a 12-month CA12 requested 2025-10-01..2026-09-30 this yields
+ * 2024-10-01..2025-09-30. Pure ISO-string arithmetic — no Node/date libs (Cloudflare Workers only).
+ */
+export function previousPeriod(dateFrom: string, dateTo: string): { from: string; to: string } {
+  const fromMs = isoToMs(dateFrom);
+  const toMs = isoToMs(dateTo);
+  const span = toMs - fromMs;
+  const prevToMs = fromMs - MS_PER_DAY;
+  const prevFromMs = prevToMs - span;
+  return { from: msToIso(prevFromMs), to: msToIso(prevToMs) };
+}
+
+/**
+ * Exported for unit testing. Effective date window an external value must fall in for a given `date_scope`.
+ * `previous_return_period` shifts to the prior period; every other scope (`from_beginning`, `l10n_period`, …)
+ * uses the requested window as-is. Facts only: this resolves scope-to-window, it does not interpret tax rules.
+ */
+export function effectiveDateWindow(dateScope: unknown, dateFrom: string, dateTo: string): { from: string; to: string } {
+  if (dateScope === "previous_return_period") return previousPeriod(dateFrom, dateTo);
+  return { from: dateFrom, to: dateTo };
+}
+
+/** Extracts distinct positive integer tokens (e.g. tax-tag ids) from a formula/subformula string. */
+function extractIds(text: unknown): number[] {
+  if (typeof text !== "string") return [];
+  const matches = text.match(/\d+/g);
+  return matches ? [...new Set(matches.map((m) => Number(m)))] : [];
+}
+
+/** Extracts distinct referenced line codes from an aggregation formula (tokens shaped `code.expr_label`). */
+function extractLineCodes(formula: unknown): string[] {
+  if (typeof formula !== "string") return [];
+  const codes = new Set<string>();
+  const re = /([A-Za-z_][A-Za-z0-9_]*)\.[A-Za-z_][A-Za-z0-9_]*/g;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(formula)) !== null) codes.add(match[1]);
+  return [...codes];
+}
+
+/** Odoo returns absent scalar/relational values as `false`; collapse those to null for a clean scalar. */
+function scalarStr(value: unknown): string | null {
+  if (value === false || value == null) return null;
+  return String(value);
 }
 
 /** Exported for unit testing. Groups normalized account.move.line rows by their (already-normalized) account_id.id. */
@@ -685,6 +748,293 @@ export function registerBookkeepingTools(server: McpServer, getProps: () => Prop
   );
 }
 
+// ---- Explain report line (card ODOO1076) ----
+
+interface ExpressionEntry {
+  id: number;
+  label: string | null;
+  engine: string | null;
+  formula: string | null;
+  subformula: string | null;
+  date_scope: string | null;
+  included_external_values?: Record<string, unknown>[];
+  excluded_external_values?: Record<string, unknown>[];
+  tax_tags?: string[];
+  tax_tag_balance?: number;
+}
+
+/** Odoo returns a many2one as `[id, name]`, a bare id, or `false`; pull the id out of any of those shapes. */
+function relationId(value: unknown): number | undefined {
+  if (Array.isArray(value)) return value[0] as number;
+  if (typeof value === "number") return value;
+  return undefined;
+}
+
+export function registerReportLineTools(server: McpServer, getProps: () => Props | undefined, queue: OdooQueue, cache: TtlCache) {
+  server.registerTool(
+    "bookkeeping.explain_report_line",
+    {
+      title: "Explain Tax Report Line",
+      description:
+        "Read-only: explain WHY a tax-report line shows its value, from FACTS ONLY — never guessing or inferring tax " +
+        "treatment. Resolves the report line, dumps its account.report.expression records, and per engine " +
+        "(external / tax_tags / aggregation) fetches the supporting Odoo data, then assembles a fact-only `diagnosis`. " +
+        "Surfaces the classic French CA12 box_22 carryover trap: an external value exists but is dated outside the " +
+        "effective `date_scope` window (e.g. date_scope=previous_return_period), so the line reads 0 even though the " +
+        "value is present — just out of scope. Optional/older-Odoo field gaps degrade into `warnings[]`, never abort.",
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      inputSchema: {
+        company: z.string(),
+        report_name: z.string(),
+        line_code: z.string(),
+        date_from: z.string(),
+        date_to: z.string()
+      }
+    },
+    async ({ company, report_name, line_code, date_from, date_to }) => {
+      const warnings: string[] = [];
+      let lastModel = "res.company";
+      const lastMethod = "search_read";
+
+      try {
+        const conn = requireConnection(getProps());
+
+        // --- company (hard requirement: needed for company-scoped move-line/external-value filters) ---
+        lastModel = "res.company";
+        const companyRows = (await queue.enqueue(conn, "res.company", "search_read", {
+          domain: [["name", "=", company]],
+          fields: ["id", "name"],
+          limit: 1
+        })) as Record<string, unknown>[];
+        if (!companyRows || companyRows.length === 0) return mcpError(`Company not found: ${company}`);
+        const companyId = companyRows[0].id as number;
+
+        // --- report ---
+        lastModel = "account.report";
+        const reportFieldsMeta = await getFieldsCached(cache, queue, conn, "account.report");
+        const reportFields = pickExistingFields(ACCOUNT_REPORT_FIELD_CANDIDATES, reportFieldsMeta);
+        const reportRows = (await queue.enqueue(conn, "account.report", "search_read", {
+          domain: [["name", "=", report_name]],
+          fields: reportFields,
+          limit: 1
+        })) as Record<string, unknown>[];
+        if (!reportRows || reportRows.length === 0) return mcpError(`Report not found: ${report_name}`);
+        const reportId = reportRows[0].id as number;
+
+        // --- line (on miss, surface the available codes for this report) ---
+        lastModel = "account.report.line";
+        const lineFieldsMeta = await getFieldsCached(cache, queue, conn, "account.report.line");
+        const lineFields = pickExistingFields(ACCOUNT_REPORT_LINE_FIELD_CANDIDATES, lineFieldsMeta);
+        const lineRows = (await queue.enqueue(conn, "account.report.line", "search_read", {
+          domain: [
+            ["report_id", "=", reportId],
+            ["code", "=", line_code]
+          ],
+          fields: lineFields,
+          limit: 1
+        })) as Record<string, unknown>[];
+        if (!lineRows || lineRows.length === 0) {
+          const allRows = (await queue.enqueue(conn, "account.report.line", "search_read", {
+            domain: [["report_id", "=", reportId]],
+            fields: pickExistingFields(["id", "code", "name"], lineFieldsMeta),
+            limit: 1000
+          })) as Record<string, unknown>[];
+          const codes = allRows.map((r) => r.code).filter((c): c is string => typeof c === "string");
+          return mcpError(`Line code not found: ${line_code}. Available codes for report "${report_name}": ${codes.join(", ")}`);
+        }
+        const lineRow = lineRows[0];
+        const lineId = lineRow.id as number;
+
+        // --- expressions ---
+        lastModel = "account.report.expression";
+        const exprFieldsMeta = await getFieldsCached(cache, queue, conn, "account.report.expression");
+        const exprFields = pickExistingFields(ACCOUNT_REPORT_EXPRESSION_FIELD_CANDIDATES, exprFieldsMeta);
+        const exprRows = (await queue.enqueue(conn, "account.report.expression", "search_read", {
+          domain: [["report_line_id", "=", lineId]],
+          fields: exprFields,
+          limit: 500
+        })) as Record<string, unknown>[];
+
+        const expressions: ExpressionEntry[] = exprRows.map((row) => ({
+          id: row.id as number,
+          label: scalarStr(row.label),
+          engine: scalarStr(row.engine),
+          formula: scalarStr(row.formula),
+          subformula: scalarStr(row.subformula),
+          date_scope: scalarStr(row.date_scope)
+        }));
+
+        const diagnosisSegments: string[] = [];
+        const formula_trace: Array<{ code: string; expressions: unknown[] }> = [];
+
+        // engine=external — one batched fetch, bucketed per expression by its effective date_scope window.
+        const externalExprs = expressions.filter((e) => e.engine === "external");
+        if (externalExprs.length > 0) {
+          try {
+            const extFieldsMeta = await getFieldsCached(cache, queue, conn, "account.report.external.value");
+            const fkField = EXTERNAL_VALUE_FK_CANDIDATES.find((name) => name in extFieldsMeta);
+            if (!fkField) {
+              warnings.push("account.report.external.value: no known report-expression FK field found; skipping external enrichment.");
+            } else {
+              const extFields = pickExistingFields(["id", "date", "value", fkField, "company_id"], extFieldsMeta);
+              const extRows = (await queue.enqueue(conn, "account.report.external.value", "search_read", {
+                domain: [
+                  [fkField, "in", externalExprs.map((e) => e.id)],
+                  ["company_id", "=", companyId]
+                ],
+                fields: extFields,
+                limit: 1000
+              })) as Record<string, unknown>[];
+
+              const byExpr = new Map<number, Record<string, unknown>[]>();
+              for (const row of extRows) {
+                const exprId = relationId(row[fkField]);
+                if (exprId === undefined) continue;
+                let arr = byExpr.get(exprId);
+                if (!arr) {
+                  arr = [];
+                  byExpr.set(exprId, arr);
+                }
+                arr.push(row);
+              }
+
+              for (const expr of externalExprs) {
+                const win = effectiveDateWindow(expr.date_scope, date_from, date_to);
+                const rows = byExpr.get(expr.id) ?? [];
+                const included: Record<string, unknown>[] = [];
+                const excluded: Record<string, unknown>[] = [];
+                for (const row of rows) (isInPeriod(row.date, win.from, win.to) ? included : excluded).push(row);
+                expr.included_external_values = normalizeRecords(included, extFieldsMeta);
+                expr.excluded_external_values = normalizeRecords(excluded, extFieldsMeta);
+
+                let seg =
+                  `expression ${expr.label} (engine=external, date_scope=${expr.date_scope}) has ` +
+                  `${included.length} external value(s) dated within ${win.from}..${win.to}`;
+                if (excluded.length > 0) {
+                  const dates = excluded.map((r) => (typeof r.date === "string" ? r.date.slice(0, 10) : String(r.date))).join(", ");
+                  seg += `; ${excluded.length} external value(s) exist dated ${dates} (out of scope)`;
+                }
+                diagnosisSegments.push(seg);
+              }
+            }
+          } catch (err) {
+            warnings.push(warnOn("account.report.external.value", err));
+          }
+        }
+
+        // engine=tax_tags — resolve tag names, then ONE read_group summing move-line balance over those tags.
+        for (const expr of expressions.filter((e) => e.engine === "tax_tags")) {
+          try {
+            const tagIds = [...new Set([...extractIds(expr.formula), ...extractIds(expr.subformula)])];
+            let tagNames: string[] = [];
+            if (tagIds.length > 0) {
+              const tagRows = (await queue.enqueue(conn, "account.account.tag", "search_read", {
+                domain: [["id", "in", tagIds]],
+                fields: ACCOUNT_ACCOUNT_TAG_FIELD_CANDIDATES,
+                limit: 200
+              })) as Record<string, unknown>[];
+              tagNames = tagRows.map((r) => r.name).filter((n): n is string => typeof n === "string");
+            }
+
+            const mlFieldsMeta = await getFieldsCached(cache, queue, conn, "account.move.line");
+            const hasBalance = "balance" in mlFieldsMeta;
+            const aggregates = hasBalance ? ["balance:sum"] : ["debit:sum", "credit:sum"];
+            const tagFk = MOVE_LINE_TAX_TAG_FK_CANDIDATES.find((name) => name in mlFieldsMeta) ?? "tax_tag_ids";
+            const groupRows = (await queue.enqueue(conn, "account.move.line", "read_group", {
+              domain: [
+                [tagFk, "in", tagIds],
+                ["parent_state", "=", "posted"],
+                ["date", ">=", date_from],
+                ["date", "<=", date_to],
+                ["company_id", "=", companyId]
+              ],
+              fields: aggregates,
+              groupby: [],
+              lazy: true
+            })) as Record<string, unknown>[];
+            const g = groupRows[0] ?? {};
+            const balance = hasBalance
+              ? ((g.balance as number) ?? 0)
+              : ((g.debit as number) ?? 0) - ((g.credit as number) ?? 0);
+
+            expr.tax_tags = tagNames;
+            expr.tax_tag_balance = balance;
+            diagnosisSegments.push(
+              `expression ${expr.label} (engine=tax_tags) sums balance ${balance} over ${tagNames.length} tag(s) ` +
+                `[${tagNames.join(", ")}] for ${date_from}..${date_to}`
+            );
+          } catch (err) {
+            warnings.push(warnOn("account.move.line (tax_tags)", err));
+          }
+        }
+
+        // engine=aggregation — parse referenced line codes, fetch those lines + expressions ONE level deep only.
+        const aggExprs = expressions.filter((e) => e.engine === "aggregation");
+        if (aggExprs.length > 0) {
+          const codes = [...new Set(aggExprs.flatMap((e) => extractLineCodes(e.formula)))];
+          if (codes.length > 0) {
+            try {
+              const subLineRows = (await queue.enqueue(conn, "account.report.line", "search_read", {
+                domain: [
+                  ["report_id", "=", reportId],
+                  ["code", "in", codes]
+                ],
+                fields: pickExistingFields(ACCOUNT_REPORT_LINE_FIELD_CANDIDATES, lineFieldsMeta),
+                limit: 500
+              })) as Record<string, unknown>[];
+              const subLineIds = subLineRows.map((r) => r.id as number);
+
+              let subExprRows: Record<string, unknown>[] = [];
+              if (subLineIds.length > 0) {
+                subExprRows = (await queue.enqueue(conn, "account.report.expression", "search_read", {
+                  domain: [["report_line_id", "in", subLineIds]],
+                  fields: exprFields,
+                  limit: 1000
+                })) as Record<string, unknown>[];
+              }
+
+              for (const sub of subLineRows) {
+                const subId = sub.id as number;
+                const exprsForLine = subExprRows
+                  .filter((r) => relationId(r.report_line_id) === subId)
+                  .map((r) => ({
+                    id: r.id as number,
+                    label: scalarStr(r.label),
+                    engine: scalarStr(r.engine),
+                    formula: scalarStr(r.formula),
+                    subformula: scalarStr(r.subformula),
+                    date_scope: scalarStr(r.date_scope)
+                  }));
+                formula_trace.push({ code: scalarStr(sub.code) ?? String(subId), expressions: exprsForLine });
+              }
+            } catch (err) {
+              warnings.push(warnOn("account.report.line (aggregation trace)", err));
+            }
+          }
+          for (const expr of aggExprs) {
+            const referenced = extractLineCodes(expr.formula);
+            diagnosisSegments.push(
+              `expression ${expr.label} (engine=aggregation) references line codes: ${referenced.join(", ") || "(none parsed)"}`
+            );
+          }
+        }
+
+        const result = {
+          line: { id: lineId, code: scalarStr(lineRow.code), name: scalarStr(lineRow.name) },
+          expressions,
+          formula_trace,
+          diagnosis: diagnosisSegments.join("\n") || `No expressions found for line ${line_code}.`,
+          warnings
+        };
+
+        return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+      } catch (err) {
+        return mcpErrorFromException(err, { model: lastModel, method: lastMethod });
+      }
+    }
+  );
+}
+
 // ---- Source documents & attachments (card ODOO1086) ----
 
 const ATTACHMENT_LIST_FIELDS = ["name", "mimetype", "file_size", "checksum", "type", "url", "res_field", "create_date"];
@@ -894,7 +1244,6 @@ function lastDayOfMonth(y: number, m: number): number {
   return new Date(Date.UTC(y, m, 0)).getUTCDate();
 }
 
-const MS_PER_DAY = 86_400_000;
 
 /**
  * Exported for unit testing. Deadline = period end shifted forward by
