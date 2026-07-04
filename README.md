@@ -37,6 +37,7 @@ The server never logs, stores, or echoes your key.
 | `search_records` | read | `model` (string), `domain` (array, default `[]`), `fields` (string[] \| null → smart defaults), `limit` (1–100, default 10), `order` (string, optional, e.g. `"name desc"`), `offset` (int ≥ 0, default 0) |
 | `search_count` | read | `model` (string), `domain` (array, default `[]`) → `{ count }` via `search_count`, without fetching records |
 | `get_record` | read | `model` (string), `record_id` (positive int), `fields` (string[] \| null → smart defaults) |
+| `batch_read` | read | `model` (string), `ids` (positive int[], min 1, capped at 100), `fields` (string[] \| null → smart defaults) → rows via `search_read` |
 | `list_models` | read | — |
 | `get_fields` | read | `model` (string) → field name/type/label schema |
 | `projects.list_tasks` | read | `domain` (array), `fields` (string[]) — convenience wrapper over `project.task` |
@@ -44,6 +45,8 @@ The server never logs, stores, or echoes your key.
 | `create_record` | write | `model` (string), `values` (object) |
 | `update_record` | write | `model` (string), `record_id` (positive int), `values` (object; x2many use Odoo command tuples, e.g. `[[6,0,ids]]`, `[[4,id]]`, `[[3,id]]`) |
 | `delete_record` | write | `model` (string), `record_id` (positive int) |
+| `batch_update` | write | `model` (string), `updates` (array of `{ record_id, values }`; x2many use Odoo command tuples) — one `write` per entry, fail-fast |
+| `batch_post_message` | write | `model` (string), `messages` (array of `{ record_id, body, subtype?, body_is_html? }`) — one `message_post` per entry, HTML-escaped unless `body_is_html` |
 
 Writes are gated by *your* Odoo user's access rights and record rules (BYO-key), so a caller
 can only do what their Odoo account permits.
