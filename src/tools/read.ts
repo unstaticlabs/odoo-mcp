@@ -76,7 +76,9 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
   server.registerTool(
     "search_count",
     {
+      title: "Search Count",
       description: "Read-only: model-agnostic Odoo search_count — count records matching a domain without fetching them.",
+      annotations: { readOnlyHint: true, openWorldHint: false },
       inputSchema: {
         model: z.string(),
         domain: z.array(z.any()).default([])
@@ -204,6 +206,8 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
   server.registerTool(
     "describe_database",
     {
+      title: "Describe Database",
+      annotations: { readOnlyHint: true, openWorldHint: false },
       description:
         "Read-only: summarize what this Odoo instance contains — installed modules, custom/Studio models, " +
         "Studio-added fields, server actions, and automated actions. Costs one Odoo call per requested section " +
