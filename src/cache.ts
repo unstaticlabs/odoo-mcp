@@ -80,6 +80,7 @@ export interface CachedFieldMeta {
   string: string;
   selection?: [string, string][];
   relation?: string;
+  store?: boolean;
 }
 
 export interface XmlIdResolution {
@@ -96,7 +97,7 @@ export async function getFieldsCached(
   const key = `fields:${conn.db}:${model}`;
   return cache.getOrCompute(key, TTL_METADATA_MS, async () => {
     return (await queue.enqueue(conn, model, "fields_get", {
-      attributes: ["type", "string", "selection", "relation"]
+      attributes: ["type", "string", "selection", "relation", "store"]
     })) as Record<string, CachedFieldMeta>;
   });
 }
