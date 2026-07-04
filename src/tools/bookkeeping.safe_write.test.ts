@@ -4,6 +4,7 @@ import { TtlCache } from "../cache";
 import type { OdooQueue } from "../odoo-queue";
 import { toWritePlan, verifyConfirmationToken, type PlanResult } from "../safety";
 import { registerSafeWritePlannerTools } from "./bookkeeping";
+import { validatedToolHandler } from "./structured-test-util";
 
 const props = { odooBaseUrl: "http://example.com", odooDb: "test-db", odooApiKey: "secret-key" };
 const SECRET = "test-hmac-secret";
@@ -15,15 +16,11 @@ function dispatchQueue(responder: (model: string, method: string, args: Record<s
 }
 
 type ToolResult = { isError?: boolean; content: { text: string }[] };
-type ToolRegistry = { _registeredTools: Record<string, { handler: (args: unknown) => Promise<ToolResult> }> };
 
 function buildHandler(queue: OdooQueue) {
   const server = new McpServer({ name: "test", version: "0.0.0" });
   registerSafeWritePlannerTools(server, () => props, queue, new TtlCache({ clock: () => 0 }), () => SECRET);
-  // Reach into the SDK registry for the raw handler (mirrors the existing bookkeeping.test.ts pattern),
-  // narrowing through `unknown` to a typed registry shape rather than `any`.
-  const registry = (server as unknown as ToolRegistry)._registeredTools;
-  return registry["bookkeeping.plan_safe_write"].handler;
+  return validatedToolHandler(server, "bookkeeping.plan_safe_write") as (args: unknown) => Promise<ToolResult>;
 }
 
 // A responder for the CA12 external-value fixture, parameterised by the line/dup rows returned.

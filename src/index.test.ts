@@ -57,8 +57,11 @@ async function buildWriteToolAgent() {
   return agent;
 }
 
+const { validatedToolHandler } = await import("./tools/structured-test-util");
+
+/** Direct handler access, wrapped to replay the SDK's outputSchema validation on success results. */
 function getToolHandler(agent: any, name: string) {
-  return agent.server._registeredTools[name].handler;
+  return validatedToolHandler(agent.server, name);
 }
 
 /** Records every enqueue call and can force a message_post rejection, so tests never touch fetch. */
@@ -2046,6 +2049,45 @@ describe("tool metadata (title/annotations)", () => {
     for (const name of writeToolNames) {
       expect(agent.server._registeredTools[name].annotations.readOnlyHint).not.toBe(true);
     }
+  });
+
+  test("every registered tool declares an outputSchema (structured output)", async () => {
+    const agent = await buildWriteToolAgent();
+    const tools = Object.entries(agent.server._registeredTools) as [string, any][];
+
+    expect(tools.length).toBeGreaterThan(0);
+    for (const [name, tool] of tools) {
+      expect(tool.outputSchema, `tool ${name} is missing an outputSchema`).toBeDefined();
+    }
+  });
+
+  test("search_count returns structuredContent alongside the legacy text content", async () => {
+    const agent = await buildWriteToolAgent();
+    globalThis.fetch = mock(async () =>
+      new Response(JSON.stringify({ result: 7 }), { status: 200, headers: { "Content-Type": "application/json" } })
+    ) as any;
+
+    const handler = getToolHandler(agent, "search_count");
+    const result = await handler({ model: "project.task", domain: [] });
+
+    expect(result.structuredContent).toEqual({ count: 7 });
+    expect(JSON.parse(result.content[0].text)).toEqual({ count: 7 });
+    globalThis.fetch = originalFetch;
+  });
+
+  test("search_records keeps the legacy bare-array text while wrapping structuredContent in a records envelope", async () => {
+    const agent = await buildWriteToolAgent();
+    const rows = [{ id: 1, name: "Task" }];
+    globalThis.fetch = mock(async () =>
+      new Response(JSON.stringify({ result: rows }), { status: 200, headers: { "Content-Type": "application/json" } })
+    ) as any;
+
+    const handler = getToolHandler(agent, "search_records");
+    const result = await handler({ model: "project.task", domain: [], fields: ["id", "name"], limit: 10, offset: 0 });
+
+    expect(result.structuredContent).toEqual({ records: rows });
+    expect(JSON.parse(result.content[0].text)).toEqual(rows);
+    globalThis.fetch = originalFetch;
   });
 });
 

@@ -17,7 +17,7 @@ import {
   type PlanResult
 } from "../safety";
 import type { Props } from "../server";
-import { mcpError, mcpErrorFromException, requireConnection } from "./shared";
+import { mcpError, mcpErrorFromException, mcpStructured, requireConnection, zOdooRecords, zRecordContainer, zWarnings } from "./shared";
 
 type FieldsMeta = Record<string, CachedFieldMeta>;
 
@@ -591,6 +591,14 @@ async function buildKeyAccountsReview(
   return { accounts, warnings };
 }
 
+/** Call-cost metadata shared by the bookkeeping tool envelopes (cache_misses only where reported). */
+const zCallMetadata = z.object({
+  odoo_calls: z.number().int(),
+  cache_hits: z.number().int(),
+  cache_misses: z.number().int().optional(),
+  duration_seconds: z.number()
+});
+
 export function registerBookkeepingTools(server: McpServer, getProps: () => Props | undefined, queue: OdooQueue, cache: TtlCache) {
   server.registerTool(
     "bookkeeping.get_snapshot",
@@ -608,6 +616,36 @@ export function registerBookkeepingTools(server: McpServer, getProps: () => Prop
         date_to: z.string(),
         scopes: z.array(z.enum(["tax_report", "tax_returns", "return_types", "external_values", "key_accounts"])).min(1),
         key_account_codes: z.array(z.string()).optional()
+      },
+      outputSchema: {
+        company: z.object({
+          id: z.number().int(),
+          name: z.unknown(),
+          country: z.unknown().describe("Normalized country_id relation, or null"),
+          lock_dates: z.record(z.string(), z.unknown()).describe("Lock-date fields present on this Odoo version and their values")
+        }),
+        period: z.object({ date_from: z.string(), date_to: z.string() }),
+        tax_report: z
+          .object({ reports: zRecordContainer, lines: zRecordContainer, expressions: zRecordContainer })
+          .optional()
+          .describe("Present when the tax_report scope was requested"),
+        external_values: z
+          .object({ values: zRecordContainer })
+          .optional()
+          .describe("Present when the external_values scope was requested (each value carries an in_period flag)"),
+        tax_returns: z
+          .object({ return_types: zRecordContainer.optional(), existing_returns: zRecordContainer.optional() })
+          .optional()
+          .describe("Present when the return_types and/or tax_returns scopes were requested"),
+        key_accounts: z
+          .object({
+            balances: zRecordContainer,
+            top_open_lines: z.object({ model: z.string(), by_account_id: z.record(z.string(), z.array(z.unknown())) })
+          })
+          .optional()
+          .describe("Present when the key_accounts scope was requested with key_account_codes"),
+        warnings: zWarnings,
+        metadata: zCallMetadata
       }
     },
     async ({ company, date_from, date_to, scopes, key_account_codes }) => {
@@ -707,7 +745,7 @@ export function registerBookkeepingTools(server: McpServer, getProps: () => Prop
           duration_seconds: (Date.now() - startedAt) / 1000
         };
 
-        return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+        return mcpStructured(result);
       } catch (err) {
         return mcpErrorFromException(err, { model: "res.company", method: "search_read" });
       }
@@ -727,6 +765,29 @@ export function registerBookkeepingTools(server: McpServer, getProps: () => Prop
         company: z.string(),
         date_to: z.string(),
         account_codes: z.array(z.string())
+      },
+      outputSchema: {
+        accounts: z
+          .array(
+            z.object({
+              code: z.string(),
+              name: z.unknown(),
+              id: z.number().int(),
+              balance: z.number(),
+              debit: z.number(),
+              credit: z.number(),
+              account_type: z.unknown(),
+              reconcile: z.unknown(),
+              severity: z
+                .enum(["attention", "ok", "info"])
+                .describe("Factual heuristic: 'attention' = suspense account carrying a balance/open items (closure blocker)"),
+              open_item_count: z.number().int(),
+              top_lines: zOdooRecords.describe("Up to 10 most recent open account.move.line rows")
+            })
+          )
+          .describe("One entry per found account code"),
+        warnings: zWarnings,
+        metadata: zCallMetadata
       }
     },
     async ({ company, date_to, account_codes }) => {
@@ -752,7 +813,7 @@ export function registerBookkeepingTools(server: McpServer, getProps: () => Prop
           duration_seconds: (Date.now() - startedAt) / 1000
         };
 
-        return { content: [{ type: "text" as const, text: JSON.stringify({ accounts, warnings, metadata }, null, 2) }] };
+        return mcpStructured({ accounts, warnings, metadata });
       } catch (err) {
         return mcpErrorFromException(err, { model: "res.company", method: "search_read" });
       }
@@ -801,6 +862,30 @@ export function registerReportLineTools(server: McpServer, getProps: () => Props
         line_code: z.string(),
         date_from: z.string(),
         date_to: z.string()
+      },
+      outputSchema: {
+        line: z.object({ id: z.number().int(), code: z.string().nullable(), name: z.string().nullable() }),
+        expressions: z
+          .array(
+            z.object({
+              id: z.number().int(),
+              label: z.string().nullable(),
+              engine: z.string().nullable().describe("Odoo expression engine: external, tax_tags, aggregation, domain, ..."),
+              formula: z.string().nullable(),
+              subformula: z.string().nullable(),
+              date_scope: z.string().nullable(),
+              included_external_values: zOdooRecords.optional().describe("engine=external only: values dated inside the effective window"),
+              excluded_external_values: zOdooRecords.optional().describe("engine=external only: values present but dated OUT of scope"),
+              tax_tags: z.array(z.string()).optional().describe("engine=tax_tags only: resolved tag names"),
+              tax_tag_balance: z.number().optional().describe("engine=tax_tags only: summed move-line balance over the tags")
+            })
+          )
+          .describe("All account.report.expression records on the line, enriched per engine"),
+        formula_trace: z
+          .array(z.object({ code: z.string(), expressions: z.array(z.unknown()) }))
+          .describe("engine=aggregation: referenced lines and their expressions, one level deep"),
+        diagnosis: z.string().describe("Fact-only, newline-joined explanation of what each expression contributes"),
+        warnings: zWarnings
       }
     },
     async ({ company, report_name, line_code, date_from, date_to }) => {
@@ -1039,7 +1124,7 @@ export function registerReportLineTools(server: McpServer, getProps: () => Props
           warnings
         };
 
-        return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+        return mcpStructured(result);
       } catch (err) {
         return mcpErrorFromException(err, { model: lastModel, method: lastMethod });
       }
@@ -1085,6 +1170,18 @@ export function registerSourceDocumentTools(server: McpServer, getProps: () => P
       inputSchema: {
         model: z.string().default("account.move"),
         record_id: z.number().int().positive()
+      },
+      outputSchema: {
+        documents: z
+          .array(
+            z.looseObject({
+              id: z.number().int(),
+              tag: z.enum(["original_source", "official_pdf", "other"]).describe("Provenance classification of the attachment")
+            })
+          )
+          .describe("ir.attachment rows (name, mimetype, file_size, checksum, type, url, res_field, create_date) plus a tag"),
+        warnings: zWarnings,
+        metadata: zCallMetadata
       }
     },
     async ({ model, record_id }) => {
@@ -1137,7 +1234,7 @@ export function registerSourceDocumentTools(server: McpServer, getProps: () => P
         const { odoo_calls, total_duration_ms } = queue.delta(before);
         const metadata = { odoo_calls, cache_hits: 0, duration_seconds: total_duration_ms / 1000 };
 
-        return { content: [{ type: "text" as const, text: JSON.stringify({ documents, warnings, metadata }, null, 2) }] };
+        return mcpStructured({ documents, warnings, metadata });
       } catch (err) {
         return mcpErrorFromException(err, { model, method: "search_read" });
       }
@@ -1154,6 +1251,13 @@ export function registerSourceDocumentTools(server: McpServer, getProps: () => P
       inputSchema: {
         attachment_id: z.number().int().positive(),
         max_bytes: z.number().int().positive().default(10485760)
+      },
+      outputSchema: {
+        name: z.unknown().describe("Attachment file name"),
+        mimetype: z.unknown(),
+        file_size: z.unknown().describe("Size in bytes (Odoo may return false for URL attachments)"),
+        url: z.unknown().optional().describe("Present for type=url attachments (no content is fetched)"),
+        base64: z.unknown().optional().describe("Base64-encoded file content; present for stored attachments within max_bytes")
       }
     },
     async ({ attachment_id, max_bytes }) => {
@@ -1168,14 +1272,7 @@ export function registerSourceDocumentTools(server: McpServer, getProps: () => P
         if (!meta) return mcpError(`No ir.attachment record found for id ${attachment_id}`);
 
         if (meta.type === "url") {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: JSON.stringify({ name: meta.name, mimetype: meta.mimetype, file_size: meta.file_size, url: meta.url }, null, 2)
-              }
-            ]
-          };
+          return mcpStructured({ name: meta.name, mimetype: meta.mimetype, file_size: meta.file_size, url: meta.url });
         }
 
         const fileSize = meta.file_size as number;
@@ -1191,14 +1288,7 @@ export function registerSourceDocumentTools(server: McpServer, getProps: () => P
         })) as Array<Record<string, unknown>>;
         const data = dataRows[0];
 
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: JSON.stringify({ name: data.name, mimetype: data.mimetype, file_size: data.file_size, base64: data.datas }, null, 2)
-            }
-          ]
-        };
+        return mcpStructured({ name: data.name, mimetype: data.mimetype, file_size: data.file_size, base64: data.datas });
       } catch (err) {
         return mcpErrorFromException(err, { model: "ir.attachment", method: "read" });
       }
@@ -1409,6 +1499,25 @@ export function registerReturnPreviewTools(
         from: z.string(),
         to: z.string(),
         return_type_xmlids: z.array(z.string()).min(1)
+      },
+      outputSchema: {
+        return_types: zOdooRecords.describe("Resolved account.return.type records (normalized)"),
+        existing_returns: zOdooRecords.describe("account.return records overlapping the window for this company"),
+        expected_returns: z
+          .array(
+            z.object({
+              name: z.string(),
+              date_start: z.string(),
+              date_end: z.string(),
+              deadline: z.string().describe("Period end shifted by the type's deadline delay"),
+              exists: z.boolean().describe("True when an account.return already covers exactly this period")
+            })
+          )
+          .describe("Every period each return type SHOULD cover in the window"),
+        configuration_issues: z
+          .array(z.string())
+          .describe("Blocking config problems (unresolvable XML ID, blank periodicity) — periods are never guessed"),
+        warnings: zWarnings
       }
     },
     async ({ company, from, to, return_type_xmlids }) => {
@@ -1500,7 +1609,7 @@ export function registerReturnPreviewTools(
           configuration_issues,
           warnings
         };
-        return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+        return mcpStructured(result);
       } catch (err) {
         return mcpErrorFromException(err, { model: "account.return.type", method: "search_read" });
       }
@@ -1783,6 +1892,29 @@ export function registerSafeWritePlannerTools(
         ]),
         company: z.string(),
         values: z.record(z.string(), z.unknown())
+      },
+      outputSchema: {
+        status: z
+          .enum(["safe", "blocked", "needs_lock_exception", "duplicate_found"])
+          .describe("Validation verdict; a token is issued only for 'safe' or a duplicate_found resolving to an in-place update"),
+        resolved_target: z
+          .looseObject({ model: z.string(), id: z.number().int().optional() })
+          .describe("What the write would target, plus provenance fields"),
+        existing_records: z.array(z.unknown()).describe("Records that already occupy the target (duplicate evidence)"),
+        lock_dates: z.record(z.string(), z.string().nullable()).describe("Company lock-date fields (ISO date or null)"),
+        warnings: zWarnings,
+        would_write: z.looseObject({
+          model: z.string(),
+          method: z.enum(["create", "write"]),
+          values: z.record(z.string(), z.unknown()),
+          id: z.number().int().optional().describe("Target record id when method=write"),
+          old_value: z.unknown().optional().describe("Pre-write value for periodicity updates")
+        }),
+        confirmation_required: z.boolean(),
+        confirmation_token: z
+          .string()
+          .optional()
+          .describe("HMAC token to pass to the matching apply tool; absent when blocked or CONFIRMATION_SECRET is unset")
       }
     },
     async ({ operation, company, values }) => {
@@ -1828,7 +1960,7 @@ export function registerSafeWritePlannerTools(
           }
         }
 
-        return { content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }] };
+        return mcpStructured(result);
       } catch (err) {
         return mcpErrorFromException(err, { model: "res.company", method: "search_read" });
       }
