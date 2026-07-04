@@ -2,8 +2,64 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { OdooQueue } from "../odoo-queue";
 import type { Props } from "../server";
+import { CURATED_MODEL_ACTIONS, type CuratedAction } from "./actions-map";
 import { CORE_MODEL_ALLOWLIST, DEFAULT_TASK_FIELDS, countRecords, mcpError, mcpErrorFromException, requireConnection, searchRecords } from "./shared";
 import { deriveWorkflowStatus } from "../normalizer";
+
+export interface ModelAction {
+  method: string;
+  label?: string;
+  confirm?: string;
+  source: "view" | "curated";
+}
+
+const BUTTON_TAG_RE = /<button\b([^>]*)>/gi;
+const ATTR_RE = /([\w-]+)\s*=\s*"([^"]*)"/g;
+
+/** Exported for unit testing. Regex-based (no XML parser dependency): extracts type="object" button methods from a form-view arch string. */
+export function parseButtonsFromArch(arch: string | undefined | null): ModelAction[] {
+  if (!arch) return [];
+  const seen = new Set<string>();
+  const buttons: ModelAction[] = [];
+  const tagRe = new RegExp(BUTTON_TAG_RE.source, BUTTON_TAG_RE.flags);
+  let tagMatch: RegExpExecArray | null;
+  while ((tagMatch = tagRe.exec(arch)) !== null) {
+    const attrs: Record<string, string> = {};
+    const attrRe = new RegExp(ATTR_RE.source, ATTR_RE.flags);
+    let attrMatch: RegExpExecArray | null;
+    while ((attrMatch = attrRe.exec(tagMatch[1])) !== null) {
+      attrs[attrMatch[1]] = attrMatch[2];
+    }
+    if (attrs.type !== "object") continue;
+    const method = attrs.name;
+    if (!method || seen.has(method)) continue;
+    seen.add(method);
+    buttons.push({
+      method,
+      ...(attrs.string ? { label: attrs.string } : {}),
+      ...(attrs.confirm ? { confirm: attrs.confirm } : {}),
+      source: "view"
+    });
+  }
+  return buttons;
+}
+
+/** Exported for unit testing. Merges curated actions with view-discovered ones; on duplicate method the view entry wins. */
+export function mergeModelActions(curated: CuratedAction[], viewActions: ModelAction[]): ModelAction[] {
+  const merged = new Map<string, ModelAction>();
+  for (const action of curated) {
+    merged.set(action.method, {
+      method: action.method,
+      ...(action.label ? { label: action.label } : {}),
+      ...(action.confirm ? { confirm: action.confirm } : {}),
+      source: "curated"
+    });
+  }
+  for (const action of viewActions) {
+    merged.set(action.method, action);
+  }
+  return Array.from(merged.values());
+}
 
 export function registerReadTools(server: McpServer, getProps: () => Props | undefined, queue: OdooQueue) {
   server.registerTool(
@@ -186,6 +242,38 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
       } catch (err) {
         return mcpErrorFromException(err, { model, method: "fields_get" });
       }
+    }
+  );
+
+  server.registerTool(
+    "list_model_actions",
+    {
+      description:
+        "Read-only: discover valid action methods (e.g. action_post, button_draft) for an Odoo model, combining form-view buttons with a curated list. Discovery only — execute these via call_model_method; they change record state.",
+      inputSchema: {
+        model: z.string()
+      }
+    },
+    async ({ model }) => {
+      if (!model || !model.trim()) return mcpError("model must be a non-empty string");
+      const conn = requireConnection(getProps());
+
+      let viewActions: ModelAction[] = [];
+      let note: string | undefined;
+      try {
+        const result = (await queue.enqueue(conn, model, "get_views", {
+          views: [[false, "form"]]
+        })) as { views?: { form?: { arch?: string } } };
+        viewActions = parseButtonsFromArch(result?.views?.form?.arch);
+      } catch (err) {
+        note = `get_views failed (${err instanceof Error ? err.message : String(err)}); returning curated actions only.`;
+      }
+
+      const curated = CURATED_MODEL_ACTIONS[model] ?? [];
+      const actions = mergeModelActions(curated, viewActions);
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify({ actions, ...(note ? { note } : {}) }, null, 2) }]
+      };
     }
   );
 
