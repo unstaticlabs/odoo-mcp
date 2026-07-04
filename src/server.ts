@@ -3,6 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 import { callOdoo } from "./odoo";
 import { OdooQueue } from "./odoo-queue";
+import { TtlCache } from "./cache";
 import { registerReadTools } from "./tools/read";
 import { registerResourceTemplates } from "./tools/resources";
 import { registerWriteTools } from "./tools/write";
@@ -25,6 +26,8 @@ export class McpAgent extends McpAgentBase<Env, unknown, Props> {
   // Bump this on every future tool-surface change: it's the cache-busting key clients use to refetch the tool list.
   server = new McpServer({ name: "odoo-mcp", version: "0.2.0" });
   odooQueue = new OdooQueue(callOdoo);
+  // In-memory only — resets on DO eviction, same as odooQueue above.
+  cache = new TtlCache();
 
   async init() {
     const getProps = () => this.props;

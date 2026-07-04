@@ -5,6 +5,7 @@
     "": {
       "name": "odoo-mcp",
       "dependencies": {
+        "@cloudflare/workers-oauth-provider": "^0.8.1",
         "@modelcontextprotocol/sdk": "^1.29.0",
         "agents": "^0.17.3",
         "zod": "^4.4.3",
@@ -84,6 +85,8 @@
     "@cloudflare/workerd-linux-arm64": ["@cloudflare/workerd-linux-arm64@1.20260630.1", "", { "os": "linux", "cpu": "arm64" }, "sha512-7g0iGvMCwGct+vE3FOKXtFWMAIGHzK2Ei9oALp44gXuL4lBcs3PPJISeTp5itquW2JwS1fw4Hnq7zrT7N/dgPw=="],
 
     "@cloudflare/workerd-windows-64": ["@cloudflare/workerd-windows-64@1.20260630.1", "", { "os": "win32", "cpu": "x64" }, "sha512-J5KF9VF8yRpRBib/cPSuEp6iR9q3/cKgeDVhg1ZtuwpkzwnmCb+rxMF5WFLxAN8bI2x2FMG1v6o4vVFOGZ0fOQ=="],
+
+    "@cloudflare/workers-oauth-provider": ["@cloudflare/workers-oauth-provider@0.8.1", "", {}, "sha512-zB4In0X1O5Vhc+Eb1s3ZP8wiqxLt2Hg1cqkLjZE2qQW1LNc4cOs1YEqYqtIKqG91yEBgpFIMBNYiafHk3OWj4Q=="],
 
     "@cloudflare/workers-types": ["@cloudflare/workers-types@4.20260702.1", "", {}, "sha512-mOhf5TUEB1m2vPrxtqoIGfz0fUC9xyxRDx5gWHy5s+OCo6dcV+g7wI1R7gYCMFohhqF/2y2xeKVwMwCJjfn/WA=="],
 
