@@ -2420,6 +2420,153 @@ describe("describe_database", () => {
   });
 });
 
+describe("expand_record", () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const BASE_FIELDS_META = {
+    id: { type: "integer", string: "ID" },
+    name: { type: "char", string: "Name" }
+  };
+
+  /** Routes by `${model}/${method}` (matches the odoo.ts endpoint shape). Optionally logs {url, body} to `log`. */
+  function mockOdoo(routes: Record<string, unknown>, log?: { url: string; body: any }[]) {
+    return mock(async (url: string, init: any) => {
+      const key = Object.keys(routes).find((k) => url.endsWith(`/json/2/${k}`));
+      if (log) log.push({ url, body: init?.body ? JSON.parse(init.body) : undefined });
+      const outcome = key ? routes[key] : undefined;
+      if (outcome instanceof Error) {
+        return new Response(JSON.stringify({ error: { message: outcome.message } }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+      return new Response(JSON.stringify({ result: outcome ?? [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+  }
+
+  test("default expansion (no relations) returns record, chatter, and attachments", async () => {
+    const agent = await buildWriteToolAgent();
+    globalThis.fetch = mockOdoo({
+      "project.task/fields_get": BASE_FIELDS_META,
+      "project.task/search_read": [{ id: 42, name: "Task A" }],
+      "mail.message/search_read": [{ date: "2024-01-01", author_id: [7, "Alice"], body: "hi", message_type: "comment" }],
+      "ir.attachment/search_read": [{ name: "file.pdf", mimetype: "application/pdf", file_size: 123, create_date: "2024-01-01" }]
+    });
+
+    const handler = getToolHandler(agent, "expand_record");
+    const result = await handler({ model: "project.task", record_id: 42, relations: [], include_chatter: true, include_attachments: true, relation_limit: 10 });
+    const body = JSON.parse(result.content[0].text);
+
+    expect(body.relations).toEqual({});
+    expect(body.chatter).toEqual([{ date: "2024-01-01", author_id: { id: 7, name: "Alice" }, body: "hi", message_type: "comment" }]);
+    expect(body.attachments).toEqual([{ name: "file.pdf", mimetype: "application/pdf", file_size: 123, create_date: "2024-01-01" }]);
+    expect(body.record).toEqual({ id: 42, name: "Task A" });
+    expect(result.isError).toBeUndefined();
+  });
+
+  test("explicit relations expansion fetches the comodel and normalizes rows", async () => {
+    const agent = await buildWriteToolAgent();
+    const fieldsMeta = { ...BASE_FIELDS_META, tag_ids: { type: "many2many", string: "Tags", relation: "test.tag", store: true } };
+    const log: { url: string; body: any }[] = [];
+    globalThis.fetch = mockOdoo(
+      {
+        "project.task/fields_get": fieldsMeta,
+        "project.task/search_read": [{ id: 42, name: "Task A", tag_ids: [1, 2] }],
+        "test.tag/search_read": [
+          { id: 1, display_name: "Urgent", state: "open" },
+          { id: 2, display_name: "Low", state: "open" }
+        ],
+        "mail.message/search_read": [],
+        "ir.attachment/search_read": []
+      },
+      log
+    );
+
+    const handler = getToolHandler(agent, "expand_record");
+    const result = await handler({
+      model: "project.task",
+      record_id: 42,
+      relations: ["tag_ids"],
+      include_chatter: false,
+      include_attachments: false,
+      relation_limit: 10
+    });
+    const body = JSON.parse(result.content[0].text);
+
+    expect(body.relations.tag_ids).toEqual([
+      { id: 1, display_name: "Urgent", state: "open" },
+      { id: 2, display_name: "Low", state: "open" }
+    ]);
+    const tagCall = log.find((entry) => entry.url.endsWith("/test.tag/search_read"));
+    expect(tagCall?.body.domain).toEqual([["id", "in", [1, 2]]]);
+    expect(result.isError).toBeUndefined();
+  });
+
+  test("one section erroring (chatter) does not fail the whole call", async () => {
+    const agent = await buildWriteToolAgent();
+    globalThis.fetch = mockOdoo({
+      "project.task/fields_get": BASE_FIELDS_META,
+      "project.task/search_read": [{ id: 42, name: "Task A" }],
+      "mail.message/search_read": new Error("Invalid model name 'mail.message'"),
+      "ir.attachment/search_read": [{ name: "file.pdf", mimetype: "application/pdf", file_size: 123, create_date: "2024-01-01" }]
+    });
+
+    const handler = getToolHandler(agent, "expand_record");
+    const result = await handler({ model: "project.task", record_id: 42, relations: [], include_chatter: true, include_attachments: true, relation_limit: 10 });
+    const body = JSON.parse(result.content[0].text);
+
+    expect(body.chatter.error).toContain("mail.message");
+    expect(body.record).toEqual({ id: 42, name: "Task A" });
+    expect(body.relations).toEqual({});
+    expect(body.attachments.length).toBe(1);
+    expect(result.isError).toBeUndefined();
+  });
+
+  test("caps at 8 Odoo calls per invocation, degrading remaining relation sections", async () => {
+    const agent = await buildWriteToolAgent();
+
+    const relFields: Record<string, unknown> = {};
+    const recordRow: Record<string, unknown> = { id: 42, name: "Task A" };
+    const routes: Record<string, unknown> = {
+      "project.task/search_read": [recordRow],
+      "mail.message/search_read": [],
+      "ir.attachment/search_read": []
+    };
+    for (let i = 0; i < 8; i++) {
+      const field = `rel${i}_ids`;
+      const comodel = `rel.model.${i}`;
+      relFields[field] = { type: "one2many", string: `Rel ${i}`, relation: comodel, store: true };
+      recordRow[field] = [i + 1];
+      routes[`${comodel}/search_read`] = [{ id: i + 1, display_name: `Item ${i}` }];
+    }
+    routes["project.task/fields_get"] = { ...BASE_FIELDS_META, ...relFields };
+    globalThis.fetch = mockOdoo(routes);
+
+    const handler = getToolHandler(agent, "expand_record");
+    const result = await handler({
+      model: "project.task",
+      record_id: 42,
+      relations: Object.keys(relFields),
+      include_chatter: false,
+      include_attachments: false,
+      relation_limit: 10
+    });
+    const body = JSON.parse(result.content[0].text);
+
+    expect(agent.odooQueue.getMetrics().odoo_calls).toBeLessThanOrEqual(8);
+    const degraded = Object.values(body.relations).filter(
+      (v: any) => v && v.error === "call budget exceeded (max 8 Odoo calls per invocation)"
+    );
+    expect(degraded.length).toBeGreaterThan(0);
+    expect(result.isError).toBeUndefined();
+  });
+});
+
 describe("OAuth shim (ChatGPT path)", () => {
   afterEach(() => {
     globalThis.fetch = originalFetch;
