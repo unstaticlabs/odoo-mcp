@@ -262,6 +262,8 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
   server.registerTool(
     "list_model_actions",
     {
+      title: "List Model Actions",
+      annotations: { readOnlyHint: true, openWorldHint: false },
       description:
         "Read-only: discover valid action methods (e.g. action_post, button_draft) for an Odoo model, combining form-view buttons with a curated list. Discovery only — execute these via call_model_method; they change record state.",
       inputSchema: {
