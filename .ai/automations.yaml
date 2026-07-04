@@ -27,6 +27,13 @@ automations:
     all:
     - field: stage
       eq: Build
+    # A merged card can sit in Build (state done) until a human moves it — and
+    # review-stage pipelines may even reset its status. Without this guard the
+    # scanner re-builds merged work and opens duplicate PRs (seen live: 1072 →
+    # PR #14; 1144 after #26; 1123 after #30).
+    - not:
+        field: status
+        eq: done
   actions:
   - kind: capability
     body: implementation
