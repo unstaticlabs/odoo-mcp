@@ -14,7 +14,8 @@ import {
   requireConnection,
   searchRecords,
   zOdooRecord,
-  zOdooRecords
+  zOdooRecords,
+  zWarnings
 } from "./shared";
 import { deriveWorkflowStatus, normalizeRecords } from "../normalizer";
 import { type CachedFieldMeta, type TtlCache, getFieldsCached } from "../cache";
@@ -138,14 +139,42 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
         offset: z.number().int().min(0).default(0)
       },
       outputSchema: {
-        records: zOdooRecords.describe("Matching records with the requested (or smart-default) fields")
+        records: zOdooRecords.describe("Matching records with the requested (or smart-default) fields"),
+        returned_fields: z.array(z.string()).describe("List of fields successfully returned by Odoo"),
+        omitted_fields: z.array(
+          z.object({
+            field: z.string(),
+            reason: z.string()
+          })
+        ).describe("Fields requested but omitted from Odoo response"),
+        warnings: zWarnings
       }
     },
     async ({ model, domain, fields, limit, order, offset }) => {
       if (!model || !model.trim()) return mcpError("model must be a non-empty string");
       try {
-        const { rows } = await searchRecords(queue, requireConnection(getProps()), model, domain, fields, limit, order, offset);
-        return mcpStructured({ records: rows as Record<string, unknown>[] }, JSON.stringify(rows, null, 2));
+        const warnings: string[] = [];
+        const { rows, fieldsReport } = await searchRecords(
+          queue,
+          requireConnection(getProps()),
+          model,
+          domain,
+          fields,
+          limit,
+          order,
+          offset,
+          cache,
+          warnings
+        );
+        return mcpStructured(
+          {
+            records: rows as Record<string, unknown>[],
+            returned_fields: fieldsReport.returned_fields,
+            omitted_fields: fieldsReport.omitted_fields,
+            warnings
+          },
+          JSON.stringify(rows, null, 2)
+        );
       } catch (err) {
         return mcpErrorFromException(err, { model, method: "search_read" });
       }
