@@ -9,7 +9,10 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
     "create_record",
     {
       title: "Create Record",
-      description: "Write: create a single Odoo record of the given model.",
+      description:
+        "Write: create a single Odoo record of the given model. When the model is project.task, the response carries a " +
+        "trace_token (src-…) that is also stamped into the task's chatter — you MUST surface that token verbatim in your " +
+        "visible reply to the user so the conversation can be found again from the Odoo task.",
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
       inputSchema: {
         model: z.string().min(1),
@@ -48,7 +51,6 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
       const client = (props?.clientName ?? server.server.getClientVersion()?.name ?? "unknown").replace(/\s+/g, "-");
       const body = `[agent-source] engineering_task corr=${token} via=${client}`;
 
-      let text = JSON.stringify(id);
       try {
         await queue.enqueue(conn, "project.task", "message_post", {
           ids: [id],
@@ -58,13 +60,20 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
           body_is_html: true,
           message_type: "comment"
         });
-        text += `\n\nTrace token: ${token} — include this token verbatim in your visible reply so this conversation can be found later.`;
+        // Front-load the token: the only channel the user actually sees is the model's reply, and the
+        // model only echoes what it's told to lead with. Putting the imperative first (not appended
+        // after the id) is what gets `src-…` into the ChatGPT/Claude transcript so the task is traceable.
+        const text =
+          `TRACE TOKEN ${token} — you MUST include this token verbatim in your visible reply to the user so ` +
+          `this conversation can be found later from the Odoo task.\n\n` +
+          JSON.stringify(id);
         return mcpStructured({ id, trace_token: token }, text);
       } catch (err) {
         // A chatter-post failure must never fail the create: return the id and warn, never surface an MCP error.
+        // No token is surfaced here — it was never stamped into the chatter, so echoing it would be a dead reference.
         const errMessage = err instanceof Error ? err.message : String(err);
         const provenance_warning = `created task ${id} but failed to post the provenance stamp (${errMessage})`;
-        text += `\n\nWarning: ${provenance_warning}.`;
+        const text = `${JSON.stringify(id)}\n\nWarning: ${provenance_warning}.`;
         return mcpStructured({ id, provenance_warning }, text);
       }
     }
