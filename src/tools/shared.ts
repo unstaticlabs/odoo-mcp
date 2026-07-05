@@ -7,6 +7,22 @@ import type { TtlCache } from "../cache";
 export const DEFAULT_TASK_FIELDS = ["id", "name", "stage_id", "project_id"];
 export const DEFAULT_GENERIC_FIELDS = ["id", "display_name"];
 
+/** How the resolved field list was determined. */
+export type FieldSource = "explicit" | "preset" | "fallback";
+
+/** Outcome of the pure {@link resolveFields} resolver; consumed by the field-reporting layer. */
+export interface FieldResolution {
+  fields: string[];
+  source: FieldSource;
+  model: string;
+}
+
+/** Resolution metadata nested alongside the field list returned by {@link resolveFieldPreset}. */
+export interface FieldPresetResolution {
+  source: FieldSource;
+  model: string;
+}
+
 export interface OdooFieldMeta {
   type: string;
   store?: boolean;
@@ -92,37 +108,6 @@ export function pickSmartFields(fieldsMeta: Record<string, OdooFieldMeta>): stri
   return [...priority, ...rest].slice(0, SMART_FIELD_LIMIT);
 }
 export const CORE_MODEL_ALLOWLIST = ["project.task", "project.project", "res.partner", "res.users"];
-
-export type FieldSource = "explicit" | "preset" | "fallback";
-export interface FieldResolution {
-  source: FieldSource;
-  model: string;
-}
-
-/** Curated per-model default field presets. Add a model = add an entry; no code-path change.
- *  Exported for unit testing. */
-export const MODEL_FIELD_PRESETS: Record<string, string[]> = {
-  "project.task": DEFAULT_TASK_FIELDS,
-  "project.project": ["id", "name", "partner_id", "user_id"],
-  "res.partner": ["id", "name", "email", "phone"],
-  "res.users": ["id", "name", "login"]
-};
-
-/** Pure, synchronous field-preset resolver — NO Odoo round-trip on any path.
- *  explicit (non-empty requestedFields) → verbatim; known model → curated preset; else generic fallback. */
-export function resolveFieldPreset(
-  model: string,
-  requestedFields?: string[]
-): { fields: string[]; resolution: FieldResolution } {
-  if (requestedFields && requestedFields.length > 0) {
-    return { fields: requestedFields, resolution: { source: "explicit", model } };
-  }
-  const preset = MODEL_FIELD_PRESETS[model];
-  if (preset) {
-    return { fields: preset, resolution: { source: "preset", model } };
-  }
-  return { fields: DEFAULT_GENERIC_FIELDS, resolution: { source: "fallback", model } };
-}
 
 export function requireConnection(props: Props | undefined): OdooConnection {
   if (!props) throw new Error("Missing Odoo connection props");
@@ -251,7 +236,7 @@ export async function searchRecords(
   fieldsReport: FieldsReport;
 }> {
   const cappedLimit = Math.min(limit, 100);
-  const { fields: resolvedFields, fieldsMeta } = await resolveFields(queue, conn, model, fields);
+  const { fields: resolvedFields, fieldsMeta } = await resolveFieldsViaOdoo(queue, conn, model, fields);
   const rows = (await queue.enqueue(conn, model, "search_read", {
     domain,
     fields: resolvedFields,
@@ -298,7 +283,7 @@ export function parseDomainParam(uri: URL): unknown[] {
   return parsed;
 }
 
-async function resolveFields(
+async function resolveFieldsViaOdoo(
   queue: OdooQueue,
   conn: OdooConnection,
   model: string,
@@ -317,4 +302,52 @@ async function resolveFields(
   } catch {
     return { fields: DEFAULT_GENERIC_FIELDS, fieldsMeta: null }; // fields_get failed (e.g. bad model) — fall back rather than error the whole search
   }
+}
+
+/**
+ * Static, model-aware field presets. Every {@link CORE_MODEL_ALLOWLIST} model has a curated,
+ * read-safe entry; adding a model is a one-line map edit (no code-path change). `project.task`
+ * reuses {@link DEFAULT_TASK_FIELDS} so the two stay in lockstep.
+ */
+export const MODEL_FIELD_PRESETS: Record<string, string[]> = {
+  "project.task": DEFAULT_TASK_FIELDS, // id, name, stage_id, project_id
+  "project.project": ["id", "name", "partner_id", "user_id", "stage_id"],
+  "res.partner": ["id", "name", "email", "phone"],
+  "res.users": ["id", "name", "login", "email"]
+};
+
+/**
+ * Pure, model-aware field resolver. No Odoo round-trip on any path.
+ * - explicit non-empty requestedFields -> honored verbatim (order preserved), source "explicit"
+ * - no fields + known model            -> curated preset, source "preset"
+ * - no fields + unknown model          -> DEFAULT_GENERIC_FIELDS, source "fallback"
+ *
+ * An empty `requestedFields` array counts as "no explicit fields" and falls through to
+ * preset/fallback. `ALL_FIELDS_SENTINEL` ("__all__") is NOT interpreted here — that convention
+ * lives in {@link resolveFieldsViaOdoo}; this resolver returns it verbatim as an explicit field.
+ * Returned arrays alias the shared module constants — callers must not mutate them.
+ */
+export function resolveFields(model: string, requestedFields?: string[] | null): FieldResolution {
+  if (requestedFields != null && requestedFields.length > 0) {
+    return { fields: requestedFields, source: "explicit", model };
+  }
+  const preset = MODEL_FIELD_PRESETS[model];
+  if (preset) {
+    return { fields: preset, source: "preset", model };
+  }
+  return { fields: DEFAULT_GENERIC_FIELDS, source: "fallback", model };
+}
+
+/**
+ * Pure, synchronous field-preset resolver that pairs the resolved fields with nested resolution
+ * metadata (`{ fields, resolution: { source, model } }`). Thin shape-adapter over {@link resolveFields}
+ * so the two stay in lockstep — NO Odoo round-trip on any path. An empty `requestedFields` array
+ * falls through to the preset/fallback, and `ALL_FIELDS_SENTINEL` is returned verbatim as explicit.
+ */
+export function resolveFieldPreset(
+  model: string,
+  requestedFields?: string[]
+): { fields: string[]; resolution: FieldPresetResolution } {
+  const { fields, source } = resolveFields(model, requestedFields);
+  return { fields, resolution: { source, model } };
 }
