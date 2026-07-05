@@ -2162,7 +2162,12 @@ describe("tool metadata (title/annotations)", () => {
     const handler = getToolHandler(agent, "search_records");
     const result = await handler({ model: "project.task", domain: [], fields: ["id", "name"], limit: 10, offset: 0 });
 
-    expect(result.structuredContent).toEqual({ records: rows });
+    expect(result.structuredContent).toEqual({
+      records: rows,
+      returned_fields: ["id", "name"],
+      omitted_fields: [],
+      warnings: []
+    });
     expect(JSON.parse(result.content[0].text)).toEqual(rows);
     globalThis.fetch = originalFetch;
   });
