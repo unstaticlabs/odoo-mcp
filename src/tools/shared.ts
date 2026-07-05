@@ -7,6 +7,13 @@ import type { TtlCache } from "../cache";
 export const DEFAULT_TASK_FIELDS = ["id", "name", "stage_id", "project_id"];
 export const DEFAULT_GENERIC_FIELDS = ["id", "display_name"];
 
+/** Outcome of the pure {@link resolveFields} resolver; consumed by the field-reporting layer. */
+export interface FieldResolution {
+  fields: string[];
+  source: "explicit" | "preset" | "fallback";
+  model: string;
+}
+
 export interface OdooFieldMeta {
   type: string;
   store?: boolean;
@@ -220,7 +227,7 @@ export async function searchRecords(
   fieldsReport: FieldsReport;
 }> {
   const cappedLimit = Math.min(limit, 100);
-  const { fields: resolvedFields, fieldsMeta } = await resolveFields(queue, conn, model, fields);
+  const { fields: resolvedFields, fieldsMeta } = await resolveFieldsViaOdoo(queue, conn, model, fields);
   const rows = (await queue.enqueue(conn, model, "search_read", {
     domain,
     fields: resolvedFields,
@@ -267,7 +274,7 @@ export function parseDomainParam(uri: URL): unknown[] {
   return parsed;
 }
 
-async function resolveFields(
+async function resolveFieldsViaOdoo(
   queue: OdooQueue,
   conn: OdooConnection,
   model: string,
@@ -286,4 +293,38 @@ async function resolveFields(
   } catch {
     return { fields: DEFAULT_GENERIC_FIELDS, fieldsMeta: null }; // fields_get failed (e.g. bad model) — fall back rather than error the whole search
   }
+}
+
+/**
+ * Static, model-aware field presets. Every {@link CORE_MODEL_ALLOWLIST} model has a curated,
+ * read-safe entry; adding a model is a one-line map edit (no code-path change). `project.task`
+ * reuses {@link DEFAULT_TASK_FIELDS} so the two stay in lockstep.
+ */
+export const MODEL_FIELD_PRESETS: Record<string, string[]> = {
+  "project.task": DEFAULT_TASK_FIELDS, // id, name, stage_id, project_id
+  "project.project": ["id", "name", "partner_id", "user_id", "stage_id"],
+  "res.partner": ["id", "name", "email", "phone", "is_company"],
+  "res.users": ["id", "name", "login", "email"]
+};
+
+/**
+ * Pure, model-aware field resolver. No Odoo round-trip on any path.
+ * - explicit non-empty requestedFields -> honored verbatim (order preserved), source "explicit"
+ * - no fields + known model            -> curated preset, source "preset"
+ * - no fields + unknown model          -> DEFAULT_GENERIC_FIELDS, source "fallback"
+ *
+ * An empty `requestedFields` array counts as "no explicit fields" and falls through to
+ * preset/fallback. `ALL_FIELDS_SENTINEL` ("__all__") is NOT interpreted here — that convention
+ * lives in {@link resolveFieldsViaOdoo}; this resolver returns it verbatim as an explicit field.
+ * Returned arrays alias the shared module constants — callers must not mutate them.
+ */
+export function resolveFields(model: string, requestedFields?: string[] | null): FieldResolution {
+  if (requestedFields != null && requestedFields.length > 0) {
+    return { fields: requestedFields, source: "explicit", model };
+  }
+  const preset = MODEL_FIELD_PRESETS[model];
+  if (preset) {
+    return { fields: preset, source: "preset", model };
+  }
+  return { fields: DEFAULT_GENERIC_FIELDS, source: "fallback", model };
 }
