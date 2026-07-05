@@ -7,10 +7,19 @@ import type { TtlCache } from "../cache";
 export const DEFAULT_TASK_FIELDS = ["id", "name", "stage_id", "project_id"];
 export const DEFAULT_GENERIC_FIELDS = ["id", "display_name"];
 
+/** How the resolved field list was determined. */
+export type FieldSource = "explicit" | "preset" | "fallback";
+
 /** Outcome of the pure {@link resolveFields} resolver; consumed by the field-reporting layer. */
 export interface FieldResolution {
   fields: string[];
-  source: "explicit" | "preset" | "fallback";
+  source: FieldSource;
+  model: string;
+}
+
+/** Resolution metadata nested alongside the field list returned by {@link resolveFieldPreset}. */
+export interface FieldPresetResolution {
+  source: FieldSource;
   model: string;
 }
 
@@ -303,7 +312,7 @@ async function resolveFieldsViaOdoo(
 export const MODEL_FIELD_PRESETS: Record<string, string[]> = {
   "project.task": DEFAULT_TASK_FIELDS, // id, name, stage_id, project_id
   "project.project": ["id", "name", "partner_id", "user_id", "stage_id"],
-  "res.partner": ["id", "name", "email", "phone", "is_company"],
+  "res.partner": ["id", "name", "email", "phone"],
   "res.users": ["id", "name", "login", "email"]
 };
 
@@ -327,4 +336,18 @@ export function resolveFields(model: string, requestedFields?: string[] | null):
     return { fields: preset, source: "preset", model };
   }
   return { fields: DEFAULT_GENERIC_FIELDS, source: "fallback", model };
+}
+
+/**
+ * Pure, synchronous field-preset resolver that pairs the resolved fields with nested resolution
+ * metadata (`{ fields, resolution: { source, model } }`). Thin shape-adapter over {@link resolveFields}
+ * so the two stay in lockstep — NO Odoo round-trip on any path. An empty `requestedFields` array
+ * falls through to the preset/fallback, and `ALL_FIELDS_SENTINEL` is returned verbatim as explicit.
+ */
+export function resolveFieldPreset(
+  model: string,
+  requestedFields?: string[]
+): { fields: string[]; resolution: FieldPresetResolution } {
+  const { fields, source } = resolveFields(model, requestedFields);
+  return { fields, resolution: { source, model } };
 }
