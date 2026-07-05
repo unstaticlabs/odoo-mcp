@@ -2,6 +2,7 @@ import { z } from "zod";
 import { OdooError, type OdooConnection } from "../odoo";
 import type { OdooQueue } from "../odoo-queue";
 import type { Props } from "../server";
+import type { TtlCache } from "../cache";
 
 export const DEFAULT_TASK_FIELDS = ["id", "name", "stage_id", "project_id"];
 export const DEFAULT_GENERIC_FIELDS = ["id", "display_name"];
@@ -24,6 +25,63 @@ const EXPENSIVE_FIELD_TYPES = new Set(["binary", "one2many", "many2many"]);
 const PRIORITY_FIELD_NAMES = ["id", "name", "display_name", "state", "active"];
 export const SMART_FIELD_LIMIT = 15;
 export const ALL_FIELDS_SENTINEL = "__all__";
+
+export type OmissionReason = "absent-from-rows" | "unknown-field";
+
+export interface FieldOmission {
+  field: string;
+  reason: OmissionReason;
+}
+
+export interface FieldsReport {
+  returned_fields: string[];
+  omitted_fields: FieldOmission[];
+}
+
+/** Exported for unit testing (see callOdoo export pattern). */
+export function computeFieldsReport(
+  resolved: { fields: string[]; explicit: boolean },
+  rows: Record<string, unknown>[],
+  warnings: string[],
+  model: string,
+  opts?: { knownFields?: Set<string> }
+): FieldsReport {
+  if (resolved.fields.includes(ALL_FIELDS_SENTINEL)) {
+    return { returned_fields: [], omitted_fields: [] };
+  }
+
+  const isRowEmpty = rows.length === 0;
+  const returnedKeys = new Set<string>();
+  if (!isRowEmpty) {
+    for (const row of rows) {
+      if (row && typeof row === "object") {
+        for (const key of Object.keys(row)) {
+          returnedKeys.add(key);
+        }
+      }
+    }
+  }
+
+  const returned_fields: string[] = [];
+  const omitted_fields: FieldOmission[] = [];
+
+  for (const field of resolved.fields) {
+    if (!isRowEmpty && returnedKeys.has(field)) {
+      returned_fields.push(field);
+    } else {
+      let reason: OmissionReason = "absent-from-rows";
+      if (opts?.knownFields && !opts.knownFields.has(field)) {
+        reason = "unknown-field";
+      }
+      omitted_fields.push({ field, reason });
+      if (resolved.explicit) {
+        warnings.push(`${model}: requested field '${field}' was omitted (${reason})`);
+      }
+    }
+  }
+
+  return { returned_fields, omitted_fields };
+}
 
 /** Exported for unit testing (see callOdoo export pattern). */
 export function pickSmartFields(fieldsMeta: Record<string, OdooFieldMeta>): string[] {
@@ -160,18 +218,41 @@ export async function searchRecords(
   fields: string[] | null,
   limit: number,
   order?: string,
-  offset?: number
-): Promise<{ rows: unknown; fieldsMeta: Record<string, OdooFieldMeta> | null }> {
+  offset?: number,
+  cache?: TtlCache,
+  warnings: string[] = []
+): Promise<{
+  rows: unknown;
+  fieldsMeta: Record<string, OdooFieldMeta> | null;
+  fieldsReport: FieldsReport;
+}> {
   const cappedLimit = Math.min(limit, 100);
   const { fields: resolvedFields, fieldsMeta } = await resolveFieldsViaOdoo(queue, conn, model, fields);
-  const rows = await queue.enqueue(conn, model, "search_read", {
+  const rows = (await queue.enqueue(conn, model, "search_read", {
     domain,
     fields: resolvedFields,
     limit: cappedLimit,
     offset: offset ?? 0,
     ...(order ? { order } : {})
-  });
-  return { rows, fieldsMeta };
+  })) as Record<string, unknown>[];
+
+  let knownFields: Set<string> | undefined;
+  if (cache) {
+    const key = `fields:${conn.db}:${model}`;
+    const cachedMeta = cache.get<Record<string, unknown>>(key);
+    if (cachedMeta) {
+      knownFields = new Set(Object.keys(cachedMeta));
+    }
+  }
+
+  const resolved = {
+    fields: fields ?? resolvedFields,
+    explicit: fields !== null
+  };
+
+  const fieldsReport = computeFieldsReport(resolved, rows, warnings, model, { knownFields });
+
+  return { rows, fieldsMeta, fieldsReport };
 }
 
 export async function countRecords(queue: OdooQueue, conn: OdooConnection, model: string, domain: unknown[]): Promise<number> {

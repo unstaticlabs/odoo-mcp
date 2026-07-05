@@ -1090,6 +1090,8 @@ describe("create_record provenance stamping", () => {
     expect(text).toContain("77");
     expect(text).toContain(bodyToken);
     expect(text).toContain("include this token verbatim");
+    // The token must be front-loaded (before the id), not appended, so the model leads with it.
+    expect(text.indexOf(bodyToken)).toBeLessThan(text.indexOf("77"));
   });
 
   test("other model: single enqueue, no token, no marker post", async () => {
@@ -2160,7 +2162,12 @@ describe("tool metadata (title/annotations)", () => {
     const handler = getToolHandler(agent, "search_records");
     const result = await handler({ model: "project.task", domain: [], fields: ["id", "name"], limit: 10, offset: 0 });
 
-    expect(result.structuredContent).toEqual({ records: rows });
+    expect(result.structuredContent).toEqual({
+      records: rows,
+      returned_fields: ["id", "name"],
+      omitted_fields: [],
+      warnings: []
+    });
     expect(JSON.parse(result.content[0].text)).toEqual(rows);
     globalThis.fetch = originalFetch;
   });
