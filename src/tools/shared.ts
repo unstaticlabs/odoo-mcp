@@ -35,6 +35,37 @@ export function pickSmartFields(fieldsMeta: Record<string, OdooFieldMeta>): stri
 }
 export const CORE_MODEL_ALLOWLIST = ["project.task", "project.project", "res.partner", "res.users"];
 
+export type FieldSource = "explicit" | "preset" | "fallback";
+export interface FieldResolution {
+  source: FieldSource;
+  model: string;
+}
+
+/** Curated per-model default field presets. Add a model = add an entry; no code-path change.
+ *  Exported for unit testing. */
+export const MODEL_FIELD_PRESETS: Record<string, string[]> = {
+  "project.task": DEFAULT_TASK_FIELDS,
+  "project.project": ["id", "name", "partner_id", "user_id"],
+  "res.partner": ["id", "name", "email", "phone"],
+  "res.users": ["id", "name", "login"]
+};
+
+/** Pure, synchronous field-preset resolver — NO Odoo round-trip on any path.
+ *  explicit (non-empty requestedFields) → verbatim; known model → curated preset; else generic fallback. */
+export function resolveFieldPreset(
+  model: string,
+  requestedFields?: string[]
+): { fields: string[]; resolution: FieldResolution } {
+  if (requestedFields && requestedFields.length > 0) {
+    return { fields: requestedFields, resolution: { source: "explicit", model } };
+  }
+  const preset = MODEL_FIELD_PRESETS[model];
+  if (preset) {
+    return { fields: preset, resolution: { source: "preset", model } };
+  }
+  return { fields: DEFAULT_GENERIC_FIELDS, resolution: { source: "fallback", model } };
+}
+
 export function requireConnection(props: Props | undefined): OdooConnection {
   if (!props) throw new Error("Missing Odoo connection props");
   return { url: props.odooBaseUrl, db: props.odooDb, apiKey: props.odooApiKey };
