@@ -1090,6 +1090,8 @@ describe("create_record provenance stamping", () => {
     expect(text).toContain("77");
     expect(text).toContain(bodyToken);
     expect(text).toContain("include this token verbatim");
+    // The token must be front-loaded (before the id), not appended, so the model leads with it.
+    expect(text.indexOf(bodyToken)).toBeLessThan(text.indexOf("77"));
   });
 
   test("other model: single enqueue, no token, no marker post", async () => {
