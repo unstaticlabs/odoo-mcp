@@ -55,6 +55,16 @@ The server never logs, stores, or echoes your key.
 | `bookkeeping.preview_returns` | read | `company` (positive int), `from`/`to` (string), `return_type_xmlids` (string[] min 1) — which `account.return` cards should exist; blank periodicity → `configuration_issues` |
 | `bookkeeping.plan_safe_write` | validate-only | `operation` (enum: `create_or_update_report_external_value`, `create_manual_tax_return`, `update_return_type_periodicity`, `create_lock_exception`), `company` (string), `values` (object) — dry-run write plan + HMAC confirmation token; never writes |
 
+**`aggregate_records` validation.** Before calling Odoo `read_group`, the server validates `groupby` and
+`aggregates` against cached `fields_get` metadata:
+
+- **Groupby:** `many2one`, `selection`, `date`, and `datetime` fields (stored only). Date/datetime fields
+  may use an optional granularity bucket: `day`, `week`, `month`, `quarter`, or `year`
+  (e.g. `invoice_date:month`). Bare date/datetime fields are allowed (Odoo default grouping).
+- **Aggregates:** `__count`, or `field:sum` on `integer`, `float`, or `monetary` fields.
+- **Pre-flight errors** (returned as JSON envelopes, no `read_group` call): `invalid_groupby`,
+  `unsupported_aggregate`.
+
 Writes are gated by *your* Odoo user's access rights and record rules (BYO-key), so a caller
 can only do what their Odoo account permits.
 

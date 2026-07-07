@@ -3,10 +3,12 @@ import { z } from "zod";
 import type { OdooQueue } from "../odoo-queue";
 import type { Props } from "../server";
 import { CURATED_MODEL_ACTIONS, type CuratedAction } from "./actions-map";
+import { validateAggregationRequest } from "../aggregation";
 import {
   CORE_MODEL_ALLOWLIST,
   DEFAULT_TASK_FIELDS,
   countRecords,
+  mcpAggregationPreflightError,
   mcpError,
   mcpErrorFromException,
   mcpStructured,
@@ -257,7 +259,16 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
     async ({ model, domain, groupby, aggregates, lazy, orderby }) => {
       if (!model || !model.trim()) return mcpError("model must be a non-empty string");
       try {
-        const rows = await queue.enqueue(requireConnection(getProps()), model, "read_group", {
+        const conn = requireConnection(getProps());
+        const fieldsMeta = await getFieldsCached(cache, queue, conn, model);
+        const validation = validateAggregationRequest(groupby, aggregates, fieldsMeta);
+        if (!validation.ok) {
+          return mcpAggregationPreflightError(validation.issue.code, validation.issue.details, {
+            model,
+            field: validation.issue.field
+          });
+        }
+        const rows = await queue.enqueue(conn, model, "read_group", {
           domain,
           fields: aggregates,
           groupby,
