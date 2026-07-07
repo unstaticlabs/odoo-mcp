@@ -9,6 +9,10 @@ import {
   applyBrowseSafeguard,
   encodeBrowseCursor,
   decodeBrowseCursor,
+  parseBrowseResourceParams,
+  buildBrowseResourceUri,
+  BROWSE_DEFAULT_LIMIT,
+  NAMED_FIELD_PRESET_VALUES,
   BROWSE_MAX_PAYLOAD_BYTES,
   BROWSE_MIN_LIMIT,
   resolveCompactFields,
@@ -562,6 +566,185 @@ describe("applyBrowseSafeguard", () => {
     if (plan.action === "reject") {
       expect(plan.message).toContain("Result too large");
     }
+  });
+});
+
+describe("browse resource URI", () => {
+  const model = "sale.order";
+  const domain = [["state", "=", "sale"]];
+
+  test("happy path — all params set", () => {
+    const order = "id asc";
+    const cursor = encodeBrowseCursor({ offset: 50, model, domain, order });
+    const uri = buildBrowseResourceUri({
+      model,
+      domain,
+      field_preset: "tracking_minimal",
+      limit: 50,
+      offset: 50,
+      order,
+      cursor
+    });
+    const parsed = parseBrowseResourceParams(new URL(uri), model);
+    expect(parsed).toEqual({
+      model,
+      domain,
+      field_preset: "tracking_minimal",
+      fields: null,
+      limit: 50,
+      offset: 50,
+      order,
+      cursor
+    });
+    expect(buildBrowseResourceUri({
+      model: parsed.model,
+      domain: parsed.domain,
+      field_preset: parsed.field_preset,
+      fields: parsed.fields,
+      limit: parsed.limit,
+      offset: parsed.offset,
+      order: parsed.order,
+      cursor: parsed.cursor
+    })).toBe(uri);
+  });
+
+  test("defaults only — odoo://sale.order/browse", () => {
+    const parsed = parseBrowseResourceParams(new URL("odoo://sale.order/browse"), model);
+    expect(parsed).toEqual({
+      model,
+      domain: [],
+      field_preset: "minimal",
+      fields: null,
+      limit: BROWSE_DEFAULT_LIMIT,
+      offset: 0,
+      order: undefined,
+      cursor: undefined
+    });
+    expect(buildBrowseResourceUri({ model })).toBe("odoo://sale.order/browse");
+  });
+
+  test("empty domain explicit domain=[] parses; builder omits domain key", () => {
+    const parsed = parseBrowseResourceParams(new URL("odoo://sale.order/browse?domain=%5B%5D"), model);
+    expect(parsed.domain).toEqual([]);
+    expect(buildBrowseResourceUri({ model, domain: parsed.domain })).toBe("odoo://sale.order/browse");
+  });
+
+  test("explicit fields override — comma parsing trims; round-trip", () => {
+    const messyUri = "odoo://sale.order/browse?fields=+id+%2Cname%2C%2Cpartner_id";
+    const parsed = parseBrowseResourceParams(new URL(messyUri), model);
+    expect(parsed.fields).toEqual(["id", "name", "partner_id"]);
+    expect(parsed.field_preset).toBe("minimal");
+    const canonical = buildBrowseResourceUri({
+      model: parsed.model,
+      domain: parsed.domain,
+      field_preset: parsed.field_preset,
+      fields: parsed.fields,
+      limit: parsed.limit,
+      offset: parsed.offset,
+      order: parsed.order
+    });
+    expect(canonical).toBe("odoo://sale.order/browse?fields=id%2Cname%2Cpartner_id");
+    expect(parseBrowseResourceParams(new URL(canonical), model).fields).toEqual(["id", "name", "partner_id"]);
+  });
+
+  test("each field_preset enum value accepted", () => {
+    for (const preset of NAMED_FIELD_PRESET_VALUES) {
+      const uri = buildBrowseResourceUri({ model, field_preset: preset });
+      const parsed = parseBrowseResourceParams(new URL(uri), model);
+      expect(parsed.field_preset).toBe(preset);
+    }
+  });
+
+  test("invalid field_preset throws Error", () => {
+    expect(() =>
+      parseBrowseResourceParams(new URL("odoo://sale.order/browse?field_preset=verbose"), model)
+    ).toThrow(/Invalid browse resource field_preset/);
+  });
+
+  test("invalid limit throws Error", () => {
+    for (const bad of ["0", "101", "NaN", "1.5"]) {
+      expect(() =>
+        parseBrowseResourceParams(new URL(`odoo://sale.order/browse?limit=${bad}`), model)
+      ).toThrow(/Invalid browse resource limit/);
+    }
+  });
+
+  test("invalid offset throws Error", () => {
+    for (const bad of ["-1", "NaN", "1.5"]) {
+      expect(() =>
+        parseBrowseResourceParams(new URL(`odoo://sale.order/browse?offset=${bad}`), model)
+      ).toThrow(/Invalid browse resource offset/);
+    }
+  });
+
+  test("invalid domain JSON throws Error", () => {
+    expect(() =>
+      parseBrowseResourceParams(new URL("odoo://sale.order/browse?domain=not-json"), model)
+    ).toThrow(/domain query param must be valid JSON array/);
+  });
+
+  test("invalid / corrupt cursor throws Error", () => {
+    expect(() =>
+      parseBrowseResourceParams(new URL("odoo://sale.order/browse?cursor=!!!"), model)
+    ).toThrow(/Invalid browse resource cursor/);
+  });
+
+  test("cursor + offset both present — resolved offset from cursor; raw cursor preserved", () => {
+    const cursor = encodeBrowseCursor({ offset: 25, model, domain: [] });
+    const parsed = parseBrowseResourceParams(
+      new URL(`odoo://sale.order/browse?offset=99&cursor=${encodeURIComponent(cursor)}`),
+      model
+    );
+    expect(parsed.offset).toBe(25);
+    expect(parsed.cursor).toBe(cursor);
+  });
+
+  test("builder round-trip — build → parse → build stable string equality", () => {
+    const input = {
+      model,
+      domain,
+      field_preset: "financial_minimal" as const,
+      limit: 40,
+      order: "name desc"
+    };
+    const built = buildBrowseResourceUri(input);
+    const parsed = parseBrowseResourceParams(new URL(built), model);
+    const rebuilt = buildBrowseResourceUri({
+      model: parsed.model,
+      domain: parsed.domain,
+      field_preset: parsed.field_preset,
+      fields: parsed.fields,
+      limit: parsed.limit,
+      offset: parsed.offset,
+      order: parsed.order,
+      cursor: parsed.cursor
+    });
+    expect(rebuilt).toBe(built);
+  });
+
+  test("continuation page — cursor + next_offset from page meta", () => {
+    const order = "id asc";
+    const nextOffset = 25;
+    const cursor = encodeBrowseCursor({ offset: nextOffset, model, domain, order });
+    const uri = buildBrowseResourceUri({
+      model,
+      domain,
+      limit: 25,
+      offset: nextOffset,
+      order,
+      cursor
+    });
+    const parsed = parseBrowseResourceParams(new URL(uri), model);
+    expect(parsed.offset).toBe(nextOffset);
+    expect(parsed.cursor).toBe(cursor);
+  });
+
+  test("order with spaces trimmed on parse", () => {
+    const parsed = parseBrowseResourceParams(
+      new URL("odoo://sale.order/browse?order=%20id%20asc%20"),
+      model
+    );
+    expect(parsed.order).toBe("id asc");
   });
 });
 

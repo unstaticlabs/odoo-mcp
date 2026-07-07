@@ -1163,6 +1163,146 @@ export function decodeBrowseCursor(
   return { offset: parsed.o };
 }
 
+/** Args extracted from a browse resource URI, ready for browseRecords. */
+export type BrowseResourceParams = {
+  model: string;
+  domain: unknown[];
+  field_preset: NamedFieldPreset;
+  /** Explicit override; null when preset-driven. When non-null, callers pass this to browseRecords instead of preset resolution. */
+  fields: string[] | null;
+  limit: number;
+  offset: number;
+  order: string | undefined;
+  /** Original cursor query value, if any (for round-trip / debugging). */
+  cursor: string | undefined;
+};
+
+/** Input to buildBrowseResourceUri. */
+export type BrowseResourceUriInput = {
+  model: string;
+  domain?: unknown[];
+  field_preset?: NamedFieldPreset;
+  fields?: string[] | null;
+  limit?: number;
+  offset?: number;
+  cursor?: string;
+  order?: string;
+};
+
+/**
+ * Parses `odoo://{model}/browse?…` query params into args for browseRecords.
+ * Validation mirrors zBrowseRecordsInput in read.ts. Throws Error on invalid input.
+ * When explicit `fields` are present, field_preset is parsed for metadata only.
+ */
+export function parseBrowseResourceParams(url: URL, modelFromPath: string): BrowseResourceParams {
+  const model = modelFromPath.trim();
+  if (!model) throw new Error("model must be a non-empty string");
+
+  const domain = parseDomainParam(url);
+
+  const fieldPresetRaw = url.searchParams.get("field_preset");
+  let field_preset: NamedFieldPreset = "minimal";
+  if (fieldPresetRaw != null && fieldPresetRaw !== "") {
+    if (!(NAMED_FIELD_PRESET_VALUES as readonly string[]).includes(fieldPresetRaw)) {
+      throw new Error(
+        `Invalid browse resource field_preset: ${fieldPresetRaw}; allowed: ${NAMED_FIELD_PRESET_VALUES.join(", ")}`
+      );
+    }
+    field_preset = fieldPresetRaw as NamedFieldPreset;
+  }
+
+  const fieldsParam = url.searchParams.get("fields");
+  let fields: string[] | null = null;
+  if (fieldsParam != null && fieldsParam !== "") {
+    const parsed = fieldsParam
+      .split(",")
+      .map((f) => f.trim())
+      .filter(Boolean);
+    if (parsed.length > 0) {
+      fields = parsed;
+    }
+  }
+
+  const limitParam = url.searchParams.get("limit");
+  let limit = BROWSE_DEFAULT_LIMIT;
+  if (limitParam != null && limitParam !== "") {
+    const limitNum = Number(limitParam);
+    if (!Number.isInteger(limitNum) || limitNum < 1 || limitNum > 100) {
+      throw new Error(`Invalid browse resource limit: ${limitParam}; must be an integer from 1 to 100`);
+    }
+    limit = limitNum;
+  }
+
+  const offsetParam = url.searchParams.get("offset");
+  let offset = 0;
+  if (offsetParam != null && offsetParam !== "") {
+    const offsetNum = Number(offsetParam);
+    if (!Number.isInteger(offsetNum) || offsetNum < 0) {
+      throw new Error(`Invalid browse resource offset: ${offsetParam}; must be a non-negative integer`);
+    }
+    offset = offsetNum;
+  }
+
+  const orderRaw = url.searchParams.get("order");
+  const order = orderRaw?.trim() || undefined;
+
+  const cursorRaw = url.searchParams.get("cursor");
+  let cursor: string | undefined;
+  if (cursorRaw != null && cursorRaw !== "") {
+    cursor = cursorRaw;
+    const decoded = decodeBrowseCursor(cursor, { model, domain, order });
+    if ("error" in decoded) {
+      throw new Error(`Invalid browse resource cursor: ${decoded.error}`);
+    }
+    offset = decoded.offset;
+  }
+
+  return { model, domain, field_preset, fields, limit, offset, order, cursor };
+}
+
+/**
+ * Builds a canonical `odoo://{model}/browse?…` URI from browse args.
+ * Omits default-valued query keys. Use without cursor/offset for first-page tool resource_uri;
+ * pass cursor (and offset when continuing) for pagination links.
+ */
+export function buildBrowseResourceUri(input: BrowseResourceUriInput): string {
+  const model = input.model;
+  const domain = input.domain ?? [];
+  const fieldPreset = input.field_preset ?? "minimal";
+  const fields = input.fields ?? null;
+  const limit = input.limit ?? BROWSE_DEFAULT_LIMIT;
+  const offset = input.offset ?? 0;
+  const cursor = input.cursor;
+  const order = input.order?.trim() || undefined;
+
+  const params = new URLSearchParams();
+
+  if (domain.length > 0) {
+    params.set("domain", JSON.stringify(domain));
+  }
+  if (fieldPreset !== "minimal") {
+    params.set("field_preset", fieldPreset);
+  }
+  if (fields != null && fields.length > 0) {
+    params.set("fields", fields.join(","));
+  }
+  if (limit !== BROWSE_DEFAULT_LIMIT) {
+    params.set("limit", String(limit));
+  }
+  if (offset !== 0 || cursor) {
+    params.set("offset", String(offset));
+  }
+  if (order) {
+    params.set("order", order);
+  }
+  if (cursor) {
+    params.set("cursor", cursor);
+  }
+
+  const query = params.toString();
+  return query ? `odoo://${model}/browse?${query}` : `odoo://${model}/browse`;
+}
+
 export async function browseRecords(
   queue: OdooQueue,
   conn: OdooConnection,
