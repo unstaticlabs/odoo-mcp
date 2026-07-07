@@ -42,7 +42,7 @@ The server never logs, stores, or echoes your key.
 | `list_models` | read | — |
 | `get_fields` | read | `model` (string) → field name/type/label schema |
 | `projects.list_tasks` | read | `domain` (array), `fields` (string[]) — convenience wrapper over `project.task`; includes field reporting |
-| `aggregate_records` | read | `model` (string), `domain` (array), `groupby` (string[], Odoo `field:agg` syntax e.g. `invoice_date:month`), `aggregates` (string[], e.g. `amount_total:sum`, `__count`), `lazy` (bool, default true), `orderby` (string, optional), `limit` (1–100, default 100, fallback scan cap), `offset` (int ≥ 0, default 0) — native `read_group` with bounded connector fallback |
+| [`aggregate_records`](#aggregate_records--grouped-summaries) | read | `model` (string), `domain` (array), `groupby` (string[], Odoo `field:agg` syntax e.g. `invoice_date:month`), `aggregates` (string[], e.g. `amount_total:sum`, `__count`), `lazy` (bool, default true), `orderby` (string, optional), `limit` (1–100, default 100, fallback scan cap), `offset` (int ≥ 0, default 0) — native `read_group` with bounded connector fallback |
 | `create_record` | write | `model` (string), `values` (object) |
 | `update_record` | write | `model` (string), `record_id` (positive int), `values` (object; x2many use Odoo command tuples, e.g. `[[6,0,ids]]`, `[[4,id]]`, `[[3,id]]`) |
 | `delete_record` | write | `model` (string), `record_id` (positive int) |
