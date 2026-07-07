@@ -26,7 +26,8 @@ npx @modelcontextprotocol/inspector
 ```
 
 In the Inspector UI: transport **Streamable HTTP**, URL `http://localhost:8787/mcp`, and add the
-three headers above. Then **List Tools** and try `search_records` or `browse_records`.
+three headers above. Then **List Tools** and try `search_records` or `browse_records` (compact
+paginated triage with `field_preset` / `offset` paging).
 
 ### b) Claude Code
 
@@ -92,6 +93,35 @@ await client.close();
 ```bash
 ODOO_API_KEY=… ODOO_URL=https://your-org.odoo.com ODOO_DB=your-db node smoke.mjs
 ```
+
+### e) `browse_records` hermetic coverage
+
+`bun test` exercises `browse_records` without live Odoo:
+
+- single-page happy path (structured output schema validation via `validatedToolHandler`),
+  including `returned_fields`, `omitted_fields`, and `warnings`
+- empty page success envelope (`records: []`, `count: 0`)
+- two-page pagination stability (`offset` + stable `order`, `has_more` / `count`)
+- explicit `fields` overriding `field_preset` (warning emitted)
+- oversized-payload safeguard (auto-shrinks `limit` with warnings, not `isError`)
+
+**Manual Inspector example** (section 1a): after connecting with BYO-key headers, call
+`browse_records` on `project.task` with:
+
+```json
+{
+  "model": "project.task",
+  "domain": [],
+  "field_preset": "tracking_minimal",
+  "limit": 25,
+  "offset": 25,
+  "order": "id asc"
+}
+```
+
+Expect a structured envelope with `records`, `page` (`offset`, `limit`, `count`, `returned`,
+`has_more`), `field_resolution`, `returned_fields`, `omitted_fields`, and `warnings`. Increase
+`offset` by `returned` while `has_more` is true to walk additional pages.
 
 ---
 

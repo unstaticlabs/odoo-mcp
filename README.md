@@ -155,6 +155,34 @@ Explicit `fields` override any preset. Every response includes `page` metadata
 `batch_read({ model, ids: [...], fields: null })` or `get_record` for full detail
 on selected records only.
 
+### Compact browse (`browse_records`)
+
+Use `browse_records` when you need to triage many matches without overflowing the chat
+response. It returns a **small field subset per row** (via named presets or explicit
+`fields`), plus paging metadata and field provenance.
+
+**Paging:** every success response includes `page` with `offset`, `limit`, `count` (total
+matching rows), `returned` (rows in this page), and `has_more`. Continue with the next page
+by increasing `offset` by `returned` while `has_more` is true. Pass a stable `order` when
+paging so row order stays consistent across calls.
+
+**Field presets:** `field_preset` selects a model-aware compact field list:
+- `minimal` — curated core columns for known models (`project.task`, `project.project`,
+  `res.partner`, `res.users`); generic `id` + `display_name` fallback for unknown models.
+- `tracking_minimal` — workflow/triage fields (stage, assignees, deadlines, state, …).
+- `financial_minimal` — amount/partner/account oriented subsets where curated.
+
+When both `field_preset` and explicit `fields` are supplied, **explicit `fields` win** and a
+`warnings` entry notes the override. The response always states which fields were returned
+(`returned_fields`) and which were omitted (`omitted_fields` + reasons).
+
+**Drill-down:** ids from compact rows can be fetched in full with existing `batch_read` or
+`get_record` — no separate expand tool is required.
+
+**Oversized pages:** when a page would exceed a chat-safe payload threshold, the tool shrinks
+`limit` and/or downgrades the preset before (or after) the Odoo fetch and records the
+adjustment in `warnings` rather than failing the call.
+
 ## Resources
 
 In addition to tools, the server exposes read-only Odoo data as **MCP resources** via URI
