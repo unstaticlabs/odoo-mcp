@@ -26,8 +26,8 @@ npx @modelcontextprotocol/inspector
 ```
 
 In the Inspector UI: transport **Streamable HTTP**, URL `http://localhost:8787/mcp`, and add the
-three headers above. Then **List Tools** and try `search_records` or `browse_records` (compact
-paginated triage with `field_preset` / `offset` paging).
+three headers above. Then **List Tools** and try `search_records` or `browse_records`
+(compact paginated triage with `field_preset`, `offset` or `cursor` paging).
 
 ### b) Claude Code
 
@@ -96,32 +96,26 @@ ODOO_API_KEY=… ODOO_URL=https://your-org.odoo.com ODOO_DB=your-db node smoke.m
 
 ### e) `browse_records` hermetic coverage
 
-`bun test` exercises `browse_records` without live Odoo:
 
-- single-page happy path (structured output schema validation via `validatedToolHandler`),
-  including `returned_fields`, `omitted_fields`, and `warnings`
-- empty page success envelope (`records: []`, `count: 0`)
-- two-page pagination stability (`offset` + stable `order`, `has_more` / `count`)
-- explicit `fields` overriding `field_preset` (warning emitted)
-- oversized-payload safeguard (auto-shrinks `limit` with warnings, not `isError`)
+`bun test` exercises `browse_records` without a live Odoo instance:
 
-**Manual Inspector example** (section 1a): after connecting with BYO-key headers, call
-`browse_records` on `project.task` with:
-
-```json
-{
-  "model": "project.task",
-  "domain": [],
-  "field_preset": "tracking_minimal",
-  "limit": 25,
-  "offset": 25,
-  "order": "id asc"
-}
-```
-
-Expect a structured envelope with `records`, `page` (`offset`, `limit`, `count`, `returned`,
-`has_more`), `field_resolution`, `returned_fields`, `omitted_fields`, and `warnings`. Increase
-`offset` by `returned` while `has_more` is true to walk additional pages.
+- **Single-page happy path** — structured output schema validation (including
+  `returned_fields`, `omitted_fields`, `warnings`, and `page` metadata).
+- **Empty page** — success envelope with `records: []` and `page.count: 0` (not
+  `isError`).
+- **Two-page pagination stability** — `offset` + stable `order`; asserts `has_more`,
+  `count`, and no duplicate ids across pages.
+- **Field presets** — `minimal`, `tracking_minimal`, and `financial_minimal` on known
+  models plus unknown-model fallback (`resolveNamedFieldPreset` in `shared.test.ts`).
+- **Cursor paging** — `cursor` input and `page.next_cursor` / `page.next_offset`
+  continuation across calls with stable `order`.
+- **Explicit fields** — non-empty `fields` override `field_preset`;
+  `fields_resolution.source` is `explicit` and `field_preset` is `null`.
+- **Oversized-payload safeguard** — halves `limit` (min 5) on first oversize, then
+  downgrades any non-`minimal` preset directly to `minimal`; successful adjustments set
+  `safeguard_applied`; after one retry, still oversize → `isError`.
+- **`shared.test.ts`** — `resolveNamedFieldPreset`, `buildBrowsePageMeta`, and
+  `applyBrowseSafeguard` unit coverage.
 
 ---
 

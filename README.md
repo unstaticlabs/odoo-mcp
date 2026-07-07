@@ -35,7 +35,7 @@ The server never logs, stores, or echoes your key.
 | Tool | Kind | Parameters |
 |---|---|---|
 | `search_records` | read | `model` (string), `domain` (array, default `[]`), `fields` (string[] \| null → curated preset), `limit` (1–100, default 10), `order` (string, optional, e.g. `"name desc"`), `offset` (int ≥ 0, default 0) → includes `returned_fields`, `omitted_fields`, `warnings` |
-| `browse_records` | read | `model` (string), `domain` (array, default `[]`), `field_preset` (`minimal` \| `tracking_minimal` \| `financial_minimal`, default `minimal`), `fields` (string[] \| null — explicit override; mutually exclusive with non-default preset), `limit` (1–100, default 25), `offset` (int ≥ 0, default 0), `cursor` (string \| null, optional offset alias), `order` (string, optional — use stable order when paging) → compact rows + `page` metadata (`count`, `has_more`, `next_offset`) |
+| `browse_records` | read | `model` (string), `domain` (array, default `[]`), `field_preset` (`minimal` \| `tracking_minimal` \| `financial_minimal`, default `minimal`), `fields` (string[] \| null — explicit override; mutually exclusive with non-default preset), `limit` (1–100, default 25), `offset` (int ≥ 0, default 0), `cursor` (string \| null, optional — stable continuation token), `order` (string, optional) → compact rows with `page`, `field_preset`, `fields_resolution`, `returned_fields`, `omitted_fields`, `warnings`, optional `safeguard_applied` |
 | `search_count` | read | `model` (string), `domain` (array, default `[]`) → `{ count }` via `search_count`, without fetching records |
 | `get_record` | read | `model` (string), `record_id` (positive int), `fields` (string[] \| null → curated preset) → includes field reporting |
 | `batch_read` | read | `model` (string), `ids` (positive int[], min 1, capped at 100), `fields` (string[] \| null → curated preset) → rows via `search_read` + field reporting |
@@ -263,7 +263,8 @@ npx wrangler deploy
 
 - `npm run typecheck` — `tsc --noEmit`
 - `npx wrangler deploy --dry-run` — bundle check
-- CI gate: `.ci.json` (install → typecheck → deploy dry-run)
+- `bun test` — hermetic unit/integration tests
+- CI gate: `.ci.json` (install → typecheck → test → deploy dry-run)
 
 ## License
 
