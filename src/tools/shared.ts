@@ -662,3 +662,351 @@ export function capBrowsePage(input: {
     adjustments
   };
 }
+
+/* ---- browse_records engine (ODOO1353) ---- */
+
+export const NAMED_FIELD_PRESET_VALUES = ["minimal", "tracking_minimal", "financial_minimal"] as const;
+
+export interface NamedPresetResolution {
+  fields: string[];
+  preset: NamedFieldPreset | null;
+  source: FieldSource;
+  model: string;
+}
+
+const TRACKING_GENERIC_FALLBACK = ["id", "display_name", "state"];
+const FINANCIAL_GENERIC_FALLBACK = ["id", "display_name", "amount_total"];
+
+/**
+ * Two-level preset registry for browse_records. `minimal` reuses {@link MODEL_FIELD_PRESETS}
+ * entries and adds accounting/HR models; other presets are browse-specific curated lists.
+ */
+export const NAMED_MODEL_FIELD_PRESETS: Record<NamedFieldPreset, Record<string, string[]>> = {
+  minimal: {
+    ...MODEL_FIELD_PRESETS,
+    "account.move": ["id", "name", "move_type", "state", "partner_id", "amount_total", "invoice_date"],
+    "account.move.line": ["id", "name", "account_id", "debit", "credit", "balance"],
+    "hr.expense": ["id", "name", "employee_id", "state", "total_amount", "date"]
+  },
+  tracking_minimal: {
+    "project.task": ["id", "name", "stage_id", "project_id", "priority", "date_deadline"],
+    "project.project": ["id", "name", "stage_id", "user_id", "date_start", "date"],
+    "account.move": ["id", "name", "state", "move_type", "partner_id", "invoice_date", "payment_state"],
+    "hr.expense": ["id", "name", "state", "employee_id", "date", "total_amount"]
+  },
+  financial_minimal: {
+    "account.move": [
+      "id",
+      "name",
+      "move_type",
+      "state",
+      "partner_id",
+      "amount_untaxed",
+      "amount_tax",
+      "amount_total",
+      "currency_id",
+      "invoice_date",
+      "date"
+    ],
+    "account.move.line": [
+      "id",
+      "name",
+      "account_id",
+      "partner_id",
+      "debit",
+      "credit",
+      "balance",
+      "amount_currency",
+      "date"
+    ],
+    "account.payment": ["id", "name", "state", "partner_id", "amount", "date", "payment_type"],
+    "res.partner": ["id", "name", "credit", "debit", "total_invoiced"]
+  }
+};
+
+const PRESET_GENERIC_FALLBACKS: Record<NamedFieldPreset, string[]> = {
+  minimal: DEFAULT_GENERIC_FIELDS,
+  tracking_minimal: TRACKING_GENERIC_FALLBACK,
+  financial_minimal: FINANCIAL_GENERIC_FALLBACK
+};
+
+/**
+ * Browse-specific field resolver — pure, no Odoo round-trip.
+ * - explicit non-empty fields → verbatim, preset null, source explicit
+ * - fieldPreset → model entry or preset-specific generic fallback
+ * - neither → defaults to `minimal` preset
+ */
+export function resolveNamedFieldPreset(
+  model: string,
+  fieldPreset?: NamedFieldPreset,
+  explicitFields?: string[] | null
+): NamedPresetResolution {
+  if (explicitFields != null && explicitFields.length > 0) {
+    return { fields: explicitFields, preset: null, source: "explicit", model };
+  }
+  const preset: NamedFieldPreset = fieldPreset ?? "minimal";
+  const modelFields = NAMED_MODEL_FIELD_PRESETS[preset][model];
+  if (modelFields) {
+    return { fields: modelFields, preset, source: "preset", model };
+  }
+  return { fields: PRESET_GENERIC_FALLBACKS[preset], preset, source: "fallback", model };
+}
+
+export interface BrowsePageMeta {
+  offset: number;
+  limit: number;
+  count: number;
+  returned: number;
+  has_more: boolean;
+  next_offset: number | null;
+  next_cursor?: string | null;
+}
+
+export interface BrowseResult {
+  records: Record<string, unknown>[];
+  page: BrowsePageMeta;
+  field_preset: NamedFieldPreset | null;
+  fields_resolution: { source: FieldSource; model: string };
+  returned_fields: string[];
+  omitted_fields: FieldOmission[];
+  warnings: string[];
+  safeguard_applied?: string;
+}
+
+export const BROWSE_DEFAULT_LIMIT = 25;
+export const BROWSE_MAX_PAYLOAD_BYTES = 256_000;
+export const BROWSE_MIN_LIMIT = 5;
+
+/** Exported for unit testing. */
+export function estimateBrowseJsonBytes(records: unknown[]): number {
+  return JSON.stringify(records).length;
+}
+
+/** Exported for unit testing. */
+export function buildBrowsePageMeta(offset: number, limit: number, count: number, returned: number): BrowsePageMeta {
+  const has_more = offset + returned < count;
+  return {
+    offset,
+    limit,
+    count,
+    returned,
+    has_more,
+    next_offset: has_more ? offset + returned : null
+  };
+}
+
+export type BrowseSafeguardPlan =
+  | { action: "accept" }
+  | { action: "retry"; newLimit: number; newPreset: NamedFieldPreset; safeguardApplied: string }
+  | { action: "accept_with_warning"; warning: string }
+  | { action: "reject"; message: string };
+
+/** Exported for unit testing — decides the next step when a browse payload is oversized. */
+export function applyBrowseSafeguard(
+  payloadBytes: number,
+  limit: number,
+  preset: NamedFieldPreset,
+  alreadyRetried: boolean
+): BrowseSafeguardPlan {
+  if (payloadBytes <= BROWSE_MAX_PAYLOAD_BYTES) {
+    return { action: "accept" };
+  }
+  if (!alreadyRetried) {
+    if (limit > BROWSE_MIN_LIMIT) {
+      const newLimit = Math.max(BROWSE_MIN_LIMIT, Math.floor(limit / 2));
+      return {
+        action: "retry",
+        newLimit,
+        newPreset: preset,
+        safeguardApplied: `limit reduced ${limit}→${newLimit} due to payload size`
+      };
+    }
+    if (preset !== "minimal") {
+      return {
+        action: "retry",
+        newLimit: limit,
+        newPreset: "minimal",
+        safeguardApplied: `field_preset downgraded ${preset}→minimal due to payload size`
+      };
+    }
+  }
+  if (payloadBytes > BROWSE_MAX_PAYLOAD_BYTES) {
+    return {
+      action: "reject",
+      message: `Result too large (${payloadBytes} bytes). Reduce limit, use a slimmer field_preset, or narrow domain.`
+    };
+  }
+  return {
+    action: "accept_with_warning",
+    warning: `payload truncated safeguard: result is ${payloadBytes} bytes (cap ${BROWSE_MAX_PAYLOAD_BYTES})`
+  };
+}
+
+function base64urlEncode(text: string): string {
+  const bytes = new TextEncoder().encode(text);
+  let binary = "";
+  for (const b of bytes) binary += String.fromCharCode(b);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function base64urlDecode(text: string): string {
+  const padded = text.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - (text.length % 4)) % 4);
+  const binary = atob(padded);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new TextDecoder().decode(bytes);
+}
+
+interface BrowseCursorPayload {
+  o: number;
+  m: string;
+  d: unknown[];
+  ord: string;
+}
+
+function browseCursorKey(payload: BrowseCursorPayload): string {
+  return JSON.stringify({ m: payload.m, d: payload.d, ord: payload.ord });
+}
+
+/** Exported for unit testing. */
+export function encodeBrowseCursor(opts: {
+  offset: number;
+  model: string;
+  domain: unknown[];
+  order?: string;
+}): string {
+  const payload: BrowseCursorPayload = {
+    o: opts.offset,
+    m: opts.model,
+    d: opts.domain,
+    ord: opts.order ?? ""
+  };
+  const json = JSON.stringify(payload);
+  return base64urlEncode(json);
+}
+
+/** Exported for unit testing. Returns offset or an error message when the cursor is stale. */
+export function decodeBrowseCursor(
+  cursor: string,
+  expected: { model: string; domain: unknown[]; order?: string }
+): { offset: number } | { error: string } {
+  let parsed: BrowseCursorPayload;
+  try {
+    const json = base64urlDecode(cursor);
+    parsed = JSON.parse(json) as BrowseCursorPayload;
+  } catch {
+    return { error: "invalid cursor encoding" };
+  }
+  const expectedKey = browseCursorKey({
+    o: 0,
+    m: expected.model,
+    d: expected.domain,
+    ord: expected.order ?? ""
+  });
+  const actualKey = browseCursorKey(parsed);
+  if (actualKey !== expectedKey) {
+    return { error: "cursor does not match current query" };
+  }
+  if (typeof parsed.o !== "number" || parsed.o < 0 || !Number.isInteger(parsed.o)) {
+    return { error: "invalid cursor offset" };
+  }
+  return { offset: parsed.o };
+}
+
+export async function browseRecords(
+  queue: OdooQueue,
+  conn: OdooConnection,
+  options: {
+    model: string;
+    domain: unknown[];
+    fieldPreset?: NamedFieldPreset;
+    fields?: string[] | null;
+    limit?: number;
+    offset?: number;
+    order?: string;
+  },
+  warnings: string[] = []
+): Promise<BrowseResult> {
+  const model = options.model;
+  if (!model || !model.trim()) throw new Error("model must be a non-empty string");
+
+  let limit = Math.min(options.limit ?? BROWSE_DEFAULT_LIMIT, 100);
+  let offset = options.offset ?? 0;
+  const domain = options.domain;
+  const order = options.order;
+
+  let fieldPreset: NamedFieldPreset = options.fieldPreset ?? "minimal";
+  let resolution = resolveNamedFieldPreset(model, fieldPreset, options.fields);
+  let safeguardApplied: string | undefined;
+  let alreadyRetried = false;
+
+  const count = await countRecords(queue, conn, model, domain);
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const rows = (await queue.enqueue(conn, model, "search_read", {
+      domain,
+      fields: resolution.fields,
+      limit,
+      offset,
+      ...(order ? { order } : {})
+    })) as Record<string, unknown>[];
+
+    const fieldsReport = computeFieldsReport(
+      { fields: resolution.fields, explicit: resolution.source === "explicit" },
+      rows,
+      warnings,
+      model
+    );
+
+    const payloadBytes = estimateBrowseJsonBytes(rows);
+    const plan = applyBrowseSafeguard(payloadBytes, limit, fieldPreset, alreadyRetried);
+
+    if (plan.action === "accept") {
+      const page = buildBrowsePageMeta(offset, limit, count, rows.length);
+      if (page.next_offset != null && order !== undefined) {
+        page.next_cursor = encodeBrowseCursor({ offset: page.next_offset, model, domain, order });
+      } else if (page.next_offset != null) {
+        page.next_cursor = encodeBrowseCursor({ offset: page.next_offset, model, domain, order: "" });
+      }
+
+      return {
+        records: rows,
+        page,
+        field_preset: resolution.preset,
+        fields_resolution: { source: resolution.source, model: resolution.model },
+        returned_fields: fieldsReport.returned_fields,
+        omitted_fields: fieldsReport.omitted_fields,
+        warnings,
+        ...(safeguardApplied ? { safeguard_applied: safeguardApplied } : {})
+      };
+    }
+
+    if (plan.action === "retry") {
+      limit = plan.newLimit;
+      fieldPreset = plan.newPreset;
+      safeguardApplied = plan.safeguardApplied;
+      resolution = resolveNamedFieldPreset(model, fieldPreset, options.fields);
+      alreadyRetried = true;
+      continue;
+    }
+
+    if (plan.action === "accept_with_warning") {
+      warnings.push(plan.warning);
+      const page = buildBrowsePageMeta(offset, limit, count, rows.length);
+      return {
+        records: rows,
+        page,
+        field_preset: resolution.preset,
+        fields_resolution: { source: resolution.source, model: resolution.model },
+        returned_fields: fieldsReport.returned_fields,
+        omitted_fields: fieldsReport.omitted_fields,
+        warnings,
+        ...(safeguardApplied ? { safeguard_applied: safeguardApplied } : {})
+      };
+    }
+
+    throw new Error(plan.message);
+  }
+
+  throw new Error("browseRecords: safeguard loop exhausted without result");
+}

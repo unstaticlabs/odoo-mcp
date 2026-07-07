@@ -26,7 +26,7 @@ npx @modelcontextprotocol/inspector
 ```
 
 In the Inspector UI: transport **Streamable HTTP**, URL `http://localhost:8787/mcp`, and add the
-three headers above. Then **List Tools** and try `search_records`.
+three headers above. Then **List Tools** and try `search_records` or `browse_records`.
 
 ### b) Claude Code
 
@@ -73,6 +73,19 @@ const res = await client.callTool({
 console.log(res.content.map(c => c.text).join("\n"));
 // Schema-aware clients also get structuredContent with field reporting:
 // returned_fields, omitted_fields (with reason), and warnings[] on read tools.
+
+const browse = await client.callTool({
+  name: "browse_records",
+  arguments: {
+    model: "project.task",
+    domain: [],
+    field_preset: "tracking_minimal",
+    limit: 25,
+    offset: 0,
+    order: "id asc"
+  }
+});
+console.log("browse page 1:", browse.content.map(c => c.text).join("\n"));
 await client.close();
 ```
 
@@ -129,7 +142,7 @@ deployed URL), **no headers**, and click **Open Auth Settings → Quick OAuth Fl
 Connect — the Inspector detects the `401` + discovery metadata). A browser tab opens the
 Worker's `/authorize` page: paste your Odoo URL, database, and API key. The shim validates
 them against Odoo, redirects back, and the Inspector completes the token exchange. Then
-**List Tools** and try `search_records`.
+**List Tools** and try `browse_records` (e.g. `project.task`, `field_preset: "tracking_minimal"`, `limit: 25`, then page with `offset: 25`).
 
 ### b) Connect ChatGPT (Developer Mode)
 

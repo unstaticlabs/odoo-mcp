@@ -6,7 +6,10 @@ import { CURATED_MODEL_ACTIONS, type CuratedAction } from "./actions-map";
 import {
   CORE_MODEL_ALLOWLIST,
   DEFAULT_TASK_FIELDS,
+  NAMED_FIELD_PRESET_VALUES,
+  browseRecords,
   countRecords,
+  decodeBrowseCursor,
   mcpError,
   mcpErrorFromException,
   mcpStructured,
@@ -200,6 +203,90 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
           JSON.stringify(rows, null, 2)
         );
       } catch (err) {
+        return mcpErrorFromException(err, { model, method: "search_read" });
+      }
+    }
+  );
+
+  const zNamedFieldPreset = z.enum(NAMED_FIELD_PRESET_VALUES);
+
+  const zBrowseRecordsInput = z
+    .object({
+      model: z.string(),
+      domain: z.array(z.any()).default([]),
+      field_preset: zNamedFieldPreset.default("minimal"),
+      fields: z.array(z.string()).nullable().default(null),
+      limit: z.number().int().min(1).max(100).default(25),
+      offset: z.number().int().min(0).default(0),
+      cursor: z.string().nullable().default(null),
+      order: z.string().optional()
+    })
+    .refine(
+      (data) =>
+        data.fields == null || data.fields.length === 0 || data.field_preset === "minimal",
+      { message: "cannot set both explicit fields and a non-default field_preset" }
+    );
+
+  server.registerTool(
+    "browse_records",
+    {
+      title: "Browse Records (compact)",
+      description:
+        "Read-only: compact, paginated Odoo search for triage at scale. Defaults to `field_preset=\"minimal\"` " +
+        "and `limit=25` with mandatory page metadata (`count`, `has_more`, `next_offset`). " +
+        "Use `batch_read` or `get_record` on selected ids for full detail. " +
+        "Pass a stable `order` (e.g. `\"id asc\"`) when paging across multiple calls.",
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      inputSchema: zBrowseRecordsInput,
+      outputSchema: {
+        records: zOdooRecords.describe("Compact matching records for the resolved field preset"),
+        page: z.object({
+          offset: z.number().int(),
+          limit: z.number().int(),
+          count: z.number().int(),
+          returned: z.number().int(),
+          has_more: z.boolean(),
+          next_offset: z.number().int().nullable(),
+          next_cursor: z.string().nullable().optional()
+        }),
+        field_preset: zNamedFieldPreset.nullable(),
+        fields_resolution: z.object({
+          source: z.enum(["explicit", "preset", "fallback"]),
+          model: z.string()
+        }),
+        returned_fields: z.array(z.string()),
+        omitted_fields: z.array(z.object({ field: z.string(), reason: z.string() })),
+        warnings: zWarnings,
+        safeguard_applied: z.string().optional()
+      }
+    },
+    async ({ model, domain, field_preset, fields, limit, offset, cursor, order }) => {
+      if (!model || !model.trim()) return mcpError("model must be a non-empty string");
+      const effectivePreset = field_preset ?? "minimal";
+
+      let effectiveOffset = offset;
+      if (cursor) {
+        const decoded = decodeBrowseCursor(cursor, { model, domain, order });
+        if ("error" in decoded) return mcpError(decoded.error);
+        effectiveOffset = decoded.offset;
+      }
+
+      try {
+        const warnings: string[] = [];
+        const result = await browseRecords(queue, requireConnection(getProps()), {
+          model,
+          domain,
+          fieldPreset: effectivePreset,
+          fields,
+          limit,
+          offset: effectiveOffset,
+          order
+        }, warnings);
+        return mcpStructured(result as unknown as Record<string, unknown>);
+      } catch (err) {
+        if (err instanceof Error && err.message.startsWith("Result too large")) {
+          return mcpError(err.message);
+        }
         return mcpErrorFromException(err, { model, method: "search_read" });
       }
     }

@@ -3,6 +3,13 @@ import {
   resolveFieldPreset,
   resolveFields,
   resolveNamedPreset,
+  resolveNamedFieldPreset,
+  buildBrowsePageMeta,
+  applyBrowseSafeguard,
+  encodeBrowseCursor,
+  decodeBrowseCursor,
+  BROWSE_MAX_PAYLOAD_BYTES,
+  BROWSE_MIN_LIMIT,
   CORE_MODEL_ALLOWLIST,
   DEFAULT_TASK_FIELDS,
   DEFAULT_GENERIC_FIELDS,
@@ -10,6 +17,7 @@ import {
   MODEL_NAMED_FIELD_PRESETS,
   GENERIC_NAMED_FIELD_PRESETS,
   NAMED_FIELD_PRESETS,
+  NAMED_MODEL_FIELD_PRESETS,
   computeFieldsReport,
   ALL_FIELDS_SENTINEL,
   buildBrowsePageMetadata,
@@ -426,5 +434,145 @@ describe("payload size / capBrowsePage", () => {
     expect(e3).toBeGreaterThanOrEqual(e1);
     expect(e4).toBeGreaterThanOrEqual(e3);
     expect(e4).toBeGreaterThanOrEqual(e2);
+  });
+});
+
+describe("resolveNamedFieldPreset", () => {
+  test("minimal preset resolves known models from curated lists", () => {
+    const task = resolveNamedFieldPreset("project.task", "minimal");
+    expect(task.fields).toEqual(DEFAULT_TASK_FIELDS);
+    expect(task.preset).toBe("minimal");
+    expect(task.source).toBe("preset");
+
+    const move = resolveNamedFieldPreset("account.move", "minimal");
+    expect(move.fields).toEqual(NAMED_MODEL_FIELD_PRESETS.minimal["account.move"]);
+    expect(move.source).toBe("preset");
+  });
+
+  test("tracking_minimal and financial_minimal resolve model-specific fields", () => {
+    const tracking = resolveNamedFieldPreset("project.task", "tracking_minimal");
+    expect(tracking.fields).toContain("priority");
+    expect(tracking.fields).not.toContain("user_ids");
+    expect(tracking.preset).toBe("tracking_minimal");
+
+    const financial = resolveNamedFieldPreset("account.move", "financial_minimal");
+    expect(financial.fields).toContain("amount_untaxed");
+    expect(financial.preset).toBe("financial_minimal");
+  });
+
+  test("unknown model falls back per preset", () => {
+    const minimal = resolveNamedFieldPreset("x.custom.model", "minimal");
+    expect(minimal.fields).toEqual(DEFAULT_GENERIC_FIELDS);
+    expect(minimal.source).toBe("fallback");
+
+    const tracking = resolveNamedFieldPreset("x.custom.model", "tracking_minimal");
+    expect(tracking.fields).toEqual(["id", "display_name", "state"]);
+    expect(tracking.source).toBe("fallback");
+
+    const financial = resolveNamedFieldPreset("x.custom.model", "financial_minimal");
+    expect(financial.fields).toEqual(["id", "display_name", "amount_total"]);
+    expect(financial.source).toBe("fallback");
+  });
+
+  test("explicit fields win with preset null", () => {
+    const r = resolveNamedFieldPreset("project.task", "tracking_minimal", ["id", "name"]);
+    expect(r.fields).toEqual(["id", "name"]);
+    expect(r.preset).toBeNull();
+    expect(r.source).toBe("explicit");
+  });
+
+  test("empty explicit fields default to minimal preset", () => {
+    const r = resolveNamedFieldPreset("project.task", undefined, []);
+    expect(r.preset).toBe("minimal");
+    expect(r.source).toBe("preset");
+  });
+});
+
+describe("buildBrowsePageMeta", () => {
+  test("empty result set", () => {
+    const page = buildBrowsePageMeta(0, 25, 0, 0);
+    expect(page).toEqual({
+      offset: 0,
+      limit: 25,
+      count: 0,
+      returned: 0,
+      has_more: false,
+      next_offset: null
+    });
+  });
+
+  test("partial page with more results", () => {
+    const page = buildBrowsePageMeta(0, 10, 30, 10);
+    expect(page.has_more).toBe(true);
+    expect(page.next_offset).toBe(10);
+  });
+
+  test("last page", () => {
+    const page = buildBrowsePageMeta(20, 10, 25, 5);
+    expect(page.has_more).toBe(false);
+    expect(page.next_offset).toBeNull();
+  });
+
+  test("empty page when offset beyond count", () => {
+    const page = buildBrowsePageMeta(50, 25, 10, 0);
+    expect(page.returned).toBe(0);
+    expect(page.has_more).toBe(false);
+    expect(page.next_offset).toBeNull();
+  });
+});
+
+describe("applyBrowseSafeguard", () => {
+  test("accepts payloads under the byte cap", () => {
+    expect(applyBrowseSafeguard(1000, 25, "minimal", false)).toEqual({ action: "accept" });
+  });
+
+  test("oversize triggers limit halving on first attempt", () => {
+    const plan = applyBrowseSafeguard(BROWSE_MAX_PAYLOAD_BYTES + 1, 50, "minimal", false);
+    expect(plan).toEqual({
+      action: "retry",
+      newLimit: 25,
+      newPreset: "minimal",
+      safeguardApplied: "limit reduced 50→25 due to payload size"
+    });
+  });
+
+  test("at min limit with non-minimal preset downgrades preset", () => {
+    const plan = applyBrowseSafeguard(BROWSE_MAX_PAYLOAD_BYTES + 1, BROWSE_MIN_LIMIT, "financial_minimal", false);
+    expect(plan.action).toBe("retry");
+    if (plan.action === "retry") {
+      expect(plan.newPreset).toBe("minimal");
+      expect(plan.newLimit).toBe(BROWSE_MIN_LIMIT);
+    }
+  });
+
+  test("reject after retry still oversize", () => {
+    const plan = applyBrowseSafeguard(BROWSE_MAX_PAYLOAD_BYTES + 1, BROWSE_MIN_LIMIT, "minimal", true);
+    expect(plan.action).toBe("reject");
+    if (plan.action === "reject") {
+      expect(plan.message).toContain("Result too large");
+    }
+  });
+});
+
+describe("browse cursor", () => {
+  test("round-trips offset when query matches", () => {
+    const cursor = encodeBrowseCursor({
+      offset: 25,
+      model: "project.task",
+      domain: [["active", "=", true]],
+      order: "id asc"
+    });
+    const decoded = decodeBrowseCursor(cursor, {
+      model: "project.task",
+      domain: [["active", "=", true]],
+      order: "id asc"
+    });
+    expect(decoded).toEqual({ offset: 25 });
+  });
+
+  test("rejects stale cursor when domain differs", () => {
+    const cursor = encodeBrowseCursor({ offset: 10, model: "project.task", domain: [] });
+    const decoded = decodeBrowseCursor(cursor, { model: "project.task", domain: [["id", ">", 0]] });
+    expect(decoded).toEqual({ error: "cursor does not match current query" });
   });
 });
