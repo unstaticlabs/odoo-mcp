@@ -34,13 +34,13 @@ The server never logs, stores, or echoes your key.
 
 | Tool | Kind | Parameters |
 |---|---|---|
-| `search_records` | read | `model` (string), `domain` (array, default `[]`), `fields` (string[] \| null → smart defaults), `limit` (1–100, default 10), `order` (string, optional, e.g. `"name desc"`), `offset` (int ≥ 0, default 0) |
+| `search_records` | read | `model` (string), `domain` (array, default `[]`), `fields` (string[] \| null → curated preset), `limit` (1–100, default 10), `order` (string, optional, e.g. `"name desc"`), `offset` (int ≥ 0, default 0) → includes `returned_fields`, `omitted_fields`, `warnings` |
 | `search_count` | read | `model` (string), `domain` (array, default `[]`) → `{ count }` via `search_count`, without fetching records |
-| `get_record` | read | `model` (string), `record_id` (positive int), `fields` (string[] \| null → smart defaults) |
-| `batch_read` | read | `model` (string), `ids` (positive int[], min 1, capped at 100), `fields` (string[] \| null → smart defaults) → rows via `search_read` |
+| `get_record` | read | `model` (string), `record_id` (positive int), `fields` (string[] \| null → curated preset) → includes field reporting |
+| `batch_read` | read | `model` (string), `ids` (positive int[], min 1, capped at 100), `fields` (string[] \| null → curated preset) → rows via `search_read` + field reporting |
 | `list_models` | read | — |
 | `get_fields` | read | `model` (string) → field name/type/label schema |
-| `projects.list_tasks` | read | `domain` (array), `fields` (string[]) — convenience wrapper over `project.task` |
+| `projects.list_tasks` | read | `domain` (array), `fields` (string[]) — convenience wrapper over `project.task`; includes field reporting |
 | `aggregate_records` | read | `model` (string), `domain` (array), `groupby` (string[], Odoo `field:agg` syntax e.g. `invoice_date:month`), `aggregates` (string[], e.g. `amount_total:sum`, `__count`), `lazy` (bool, default true), `orderby` (string, optional) — wraps Odoo `read_group` |
 | `create_record` | write | `model` (string), `values` (object) |
 | `update_record` | write | `model` (string), `record_id` (positive int), `values` (object; x2many use Odoo command tuples, e.g. `[[6,0,ids]]`, `[[4,id]]`, `[[3,id]]`) |
@@ -68,9 +68,24 @@ can only do what their Odoo account permits.
 
 ### Field selection
 
-For `search_records` / `get_record`, `fields`:
-- omit / `null` → a smart default set of the most relevant fields,
-- a string array → exactly those fields.
+For `search_records`, `get_record`, `batch_read`, and `projects.list_tasks`:
+
+- **`fields` omitted / `null`** → a **curated per-model preset** from `MODEL_FIELD_PRESETS` (no extra Odoo call):
+  - `project.task` → `id`, `name`, `stage_id`, `project_id`
+  - `project.project` → `id`, `name`, `partner_id`, `user_id`, `stage_id`
+  - `res.partner` → `id`, `name`, `email`, `phone`
+  - `res.users` → `id`, `name`, `login`, `email`
+  - unknown models → `id`, `display_name`
+- **Explicit string array** → exactly those fields (passed verbatim to Odoo).
+- **`["__all__"]` sentinel** → all Odoo fields (token-heavy; discouraged).
+
+Tool responses include structured field reporting alongside the records:
+
+- `returned_fields` — fields present in the Odoo rows
+- `omitted_fields` — `{ field, reason }` where `reason` is `absent-from-rows` or `unknown-field` (the latter only when a cached `fields_get` result is already available)
+- `warnings` — when an **explicitly requested** field is omitted
+
+Use `get_fields` when you need the full field schema; the default read path does **not** call `fields_get`.
 
 ## Resources
 

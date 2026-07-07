@@ -31,6 +31,7 @@ const {
   searchRecords,
   escapeHtml,
   countRecords,
+  MODEL_FIELD_PRESETS,
   normalizeRecord,
   normalizeRecords,
   parseButtonsFromArch,
@@ -725,25 +726,12 @@ describe("searchRecords", () => {
     globalThis.fetch = originalFetch;
   });
 
-  test("resolves smart fields when fields is null", async () => {
+  test("uses curated preset when fields is null (no fields_get)", async () => {
     const conn = { url: "http://example.com", db: "test-db", apiKey: "secret-key" };
     let fetchCalls: { url: string; body: any }[] = [];
     const fetchMock = mock(async (url: string, init: any) => {
       const body = JSON.parse(init.body);
       fetchCalls.push({ url, body });
-      if (url.endsWith("/fields_get")) {
-        return new Response(
-          JSON.stringify({
-            result: {
-              id: { type: "integer", store: true },
-              name: { type: "char", store: true },
-              display_name: { type: "char", store: true },
-              image: { type: "binary", store: true }
-            }
-          }),
-          { status: 200, headers: { "Content-Type": "application/json" } }
-        );
-      }
       return new Response(JSON.stringify({ result: [] }), {
         status: 200,
         headers: { "Content-Type": "application/json" }
@@ -753,13 +741,29 @@ describe("searchRecords", () => {
 
     await searchRecords(makeQueue(), conn, "test.model", [], null, 10);
 
-    expect(fetchCalls.length).toBe(2);
-    // First call should be fields_get
-    expect(fetchCalls[0].url).toContain("/fields_get");
-    expect(fetchCalls[0].body).toEqual({ attributes: ["type", "store", "selection"] });
-    // Second call should be search_read with resolved smart fields
-    expect(fetchCalls[1].url).toContain("/search_read");
-    expect(fetchCalls[1].body.fields).toEqual(["id", "name", "display_name"]);
+    expect(fetchCalls.length).toBe(1);
+    expect(fetchCalls[0].url).toContain("/search_read");
+    expect(fetchCalls[0].body.fields).toEqual(["id", "display_name"]);
+  });
+
+  test("uses project.task preset when fields is null for a known model", async () => {
+    const conn = { url: "http://example.com", db: "test-db", apiKey: "secret-key" };
+    let fetchCalls: { url: string; body: any }[] = [];
+    const fetchMock = mock(async (url: string, init: any) => {
+      const body = JSON.parse(init.body);
+      fetchCalls.push({ url, body });
+      return new Response(JSON.stringify({ result: [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+    globalThis.fetch = fetchMock;
+
+    await searchRecords(makeQueue(), conn, "project.task", [], null, 10);
+
+    expect(fetchCalls.length).toBe(1);
+    expect(fetchCalls[0].url).toContain("/search_read");
+    expect(fetchCalls[0].body.fields).toEqual(MODEL_FIELD_PRESETS["project.task"]);
   });
 
   test("handles __all__ sentinel without calling fields_get", async () => {
@@ -802,15 +806,12 @@ describe("searchRecords", () => {
     expect(fetchCalls[0].body.fields).toEqual(["id", "name"]);
   });
 
-  test("falls back to DEFAULT_GENERIC_FIELDS if fields_get throws", async () => {
+  test("unknown model with fields null uses DEFAULT_GENERIC_FIELDS without fields_get", async () => {
     const conn = { url: "http://example.com", db: "test-db", apiKey: "secret-key" };
     let fetchCalls: { url: string; body: any }[] = [];
     const fetchMock = mock(async (url: string, init: any) => {
       const body = JSON.parse(init.body);
       fetchCalls.push({ url, body });
-      if (url.endsWith("/fields_get")) {
-        return new Response(JSON.stringify({ error: { message: "Model not found" } }), { status: 400 });
-      }
       return new Response(JSON.stringify({ result: [] }), {
         status: 200,
         headers: { "Content-Type": "application/json" }
@@ -820,10 +821,9 @@ describe("searchRecords", () => {
 
     await searchRecords(makeQueue(), conn, "test.model", [], null, 10);
 
-    expect(fetchCalls.length).toBe(2);
-    expect(fetchCalls[0].url).toContain("/fields_get");
-    expect(fetchCalls[1].url).toContain("/search_read");
-    expect(fetchCalls[1].body.fields).toEqual(["id", "display_name"]);
+    expect(fetchCalls.length).toBe(1);
+    expect(fetchCalls[0].url).toContain("/search_read");
+    expect(fetchCalls[0].body.fields).toEqual(["id", "display_name"]);
   });
 
   test("clamps an out-of-range limit down to 100", async () => {
@@ -923,22 +923,9 @@ describe("searchRecords", () => {
     expect(fetchCalls[0].body.offset).toBe(0);
   });
 
-  test("exposes fetched fieldsMeta on the return value when fields is null", async () => {
+  test("returns fieldsMeta: null on all paths (use get_fields for schema)", async () => {
     const conn = { url: "http://example.com", db: "test-db", apiKey: "secret-key" };
-    const fetchMock = mock(async (url: string, init: any) => {
-      if (url.endsWith("/fields_get")) {
-        return new Response(
-          JSON.stringify({
-            result: {
-              id: { type: "integer", store: true },
-              name: { type: "char", store: true },
-              display_name: { type: "char", store: true },
-              image: { type: "binary", store: true }
-            }
-          }),
-          { status: 200, headers: { "Content-Type": "application/json" } }
-        );
-      }
+    const fetchMock = mock(async () => {
       return new Response(JSON.stringify({ result: [] }), {
         status: 200,
         headers: { "Content-Type": "application/json" }
@@ -947,12 +934,7 @@ describe("searchRecords", () => {
     globalThis.fetch = fetchMock;
 
     const result = await searchRecords(makeQueue(), conn, "test.model", [], null, 10);
-    expect(result.fieldsMeta).toEqual({
-      id: { type: "integer", store: true },
-      name: { type: "char", store: true },
-      display_name: { type: "char", store: true },
-      image: { type: "binary", store: true }
-    });
+    expect(result.fieldsMeta).toBeNull();
     expect(result.rows).toEqual([]);
   });
 
@@ -2171,6 +2153,96 @@ describe("tool metadata (title/annotations)", () => {
     expect(JSON.parse(result.content[0].text)).toEqual(rows);
     globalThis.fetch = originalFetch;
   });
+
+  test("search_records default path uses preset with exactly one Odoo call and field report", async () => {
+    const agent = await buildWriteToolAgent();
+    const fetchCalls: { url: string; body: any }[] = [];
+    const rows = [{ id: 1, name: "Task", stage_id: [1, "In Progress"], project_id: [2, "Demo"] }];
+    globalThis.fetch = mock(async (url: string, init: any) => {
+      fetchCalls.push({ url, body: JSON.parse(init.body) });
+      return new Response(JSON.stringify({ result: rows }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }) as any;
+
+    const handler = getToolHandler(agent, "search_records");
+    const result = await handler({ model: "project.task", domain: [], fields: null, limit: 10, offset: 0 });
+
+    expect(fetchCalls.length).toBe(1);
+    expect(fetchCalls[0].url).toContain("/search_read");
+    expect(fetchCalls[0].body.fields).toEqual(MODEL_FIELD_PRESETS["project.task"]);
+    expect(result.structuredContent).toMatchObject({
+      records: rows,
+      returned_fields: ["id", "name", "stage_id", "project_id"],
+      omitted_fields: [],
+      warnings: []
+    });
+    globalThis.fetch = originalFetch;
+  });
+
+  test("search_records reports explicit field omissions in structuredContent", async () => {
+    const agent = await buildWriteToolAgent();
+    const rows = [{ id: 1, name: "Task" }];
+    globalThis.fetch = mock(async () =>
+      new Response(JSON.stringify({ result: rows }), { status: 200, headers: { "Content-Type": "application/json" } })
+    ) as any;
+
+    const handler = getToolHandler(agent, "search_records");
+    const result = await handler({
+      model: "project.task",
+      domain: [],
+      fields: ["id", "name", "missing_field"],
+      limit: 10,
+      offset: 0
+    });
+
+    expect(result.structuredContent).toMatchObject({
+      returned_fields: ["id", "name"],
+      omitted_fields: [{ field: "missing_field", reason: "absent-from-rows" }]
+    });
+    expect(result.structuredContent.warnings).toEqual([
+      "project.task: requested field 'missing_field' was omitted (absent-from-rows)"
+    ]);
+    globalThis.fetch = originalFetch;
+  });
+
+  test("get_record includes field report in structuredContent while preserving legacy text", async () => {
+    const agent = await buildWriteToolAgent();
+    const row = { id: 42, name: "Invoice", state: "draft" };
+    globalThis.fetch = mock(async () =>
+      new Response(JSON.stringify({ result: [row] }), { status: 200, headers: { "Content-Type": "application/json" } })
+    ) as any;
+
+    const handler = getToolHandler(agent, "get_record");
+    const result = await handler({ model: "account.move", record_id: 42, fields: ["id", "name", "state"] });
+
+    expect(result.structuredContent).toMatchObject({
+      returned_fields: ["id", "name", "state"],
+      omitted_fields: [],
+      warnings: []
+    });
+    expect(result.structuredContent.record).toMatchObject({ id: 42, name: "Invoice", _workflow_status: "draft" });
+    expect(JSON.parse(result.content[0].text)).toMatchObject({ id: 42, name: "Invoice", _workflow_status: "draft" });
+    globalThis.fetch = originalFetch;
+  });
+
+  test("projects.list_tasks includes field report in structuredContent", async () => {
+    const agent = await buildWriteToolAgent();
+    const rows = [{ id: 1, name: "Task", stage_id: [1, "New"], project_id: [2, "Demo"] }];
+    globalThis.fetch = mock(async () =>
+      new Response(JSON.stringify({ result: rows }), { status: 200, headers: { "Content-Type": "application/json" } })
+    ) as any;
+
+    const handler = getToolHandler(agent, "projects.list_tasks");
+    const result = await handler({ domain: [], fields: ["id", "name", "stage_id", "project_id"] });
+
+    expect(result.structuredContent).toMatchObject({
+      records: rows,
+      returned_fields: ["id", "name", "stage_id", "project_id"],
+      omitted_fields: [],
+      warnings: []
+    });
+    expect(JSON.parse(result.content[0].text)).toEqual(rows);
+    globalThis.fetch = originalFetch;
+  });
 });
 
 describe("search_count", () => {
@@ -3267,6 +3339,12 @@ describe("batch_read tool", () => {
     expect(fetchCalls[0].body.limit).toBe(2);
     expect(result.isError).toBeUndefined();
     expect(JSON.parse(result.content[0].text)).toEqual(rows);
+    expect(result.structuredContent).toMatchObject({
+      records: rows,
+      returned_fields: ["id", "name"],
+      omitted_fields: [],
+      warnings: []
+    });
   });
 
   test("caps the search_read limit at 100 even for more than 100 ids", async () => {
