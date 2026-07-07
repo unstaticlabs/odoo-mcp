@@ -2213,6 +2213,327 @@ describe("search_count", () => {
   });
 });
 
+/** Routes search_count + paginated search_read for browse_records integration tests. */
+function mockBrowseFetch(opts: {
+  count: number;
+  pages?: Record<number, unknown[]>;
+  allRows?: unknown[];
+}): { fetchCalls: { url: string; body: any }[]; fetchMock: ReturnType<typeof mock> } {
+  const fetchCalls: { url: string; body: any }[] = [];
+  const fetchMock = mock(async (url: string, init: any) => {
+    const body = JSON.parse(init.body);
+    fetchCalls.push({ url: url as string, body });
+    const method = (url as string).split("/").pop();
+    if (method === "search_count") {
+      return new Response(JSON.stringify({ result: opts.count }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+    const offset = body.offset ?? 0;
+    const limit = body.limit ?? 10;
+    let rows: unknown[];
+    if (opts.pages) {
+      rows = opts.pages[offset] ?? [];
+    } else if (opts.allRows) {
+      rows = opts.allRows.slice(offset, offset + limit);
+    } else {
+      rows = [];
+    }
+    return new Response(JSON.stringify({ result: rows }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" }
+    });
+  });
+  return { fetchCalls, fetchMock };
+}
+
+function expectBrowseEnvelope(structuredContent: Record<string, unknown>) {
+  expect(structuredContent.records).toBeDefined();
+  expect(structuredContent.returned_fields).toBeDefined();
+  expect(structuredContent.omitted_fields).toBeDefined();
+  expect(structuredContent.warnings).toBeDefined();
+  const page = structuredContent.page as Record<string, unknown>;
+  expect(page.offset).toBeDefined();
+  expect(page.limit).toBeDefined();
+  expect(page.count).toBeDefined();
+  expect(page.returned).toBeDefined();
+  expect(page.has_more).toBeDefined();
+}
+
+describe("browse_records tool", () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  test("pagination stability across pages with fixed order and no duplicate ids", async () => {
+    const agent = await buildWriteToolAgent();
+    const allRows = [
+      { id: 1, name: "A" },
+      { id: 2, name: "B" },
+      { id: 3, name: "C" },
+      { id: 4, name: "D" },
+      { id: 5, name: "E" }
+    ];
+    const { fetchMock } = mockBrowseFetch({ count: 5, allRows });
+    globalThis.fetch = fetchMock;
+
+    const handler = getToolHandler(agent, "browse_records");
+    const page1 = await handler({
+      model: "project.task",
+      domain: [],
+      fields: ["id", "name"],
+      limit: 3,
+      offset: 0,
+      order: "id asc"
+    });
+
+    expect(page1.isError).toBeUndefined();
+    expectBrowseEnvelope(page1.structuredContent);
+    expect(page1.structuredContent.records.map((r: { id: number }) => r.id)).toEqual([1, 2, 3]);
+    expect(page1.structuredContent.page).toMatchObject({
+      offset: 0,
+      limit: 3,
+      count: 5,
+      returned: 3,
+      has_more: true
+    });
+
+    const page2 = await handler({
+      model: "project.task",
+      domain: [],
+      fields: ["id", "name"],
+      limit: 3,
+      offset: 3,
+      order: "id asc"
+    });
+
+    expect(page2.isError).toBeUndefined();
+    expectBrowseEnvelope(page2.structuredContent);
+    expect(page2.structuredContent.records.map((r: { id: number }) => r.id)).toEqual([4, 5]);
+    expect(page2.structuredContent.page).toMatchObject({
+      offset: 3,
+      limit: 3,
+      count: 5,
+      returned: 2,
+      has_more: false
+    });
+
+    const page1Ids = page1.structuredContent.records.map((r: { id: number }) => r.id);
+    const page2Ids = page2.structuredContent.records.map((r: { id: number }) => r.id);
+    expect(page1Ids.some((id: number) => page2Ids.includes(id))).toBe(false);
+  });
+
+  test("calls search_count then search_read with resolved compact fields", async () => {
+    const agent = await buildWriteToolAgent();
+    const rows = [{ id: 1, name: "Task A", stage_id: [1, "In Progress"], project_id: [2, "Proj"] }];
+    const { fetchCalls, fetchMock } = mockBrowseFetch({ count: 1, allRows: rows });
+    globalThis.fetch = fetchMock;
+
+    const handler = getToolHandler(agent, "browse_records");
+    const result = await handler({
+      model: "project.task",
+      domain: [],
+      field_preset: "minimal",
+      limit: 25,
+      offset: 0,
+      order: "id asc"
+    });
+
+    expect(result.isError).toBeUndefined();
+    expectBrowseEnvelope(result.structuredContent);
+    expect(fetchCalls.length).toBe(2);
+    expect(fetchCalls[0].url).toContain("/project.task/search_count");
+    expect(fetchCalls[1].url).toContain("/project.task/search_read");
+    expect(fetchCalls[1].body).toMatchObject({
+      fields: ["id", "name", "stage_id", "project_id"],
+      limit: 25,
+      offset: 0,
+      order: "id asc"
+    });
+  });
+
+  test("minimal preset on project.task reports field_preset and fields report", async () => {
+    const agent = await buildWriteToolAgent();
+    const rows = [{ id: 1, name: "T", stage_id: [1, "S"], project_id: [2, "P"] }];
+    const { fetchCalls, fetchMock } = mockBrowseFetch({ count: 1, allRows: rows });
+    globalThis.fetch = fetchMock;
+
+    const handler = getToolHandler(agent, "browse_records");
+    const result = await handler({ model: "project.task", domain: [], field_preset: "minimal", limit: 25 });
+
+    expect(result.isError).toBeUndefined();
+    expect(result.structuredContent.field_preset).toBe("minimal");
+    expect(result.structuredContent.fields_resolution).toEqual({ source: "preset", model: "project.task" });
+    expect(fetchCalls[1].body.fields).toEqual(["id", "name", "stage_id", "project_id"]);
+    expect(result.structuredContent.returned_fields).toEqual(["id", "name", "stage_id", "project_id"]);
+    expect(result.structuredContent.omitted_fields).toEqual([]);
+  });
+
+  test("tracking_minimal preset sends compact tracking fields in search_read", async () => {
+    const { NAMED_MODEL_FIELD_PRESETS } = await import("./tools/shared");
+    const agent = await buildWriteToolAgent();
+    const trackingFields = NAMED_MODEL_FIELD_PRESETS.tracking_minimal["project.task"];
+    const row = Object.fromEntries(trackingFields.map((f: string) => [f, f === "id" ? 1 : `v-${f}`]));
+    const { fetchCalls, fetchMock } = mockBrowseFetch({ count: 1, allRows: [row] });
+    globalThis.fetch = fetchMock;
+
+    const handler = getToolHandler(agent, "browse_records");
+    const result = await handler({ model: "project.task", domain: [], field_preset: "tracking_minimal", limit: 25 });
+
+    expect(result.isError).toBeUndefined();
+    expect(fetchCalls[1].body.fields).toEqual(trackingFields);
+    expect(result.structuredContent.field_preset).toBe("tracking_minimal");
+  });
+
+  test("financial_minimal preset on account.move sends finance subset in search_read", async () => {
+    const { NAMED_MODEL_FIELD_PRESETS } = await import("./tools/shared");
+    const agent = await buildWriteToolAgent();
+    const financialFields = NAMED_MODEL_FIELD_PRESETS.financial_minimal["account.move"];
+    const row = Object.fromEntries(financialFields.map((f: string) => [f, f === "id" ? 1 : `v-${f}`]));
+    const { fetchCalls, fetchMock } = mockBrowseFetch({ count: 1, allRows: [row] });
+    globalThis.fetch = fetchMock;
+
+    const handler = getToolHandler(agent, "browse_records");
+    const result = await handler({ model: "account.move", domain: [], field_preset: "financial_minimal", limit: 25 });
+
+    expect(result.isError).toBeUndefined();
+    expect(fetchCalls[1].body.fields).toEqual(financialFields);
+    expect(result.structuredContent.field_preset).toBe("financial_minimal");
+    expect(result.structuredContent.returned_fields).toEqual(financialFields);
+  });
+
+  test("preset on unknown model uses generic fallback fields and fallback provenance", async () => {
+    const agent = await buildWriteToolAgent();
+    const { fetchCalls, fetchMock } = mockBrowseFetch({ count: 0, allRows: [] });
+    globalThis.fetch = fetchMock;
+
+    const handler = getToolHandler(agent, "browse_records");
+    const result = await handler({ model: "some.unknown.model", domain: [], field_preset: "minimal", limit: 25 });
+
+    expect(result.isError).toBeUndefined();
+    expect(fetchCalls[1].body.fields).toEqual(["id", "display_name"]);
+    expect(result.structuredContent.fields_resolution).toEqual({ source: "fallback", model: "some.unknown.model" });
+  });
+
+  test("explicit fields win over field_preset in search_read body", async () => {
+    const agent = await buildWriteToolAgent();
+    const rows = [{ id: 1, name: "Only" }];
+    const { fetchCalls, fetchMock } = mockBrowseFetch({ count: 1, allRows: rows });
+    globalThis.fetch = fetchMock;
+
+    const handler = getToolHandler(agent, "browse_records");
+    const result = await handler({
+      model: "project.task",
+      domain: [],
+      field_preset: "minimal",
+      fields: ["id", "name"],
+      limit: 25
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(fetchCalls[1].body.fields).toEqual(["id", "name"]);
+    expect(result.structuredContent.fields_resolution.source).toBe("explicit");
+    expect(result.structuredContent.field_preset).toBeNull();
+  });
+
+  test("empty page returns success with records [] and full browse envelope", async () => {
+    const agent = await buildWriteToolAgent();
+    const { fetchMock } = mockBrowseFetch({ count: 0, allRows: [] });
+    globalThis.fetch = fetchMock;
+
+    const handler = getToolHandler(agent, "browse_records");
+    const result = await handler({ model: "account.move", domain: [["id", "=", -1]] });
+
+    expect(result.isError).toBeUndefined();
+    expectBrowseEnvelope(result.structuredContent);
+    expect(result.structuredContent.records).toEqual([]);
+    expect(result.structuredContent.page).toMatchObject({
+      count: 0,
+      returned: 0,
+      has_more: false
+    });
+  });
+
+  test("oversized payload triggers safeguard shrink or bounded reject without secrets in text", async () => {
+    const { BROWSE_MAX_PAYLOAD_BYTES } = await import("./tools/shared");
+    const agent = await buildWriteToolAgent();
+    const huge = "x".repeat(BROWSE_MAX_PAYLOAD_BYTES + 1);
+    let searchReadCalls = 0;
+
+    globalThis.fetch = mock(async (url: string, init: any) => {
+      const method = (url as string).split("/").pop();
+      if (method === "search_count") {
+        return new Response(JSON.stringify({ result: 1 }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      searchReadCalls++;
+      const rows = [{ id: 1, name: searchReadCalls === 1 ? huge : "small" }];
+      return new Response(JSON.stringify({ result: rows }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }) as any;
+
+    const handler = getToolHandler(agent, "browse_records");
+    const result = await handler({
+      model: "project.task",
+      domain: [],
+      fields: ["id", "name"],
+      limit: 50
+    });
+
+    if (result.isError) {
+      expect(result.content[0].text).toContain("Result too large");
+    } else {
+      expect(result.structuredContent.safeguard_applied).toBeDefined();
+      expect(JSON.stringify(result.structuredContent.records).length).toBeLessThanOrEqual(BROWSE_MAX_PAYLOAD_BYTES);
+    }
+    expect(result.content[0].text).not.toContain("secret-key");
+    expect(result.content[0].text).not.toContain("Bearer");
+    expect(searchReadCalls).toBeGreaterThanOrEqual(1);
+  });
+
+  test("rejects empty-string model without calling fetch", async () => {
+    const agent = await buildWriteToolAgent();
+    const fetchMock = mock(() => Promise.reject(new Error("should not be called")));
+    globalThis.fetch = fetchMock;
+
+    const handler = getToolHandler(agent, "browse_records");
+    const result = await handler({ model: "  ", domain: [] });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("model must be a non-empty string");
+    expect(fetchMock.mock.calls.length).toBe(0);
+  });
+
+  test("surfaces Odoo errors as JSON envelope without leaking credentials", async () => {
+    const agent = await buildWriteToolAgent();
+    globalThis.fetch = mock(() =>
+      Promise.resolve(new Response(JSON.stringify({ error: { message: "Access Denied by Odoo" } }), { status: 403 }))
+    );
+
+    const handler = getToolHandler(agent, "browse_records");
+    const result = await handler({ model: "account.move", domain: [], field_preset: "minimal", limit: 25 });
+
+    expect(result.isError).toBe(true);
+    const envelope = JSON.parse(result.content[0].text);
+    expect(envelope.error).toBe("permission_denied");
+    expect(envelope.http_status).toBe(403);
+    expect(result.content[0].text).not.toContain("secret-key");
+    expect(result.content[0].text).not.toContain("Bearer");
+  });
+
+  test("success text content is structured JSON matching structuredContent", async () => {
+    const agent = await buildWriteToolAgent();
+    const rows = [{ id: 1, name: "Task" }];
+    const { fetchMock } = mockBrowseFetch({ count: 1, allRows: rows });
+    globalThis.fetch = fetchMock;
+
+    const handler = getToolHandler(agent, "browse_records");
+    const result = await handler({ model: "project.task", domain: [], fields: ["id", "name"], limit: 25 });
+
+    expect(result.isError).toBeUndefined();
+    expect(JSON.parse(result.content[0].text)).toEqual(result.structuredContent);
+  });
+});
+
 describe("resources", () => {
   afterEach(() => {
     globalThis.fetch = originalFetch;

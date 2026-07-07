@@ -179,3 +179,180 @@ describe("computeFieldsReport", () => {
     expect(warnings).toEqual([]);
   });
 });
+
+describe("resolveNamedFieldPreset", () => {
+  test("minimal preset on project.task returns curated minimal fields with preset provenance", async () => {
+    const { resolveNamedFieldPreset } = await import("./shared");
+    const task = resolveNamedFieldPreset("project.task", "minimal");
+    expect(task.fields).toEqual(DEFAULT_TASK_FIELDS);
+    expect(task.preset).toBe("minimal");
+    expect(task.source).toBe("preset");
+    expect(task.model).toBe("project.task");
+  });
+
+  test("tracking_minimal on project.task returns tracking-oriented subset", async () => {
+    const { resolveNamedFieldPreset, NAMED_MODEL_FIELD_PRESETS } = await import("./shared");
+    const tracking = resolveNamedFieldPreset("project.task", "tracking_minimal");
+    expect(tracking.fields).toEqual(NAMED_MODEL_FIELD_PRESETS.tracking_minimal["project.task"]);
+    expect(tracking.fields).toContain("priority");
+    expect(tracking.fields).toContain("stage_id");
+    expect(tracking.preset).toBe("tracking_minimal");
+    expect(tracking.source).toBe("preset");
+  });
+
+  test("financial_minimal on account.move returns finance-oriented subset", async () => {
+    const { resolveNamedFieldPreset, NAMED_MODEL_FIELD_PRESETS } = await import("./shared");
+    const financial = resolveNamedFieldPreset("account.move", "financial_minimal");
+    expect(financial.fields).toEqual(NAMED_MODEL_FIELD_PRESETS.financial_minimal["account.move"]);
+    expect(financial.fields).toContain("amount_untaxed");
+    expect(financial.fields).toContain("amount_total");
+    expect(financial.preset).toBe("financial_minimal");
+    expect(financial.source).toBe("preset");
+  });
+
+  test("each preset on unknown model falls back to safe generic minimal set", async () => {
+    const { resolveNamedFieldPreset } = await import("./shared");
+    const minimal = resolveNamedFieldPreset("some.unknown.model", "minimal");
+    expect(minimal.fields).toEqual(DEFAULT_GENERIC_FIELDS);
+    expect(minimal.source).toBe("fallback");
+
+    const tracking = resolveNamedFieldPreset("some.unknown.model", "tracking_minimal");
+    expect(tracking.fields).toEqual(["id", "display_name", "state"]);
+    expect(tracking.source).toBe("fallback");
+
+    const financial = resolveNamedFieldPreset("some.unknown.model", "financial_minimal");
+    expect(financial.fields).toEqual(["id", "display_name", "amount_total"]);
+    expect(financial.source).toBe("fallback");
+  });
+
+  test("explicit non-empty fields win over any field_preset", async () => {
+    const { resolveNamedFieldPreset } = await import("./shared");
+    const r = resolveNamedFieldPreset("project.task", "tracking_minimal", ["id", "name"]);
+    expect(r.fields).toEqual(["id", "name"]);
+    expect(r.preset).toBeNull();
+    expect(r.source).toBe("explicit");
+  });
+
+  test("empty fields array with preset applies preset, not explicit", async () => {
+    const { resolveNamedFieldPreset, NAMED_MODEL_FIELD_PRESETS } = await import("./shared");
+    const r = resolveNamedFieldPreset("project.task", "tracking_minimal", []);
+    expect(r.preset).toBe("tracking_minimal");
+    expect(r.source).toBe("preset");
+    expect(r.fields).toEqual(NAMED_MODEL_FIELD_PRESETS.tracking_minimal["project.task"]);
+  });
+});
+
+describe("buildBrowsePageMeta", () => {
+  test("first page with more rows exposes has_more and next_offset", async () => {
+    const { buildBrowsePageMeta } = await import("./shared");
+    const page = buildBrowsePageMeta(0, 10, 25, 10);
+    expect(page).toEqual({
+      offset: 0,
+      limit: 10,
+      count: 25,
+      returned: 10,
+      has_more: true,
+      next_offset: 10
+    });
+  });
+
+  test("last partial page has no remainder", async () => {
+    const { buildBrowsePageMeta } = await import("./shared");
+    const page = buildBrowsePageMeta(20, 10, 25, 5);
+    expect(page).toEqual({
+      offset: 20,
+      limit: 10,
+      count: 25,
+      returned: 5,
+      has_more: false,
+      next_offset: null
+    });
+  });
+
+  test("exact fit page has no has_more", async () => {
+    const { buildBrowsePageMeta } = await import("./shared");
+    const page = buildBrowsePageMeta(10, 10, 20, 10);
+    expect(page).toEqual({
+      offset: 10,
+      limit: 10,
+      count: 20,
+      returned: 10,
+      has_more: false,
+      next_offset: null
+    });
+  });
+
+  test("empty result set returns zero counts and no has_more", async () => {
+    const { buildBrowsePageMeta } = await import("./shared");
+    const page = buildBrowsePageMeta(0, 25, 0, 0);
+    expect(page).toEqual({
+      offset: 0,
+      limit: 25,
+      count: 0,
+      returned: 0,
+      has_more: false,
+      next_offset: null
+    });
+  });
+});
+
+describe("applyBrowseSafeguard", () => {
+  test("normal page under byte budget passes through unchanged", async () => {
+    const { applyBrowseSafeguard } = await import("./shared");
+    expect(applyBrowseSafeguard(1000, 25, "minimal", false)).toEqual({ action: "accept" });
+  });
+
+  test("oversized estimated payload recommends reduced limit on first attempt", async () => {
+    const { applyBrowseSafeguard, BROWSE_MAX_PAYLOAD_BYTES } = await import("./shared");
+    const plan = applyBrowseSafeguard(BROWSE_MAX_PAYLOAD_BYTES + 1, 50, "minimal", false);
+    expect(plan).toEqual({
+      action: "retry",
+      newLimit: 25,
+      newPreset: "minimal",
+      safeguardApplied: "limit reduced 50→25 due to payload size"
+    });
+  });
+
+  test("already at minimum limit with non-minimal preset downgrades preset", async () => {
+    const { applyBrowseSafeguard, BROWSE_MAX_PAYLOAD_BYTES, BROWSE_MIN_LIMIT } = await import("./shared");
+    const plan = applyBrowseSafeguard(BROWSE_MAX_PAYLOAD_BYTES + 1, BROWSE_MIN_LIMIT, "financial_minimal", false);
+    expect(plan.action).toBe("retry");
+    if (plan.action === "retry") {
+      expect(plan.newPreset).toBe("minimal");
+      expect(plan.newLimit).toBe(BROWSE_MIN_LIMIT);
+    }
+  });
+
+  test("still oversized after retry rejects with recoverable structured message", async () => {
+    const { applyBrowseSafeguard, BROWSE_MAX_PAYLOAD_BYTES, BROWSE_MIN_LIMIT } = await import("./shared");
+    const plan = applyBrowseSafeguard(BROWSE_MAX_PAYLOAD_BYTES + 1, BROWSE_MIN_LIMIT, "minimal", true);
+    expect(plan.action).toBe("reject");
+    if (plan.action === "reject") {
+      expect(plan.message).toContain("Result too large");
+    }
+  });
+});
+
+describe("browse cursor", () => {
+  test("encode/decode yields stable next_cursor for same query inputs", async () => {
+    const { encodeBrowseCursor, decodeBrowseCursor } = await import("./shared");
+    const query = {
+      model: "project.task",
+      domain: [["active", "=", true]] as unknown[],
+      order: "id asc"
+    };
+    const cursor1 = encodeBrowseCursor({ offset: 10, ...query });
+    const cursor2 = encodeBrowseCursor({ offset: 10, ...query });
+    expect(cursor1).toBe(cursor2);
+
+    const decoded = decodeBrowseCursor(cursor1, query);
+    expect(decoded).toEqual({ offset: 10 });
+  });
+
+  test("rejects stale cursor when domain differs", async () => {
+    const { encodeBrowseCursor, decodeBrowseCursor } = await import("./shared");
+    const cursor = encodeBrowseCursor({ offset: 10, model: "project.task", domain: [] });
+    const decoded = decodeBrowseCursor(cursor, { model: "project.task", domain: [["id", ">", 0]] });
+    expect(decoded).toEqual({ error: "cursor does not match current query" });
+  });
+});
