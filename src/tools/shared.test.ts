@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { OdooError } from "../odoo";
 import {
   resolveFieldPreset,
   resolveFields,
@@ -34,6 +35,9 @@ import {
   FIELD_PRESET_FALLBACKS,
   FIELD_PRESET_MODEL_OVERRIDES,
   type FieldPresetName,
+  mcpAggregationErrorFromException,
+  mcpErrorFromException,
+  redactDetails
 } from "./shared";
 
 describe("resolveFieldPreset", () => {
@@ -799,5 +803,159 @@ describe("buildCompactReadEnvelope", () => {
     expect(envelope.records).toEqual([]);
     expect(envelope.warnings).toEqual(["note"]);
     expect(envelope.page.has_more).toBe(false);
+  });
+});
+
+describe("mcpAggregationErrorFromException", () => {
+  function parseEnvelope(result: ReturnType<typeof mcpAggregationErrorFromException>) {
+    expect(result.isError).toBe(true);
+    return JSON.parse(result.content[0].text);
+  }
+
+  test("404 read_group maps to unsupported_model with recoverable:true", () => {
+    const err = new OdooError({
+      message: "not found",
+      code: "model_or_method_not_found",
+      httpStatus: 404,
+      model: "foo.bar",
+      method: "read_group",
+      details: "Model foo.bar not found"
+    });
+    const envelope = parseEnvelope(mcpAggregationErrorFromException(err, { model: "foo.bar" }));
+    expect(envelope.diagnosis).toBe("unsupported_model");
+    expect(envelope.error).toBe("unsupported_model");
+    expect(envelope.operation).toBe("aggregate_records");
+    expect(envelope.recoverable).toBe(true);
+    expect(envelope.http_status).toBe(404);
+  });
+
+  test("401 maps to unauthorized with recoverable:false", () => {
+    const err = new OdooError({
+      message: "unauthorized",
+      code: "unauthorized",
+      httpStatus: 401,
+      model: "project.task",
+      method: "read_group",
+      details: "Invalid API key"
+    });
+    const envelope = parseEnvelope(mcpAggregationErrorFromException(err, { model: "project.task" }));
+    expect(envelope.diagnosis).toBe("unauthorized");
+    expect(envelope.recoverable).toBe(false);
+  });
+
+  test("403 maps to permission_denied with recoverable:false", () => {
+    const err = new OdooError({
+      message: "forbidden",
+      code: "permission_denied",
+      httpStatus: 403,
+      model: "project.task",
+      method: "read_group",
+      details: "Access Denied"
+    });
+    const envelope = parseEnvelope(mcpAggregationErrorFromException(err, { model: "project.task" }));
+    expect(envelope.diagnosis).toBe("permission_denied");
+    expect(envelope.recoverable).toBe(false);
+  });
+
+  test("400 with invalid field maps to invalid_groupby", () => {
+    const err = new OdooError({
+      message: "bad groupby",
+      code: "invalid_request",
+      httpStatus: 400,
+      model: "project.task",
+      method: "read_group",
+      details: "Invalid field 'bogus' in groupby"
+    });
+    const envelope = parseEnvelope(mcpAggregationErrorFromException(err, { model: "project.task" }));
+    expect(envelope.diagnosis).toBe("invalid_groupby");
+    expect(envelope.recoverable).toBe(false);
+  });
+
+  test("400 with invalid aggregator maps to unsupported_aggregate", () => {
+    const err = new OdooError({
+      message: "bad aggregate",
+      code: "invalid_request",
+      httpStatus: 400,
+      model: "project.task",
+      method: "read_group",
+      details: "Invalid aggregator for field amount"
+    });
+    const envelope = parseEnvelope(mcpAggregationErrorFromException(err, { model: "project.task" }));
+    expect(envelope.diagnosis).toBe("unsupported_aggregate");
+    expect(envelope.recoverable).toBe(false);
+  });
+
+  test("opaque 400 maps to connector_bug", () => {
+    const err = new OdooError({
+      message: "bad request",
+      code: "invalid_request",
+      httpStatus: 400,
+      model: "project.task",
+      method: "read_group",
+      details: "Something completely unrelated went wrong"
+    });
+    const envelope = parseEnvelope(mcpAggregationErrorFromException(err, { model: "project.task" }));
+    expect(envelope.diagnosis).toBe("connector_bug");
+    expect(envelope.recoverable).toBe(false);
+  });
+
+  test("non-OdooError maps to connector_bug", () => {
+    const envelope = parseEnvelope(
+      mcpAggregationErrorFromException(new Error("upstream 502"), { model: "project.task" })
+    );
+    expect(envelope.diagnosis).toBe("connector_bug");
+    expect(envelope.error).toBe("connector_bug");
+    expect(envelope.http_status).toBeNull();
+    expect(envelope.recoverable).toBe(false);
+  });
+
+  test("redacts API keys from details", () => {
+    const err = new OdooError({
+      message: "leak",
+      code: "invalid_request",
+      httpStatus: 400,
+      model: "project.task",
+      method: "read_group",
+      details: "Auth failed for key odoo_abc123secret in context"
+    });
+    const envelope = parseEnvelope(mcpAggregationErrorFromException(err, { model: "project.task" }));
+    expect(envelope.details).not.toContain("odoo_abc123secret");
+    expect(envelope.details).toContain("[REDACTED]");
+  });
+});
+
+describe("mcpErrorFromException non-regression", () => {
+  test("OdooError envelope is unchanged (no diagnosis field)", () => {
+    const err = new OdooError({
+      message: "forbidden",
+      code: "permission_denied",
+      httpStatus: 403,
+      model: "account.move",
+      method: "write",
+      details: "Access Denied by Odoo"
+    });
+    const result = mcpErrorFromException(err);
+    const envelope = JSON.parse(result.content[0].text);
+    expect(envelope).toEqual({
+      error: "permission_denied",
+      model: "account.move",
+      method: "write",
+      http_status: 403,
+      details: "Access Denied by Odoo",
+      recoverable: false
+    });
+    expect(envelope.diagnosis).toBeUndefined();
+    expect(envelope.operation).toBeUndefined();
+  });
+});
+
+describe("redactDetails", () => {
+  test("redacts odoo API keys and bearer tokens", () => {
+    const text = "Bearer odoo_deadbeef and odoo_abc123secret leaked";
+    const redacted = redactDetails(text);
+    expect(redacted).not.toContain("odoo_abc123secret");
+    expect(redacted).not.toContain("odoo_deadbeef");
+    expect(redacted).toContain("Bearer [REDACTED]");
+    expect(redacted).toContain("[REDACTED]");
   });
 });

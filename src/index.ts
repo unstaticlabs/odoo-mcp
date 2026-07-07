@@ -2,8 +2,20 @@ import OAuthProvider from "@cloudflare/workers-oauth-provider";
 import { McpAgent, type Env, type Props } from "./server";
 import { oauthDefaultHandler } from "./oauth";
 
-export { callOdoo, OdooError, classifyOdooError, isRecoverable } from "./odoo";
-export type { OdooErrorCode } from "./odoo";
+export {
+  callOdoo,
+  OdooError,
+  classifyOdooError,
+  classifyAggregationDiagnosis,
+  aggregationDiagnosisFromOdooError,
+  normalizeOdooDetails,
+  matchInvalidGroupby,
+  matchUnsupportedAggregate,
+  isRecoverable
+} from "./odoo";
+export type { OdooErrorCode, AggregationDiagnosisCode, AggregationErrorContext } from "./odoo";
+export { mcpAggregationErrorFromException, redactDetails } from "./tools/shared";
+export type { AggregationErrorEnvelope } from "./tools/shared";
 export { OdooQueue } from "./odoo-queue";
 export {
   pickSmartFields,
