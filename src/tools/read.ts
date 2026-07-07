@@ -21,6 +21,15 @@ import { deriveWorkflowStatus, normalizeRecords } from "../normalizer";
 import { type CachedFieldMeta, type TtlCache, getFieldsCached } from "../cache";
 import { OdooError } from "../odoo";
 
+const zFieldOmission = z.object({ field: z.string(), reason: z.string() });
+const zFieldsReport = {
+  returned_fields: z.array(z.string()).describe("List of fields successfully returned by Odoo"),
+  omitted_fields: z
+    .array(zFieldOmission)
+    .describe("Fields requested but omitted from Odoo response"),
+  warnings: zWarnings
+};
+
 export interface ModelAction {
   method: string;
   label?: string;
@@ -88,13 +97,34 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
         fields: z.array(z.string()).default(DEFAULT_TASK_FIELDS)
       },
       outputSchema: {
-        records: zOdooRecords.describe("Matching project.task records")
+        records: zOdooRecords.describe("Matching project.task records"),
+        ...zFieldsReport
       }
     },
     async ({ domain, fields }) => {
       try {
-        const { rows: tasks } = await searchRecords(queue, requireConnection(getProps()), "project.task", domain, fields, 100);
-        return mcpStructured({ records: tasks as Record<string, unknown>[] }, JSON.stringify(tasks, null, 2));
+        const warnings: string[] = [];
+        const { rows: tasks, fieldsReport } = await searchRecords(
+          queue,
+          requireConnection(getProps()),
+          "project.task",
+          domain,
+          fields,
+          100,
+          undefined,
+          undefined,
+          cache,
+          warnings
+        );
+        return mcpStructured(
+          {
+            records: tasks as Record<string, unknown>[],
+            returned_fields: fieldsReport.returned_fields,
+            omitted_fields: fieldsReport.omitted_fields,
+            warnings
+          },
+          JSON.stringify(tasks, null, 2)
+        );
       } catch (err) {
         return mcpErrorFromException(err, { model: "project.task", method: "search_read" });
       }
@@ -139,15 +169,8 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
         offset: z.number().int().min(0).default(0)
       },
       outputSchema: {
-        records: zOdooRecords.describe("Matching records with the requested (or smart-default) fields"),
-        returned_fields: z.array(z.string()).describe("List of fields successfully returned by Odoo"),
-        omitted_fields: z.array(
-          z.object({
-            field: z.string(),
-            reason: z.string()
-          })
-        ).describe("Fields requested but omitted from Odoo response"),
-        warnings: zWarnings
+        records: zOdooRecords.describe("Matching records with the requested (or preset-default) fields"),
+        ...zFieldsReport
       }
     },
     async ({ model, domain, fields, limit, order, offset }) => {
@@ -266,28 +289,50 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
         fields: z.array(z.string()).nullable().default(null)
       },
       outputSchema: {
-        record: zOdooRecord.nullable().describe("The record (with `_workflow_status` when derivable), or null when the id does not exist")
+        record: zOdooRecord.nullable().describe("The record (with `_workflow_status` when derivable), or null when the id does not exist"),
+        ...zFieldsReport
       }
     },
     async ({ model, record_id, fields }) => {
       if (!model || !model.trim()) return mcpError("model must be a non-empty string");
       if (!Number.isInteger(record_id) || record_id <= 0) return mcpError("record_id must be a positive integer");
       try {
-        const { rows } = (await searchRecords(
+        const warnings: string[] = [];
+        const { rows, fieldsReport } = await searchRecords(
           queue,
           requireConnection(getProps()),
           model,
           [["id", "=", record_id]],
           fields,
-          1
-        )) as { rows: unknown[]; fieldsMeta: unknown };
+          1,
+          undefined,
+          undefined,
+          cache,
+          warnings
+        );
         if (!Array.isArray(rows) || rows.length === 0) {
-          return mcpStructured({ record: null }, JSON.stringify([], null, 2));
+          return mcpStructured(
+            {
+              record: null,
+              returned_fields: fieldsReport.returned_fields,
+              omitted_fields: fieldsReport.omitted_fields,
+              warnings
+            },
+            JSON.stringify([], null, 2)
+          );
         }
         const record = rows[0] as Record<string, unknown>;
         const workflowStatus = deriveWorkflowStatus(record);
         const result = workflowStatus != null ? { ...record, _workflow_status: workflowStatus } : record;
-        return mcpStructured({ record: result }, JSON.stringify(result, null, 2));
+        return mcpStructured(
+          {
+            record: result,
+            returned_fields: fieldsReport.returned_fields,
+            omitted_fields: fieldsReport.omitted_fields,
+            warnings
+          },
+          JSON.stringify(result, null, 2)
+        );
       } catch (err) {
         return mcpErrorFromException(err, { model, method: "search_read" });
       }
@@ -300,7 +345,7 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
       title: "Batch Read Records",
       description:
         "Read-only: fetch multiple Odoo records of one model by id in a single call. " +
-        "`fields` omitted/null → smart default fields; a string array → exactly those fields. " +
+        "`fields` omitted/null → curated per-model preset (see Field selection); a string array → exactly those fields. " +
         "At most 100 ids are read (extra ids are ignored); return order follows Odoo search_read, not input order.",
       annotations: { readOnlyHint: true, openWorldHint: false },
       inputSchema: {
@@ -309,21 +354,35 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
         fields: z.array(z.string()).nullable().default(null)
       },
       outputSchema: {
-        records: zOdooRecords.describe("Found records in Odoo search_read order (missing ids are silently absent)")
+        records: zOdooRecords.describe("Found records in Odoo search_read order (missing ids are silently absent)"),
+        ...zFieldsReport
       }
     },
     async ({ model, ids, fields }) => {
       if (!model || !model.trim()) return mcpError("model must be a non-empty string");
       try {
-        const { rows } = await searchRecords(
+        const warnings: string[] = [];
+        const { rows, fieldsReport } = await searchRecords(
           queue,
           requireConnection(getProps()),
           model,
           [["id", "in", ids]],
           fields,
-          Math.min(ids.length, 100)
+          Math.min(ids.length, 100),
+          undefined,
+          undefined,
+          cache,
+          warnings
         );
-        return mcpStructured({ records: rows as Record<string, unknown>[] }, JSON.stringify(rows, null, 2));
+        return mcpStructured(
+          {
+            records: rows as Record<string, unknown>[],
+            returned_fields: fieldsReport.returned_fields,
+            omitted_fields: fieldsReport.omitted_fields,
+            warnings
+          },
+          JSON.stringify(rows, null, 2)
+        );
       } catch (err) {
         return mcpErrorFromException(err, { model, method: "search_read" });
       }

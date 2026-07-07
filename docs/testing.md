@@ -71,6 +71,8 @@ const res = await client.callTool({
   arguments: { model: "project.task", domain: [], fields: ["id", "name"], limit: 3 },
 });
 console.log(res.content.map(c => c.text).join("\n"));
+// Schema-aware clients also get structuredContent with field reporting:
+// returned_fields, omitted_fields (with reason), and warnings[] on read tools.
 await client.close();
 ```
 

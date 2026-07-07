@@ -236,10 +236,18 @@ export async function searchRecords(
   fieldsReport: FieldsReport;
 }> {
   const cappedLimit = Math.min(limit, 100);
-  const { fields: resolvedFields, fieldsMeta } = await resolveFieldsViaOdoo(queue, conn, model, fields);
+  const resolution = resolveFields(model, fields);
+
+  let odooFields: string[];
+  if (fields !== null && fields.length === 1 && fields[0] === ALL_FIELDS_SENTINEL) {
+    odooFields = []; // empty fields array => Odoo search_read returns all fields natively
+  } else {
+    odooFields = resolution.fields;
+  }
+
   const rows = (await queue.enqueue(conn, model, "search_read", {
     domain,
-    fields: resolvedFields,
+    fields: odooFields,
     limit: cappedLimit,
     offset: offset ?? 0,
     ...(order ? { order } : {})
@@ -255,13 +263,13 @@ export async function searchRecords(
   }
 
   const resolved = {
-    fields: fields ?? resolvedFields,
-    explicit: fields !== null
+    fields: resolution.fields,
+    explicit: resolution.source === "explicit"
   };
 
   const fieldsReport = computeFieldsReport(resolved, rows, warnings, model, { knownFields });
 
-  return { rows, fieldsMeta, fieldsReport };
+  return { rows, fieldsMeta: null, fieldsReport };
 }
 
 export async function countRecords(queue: OdooQueue, conn: OdooConnection, model: string, domain: unknown[]): Promise<number> {
@@ -283,27 +291,6 @@ export function parseDomainParam(uri: URL): unknown[] {
   return parsed;
 }
 
-async function resolveFieldsViaOdoo(
-  queue: OdooQueue,
-  conn: OdooConnection,
-  model: string,
-  fields: string[] | null
-): Promise<{ fields: string[]; fieldsMeta: Record<string, OdooFieldMeta> | null }> {
-  if (fields !== null && fields.length === 1 && fields[0] === ALL_FIELDS_SENTINEL) {
-    return { fields: [], fieldsMeta: null }; // empty fields array => Odoo search_read returns all fields natively
-  }
-  if (fields !== null) return { fields, fieldsMeta: null };
-
-  try {
-    const meta = (await queue.enqueue(conn, model, "fields_get", {
-      attributes: ["type", "store", "selection"]
-    })) as Record<string, OdooFieldMeta>;
-    return { fields: pickSmartFields(meta), fieldsMeta: meta };
-  } catch {
-    return { fields: DEFAULT_GENERIC_FIELDS, fieldsMeta: null }; // fields_get failed (e.g. bad model) — fall back rather than error the whole search
-  }
-}
-
 /**
  * Static, model-aware field presets. Every {@link CORE_MODEL_ALLOWLIST} model has a curated,
  * read-safe entry; adding a model is a one-line map edit (no code-path change). `project.task`
@@ -323,8 +310,8 @@ export const MODEL_FIELD_PRESETS: Record<string, string[]> = {
  * - no fields + unknown model          -> DEFAULT_GENERIC_FIELDS, source "fallback"
  *
  * An empty `requestedFields` array counts as "no explicit fields" and falls through to
- * preset/fallback. `ALL_FIELDS_SENTINEL` ("__all__") is NOT interpreted here — that convention
- * lives in {@link resolveFieldsViaOdoo}; this resolver returns it verbatim as an explicit field.
+ * preset/fallback. `ALL_FIELDS_SENTINEL` ("__all__") is NOT interpreted here — {@link searchRecords}
+ * maps it to an empty Odoo fields list; this resolver returns it verbatim as an explicit field.
  * Returned arrays alias the shared module constants — callers must not mutate them.
  */
 export function resolveFields(model: string, requestedFields?: string[] | null): FieldResolution {
