@@ -2410,6 +2410,221 @@ describe("tool metadata (title/annotations)", () => {
   });
 });
 
+describe("browse_records", () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  test("tool is registered after agent.init()", async () => {
+    const agent = await buildWriteToolAgent();
+    expect(agent.server._registeredTools.browse_records).toBeDefined();
+  });
+
+  test("happy path calls search_count then search_read with resolved preset fields", async () => {
+    const agent = await buildWriteToolAgent();
+    const rows = [{ id: 1, name: "Task A", stage_id: [1, "In Progress"], project_id: [2, "Proj"] }];
+    const fetchCalls: { url: string; body: any }[] = [];
+    globalThis.fetch = mock(async (url: string, init: any) => {
+      fetchCalls.push({ url: url as string, body: JSON.parse(init.body) });
+      const method = (url as string).split("/").pop();
+      if (method === "search_count") {
+        return new Response(JSON.stringify({ result: 1 }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      return new Response(JSON.stringify({ result: rows }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }) as any;
+
+    const handler = validatedToolHandler(agent.server, "browse_records");
+    const result = await handler({ model: "project.task", domain: [], field_preset: "minimal", limit: 25, offset: 0 });
+
+    expect(result.isError).toBeUndefined();
+    expect(result.structuredContent).toBeDefined();
+    expect(fetchCalls.length).toBe(2);
+    expect(fetchCalls[0].url).toContain("/project.task/search_count");
+    expect(fetchCalls[1].url).toContain("/project.task/search_read");
+    expect(fetchCalls[1].body.fields).toEqual(["id", "name", "stage_id", "project_id"]);
+    expect(result.structuredContent.page).toMatchObject({
+      offset: 0,
+      limit: 25,
+      count: 1,
+      returned: 1,
+      has_more: false,
+      next_offset: null
+    });
+    expect(result.structuredContent.field_preset).toBe("minimal");
+    expect(result.structuredContent.fields_resolution.source).toBe("preset");
+  });
+
+  test("empty domain match returns records [] with page.count 0, not isError", async () => {
+    const agent = await buildWriteToolAgent();
+    globalThis.fetch = mock(async (url: string) => {
+      const method = (url as string).split("/").pop();
+      if (method === "search_count") {
+        return new Response(JSON.stringify({ result: 0 }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      return new Response(JSON.stringify({ result: [] }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }) as any;
+
+    const handler = getToolHandler(agent, "browse_records");
+    const result = await handler({ model: "account.move", domain: [["id", "=", -1]] });
+
+    expect(result.isError).toBeUndefined();
+    expect(result.structuredContent.records).toEqual([]);
+    expect(result.structuredContent.page.count).toBe(0);
+    expect(result.structuredContent.page.returned).toBe(0);
+  });
+
+  test("pagination stability with ordered ids", async () => {
+    const agent = await buildWriteToolAgent();
+    const allRows = Array.from({ length: 30 }, (_, i) => ({ id: i + 1, name: `Row ${i + 1}` }));
+
+    globalThis.fetch = mock(async (url: string, init: any) => {
+      const method = (url as string).split("/").pop();
+      if (method === "search_count") {
+        return new Response(JSON.stringify({ result: 30 }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      const body = JSON.parse(init.body);
+      const slice = allRows.slice(body.offset, body.offset + body.limit);
+      return new Response(JSON.stringify({ result: slice }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }) as any;
+
+    const handler = getToolHandler(agent, "browse_records");
+
+    const page1 = await handler({
+      model: "project.task",
+      domain: [],
+      fields: ["id", "name"],
+      limit: 10,
+      offset: 0,
+      order: "id asc"
+    });
+    expect(page1.structuredContent.records.map((r: any) => r.id)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    expect(page1.structuredContent.page.has_more).toBe(true);
+    expect(page1.structuredContent.page.next_offset).toBe(10);
+
+    const page2 = await handler({
+      model: "project.task",
+      domain: [],
+      fields: ["id", "name"],
+      limit: 10,
+      offset: 10,
+      order: "id asc"
+    });
+    expect(page2.structuredContent.records.map((r: any) => r.id)).toEqual([11, 12, 13, 14, 15, 16, 17, 18, 19, 20]);
+    expect(page2.structuredContent.page.has_more).toBe(true);
+  });
+
+  test("cursor paging decodes page.next_cursor and fetches the next page", async () => {
+    const agent = await buildWriteToolAgent();
+    const allRows = Array.from({ length: 30 }, (_, i) => ({ id: i + 1, name: `Row ${i + 1}` }));
+
+    globalThis.fetch = mock(async (url: string, init: any) => {
+      const method = (url as string).split("/").pop();
+      if (method === "search_count") {
+        return new Response(JSON.stringify({ result: 30 }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      const body = JSON.parse(init.body);
+      const slice = allRows.slice(body.offset, body.offset + body.limit);
+      return new Response(JSON.stringify({ result: slice }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }) as any;
+
+    const handler = getToolHandler(agent, "browse_records");
+    const page1 = await handler({
+      model: "project.task",
+      domain: [],
+      fields: ["id", "name"],
+      limit: 10,
+      offset: 0,
+      order: "id asc"
+    });
+    expect(page1.structuredContent.page.next_cursor).toBeTruthy();
+
+    const page2 = await handler({
+      model: "project.task",
+      domain: [],
+      fields: ["id", "name"],
+      limit: 10,
+      offset: 999,
+      cursor: page1.structuredContent.page.next_cursor,
+      order: "id asc"
+    });
+    expect(page2.structuredContent.records.map((r: any) => r.id)).toEqual([11, 12, 13, 14, 15, 16, 17, 18, 19, 20]);
+    expect(page2.structuredContent.page.offset).toBe(10);
+    expect(page2.structuredContent.page.has_more).toBe(true);
+  });
+
+  test("inputSchema rejects explicit fields combined with a non-default field_preset", async () => {
+    const agent = await buildWriteToolAgent();
+    const tool = agent.server._registeredTools.browse_records;
+    const parsed = tool.inputSchema.safeParse({
+      model: "project.task",
+      domain: [],
+      field_preset: "tracking_minimal",
+      fields: ["id", "name"]
+    });
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) {
+      expect(parsed.error.issues.some((i: { message: string }) => i.message.includes("non-default field_preset"))).toBe(true);
+    }
+  });
+
+  test("financial_minimal preset on account.move returns expected returned_fields", async () => {
+    const agent = await buildWriteToolAgent();
+    const expectedFields = [
+      "id", "name", "move_type", "state", "partner_id",
+      "amount_untaxed", "amount_tax", "amount_total", "currency_id", "invoice_date", "date"
+    ];
+    const row = Object.fromEntries(expectedFields.map((f) => [f, f === "id" ? 1 : `v-${f}`]));
+
+    globalThis.fetch = mock(async (url: string) => {
+      const method = (url as string).split("/").pop();
+      if (method === "search_count") {
+        return new Response(JSON.stringify({ result: 1 }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      return new Response(JSON.stringify({ result: [row] }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }) as any;
+
+    const handler = getToolHandler(agent, "browse_records");
+    const result = await handler({ model: "account.move", domain: [], field_preset: "financial_minimal", limit: 25 });
+
+    expect(result.structuredContent.returned_fields).toEqual(expectedFields);
+    expect(result.structuredContent.field_preset).toBe("financial_minimal");
+  });
+
+  test("oversized rows trigger safeguard_applied or error without exceeding byte cap", async () => {
+    const { BROWSE_MAX_PAYLOAD_BYTES } = await import("./tools/shared");
+    const agent = await buildWriteToolAgent();
+    const huge = "x".repeat(BROWSE_MAX_PAYLOAD_BYTES + 1);
+    let searchReadCalls = 0;
+
+    globalThis.fetch = mock(async (url: string, init: any) => {
+      const method = (url as string).split("/").pop();
+      if (method === "search_count") {
+        return new Response(JSON.stringify({ result: 1 }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      searchReadCalls++;
+      const body = JSON.parse(init.body);
+      const rows = [{ id: 1, name: searchReadCalls === 1 ? huge : "small" }];
+      return new Response(JSON.stringify({ result: rows }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }) as any;
+
+    const handler = getToolHandler(agent, "browse_records");
+    const result = await handler({
+      model: "project.task",
+      domain: [],
+      fields: ["id", "name"],
+      limit: 50
+    });
+
+    if (result.isError) {
+      expect(result.content[0].text).toContain("Result too large");
+    } else {
+      expect(result.structuredContent.safeguard_applied).toBeDefined();
+      expect(JSON.stringify(result.structuredContent.records).length).toBeLessThanOrEqual(BROWSE_MAX_PAYLOAD_BYTES);
+    }
+    expect(searchReadCalls).toBeGreaterThanOrEqual(1);
+  });
+});
+
 describe("search_count", () => {
   afterEach(() => {
     globalThis.fetch = originalFetch;

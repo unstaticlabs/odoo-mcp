@@ -35,6 +35,7 @@ The server never logs, stores, or echoes your key.
 | Tool | Kind | Parameters |
 |---|---|---|
 | `search_records` | read | `model` (string), `domain` (array, default `[]`), `fields` (string[] \| null → curated preset), `limit` (1–100, default 10), `order` (string, optional, e.g. `"name desc"`), `offset` (int ≥ 0, default 0) → includes `returned_fields`, `omitted_fields`, `warnings` |
+| `browse_records` | read | `model` (string), `domain` (array, default `[]`), `field_preset` (`minimal` \| `tracking_minimal` \| `financial_minimal`, default `minimal`), `fields` (string[] \| null — explicit override; mutually exclusive with non-default preset), `limit` (1–100, default 25), `offset` (int ≥ 0, default 0), `cursor` (string \| null, optional offset alias), `order` (string, optional — use stable order when paging) → compact rows + `page` metadata (`count`, `has_more`, `next_offset`) |
 | `search_count` | read | `model` (string), `domain` (array, default `[]`) → `{ count }` via `search_count`, without fetching records |
 | `get_record` | read | `model` (string), `record_id` (positive int), `fields` (string[] \| null → curated preset) → includes field reporting |
 | `batch_read` | read | `model` (string), `ids` (positive int[], min 1, capped at 100), `fields` (string[] \| null → curated preset) → rows via `search_read` + field reporting |
@@ -140,6 +141,19 @@ Transient Odoo errors (`timeout`, `rate_limited`, 5xx, etc.) keep the standard `
 in `error` with `recoverable: true` — no fallback. An HTTP 200 response with a JSON `{error: ...}`
 body (e.g. some Odoo builds rejecting `read_group` without 404) surfaces as `error: "unknown"` —
 also no fallback.
+
+For `browse_records`, use named **field presets** (compact, no `fields_get` round-trip):
+- `minimal` (default) — id, name, and a few key scalar fields per model,
+- `tracking_minimal` — workflow/triage fields (stage, priority, deadlines, …),
+- `financial_minimal` — amounts, dates, and partner refs (no x2many/binary).
+
+Explicit `fields` override any preset. Every response includes `page` metadata
+(`count`, `has_more`, `next_offset`) so agents can page safely without a separate
+`search_count` call.
+
+**Browse workflow:** `browse_records` → scan compact rows and note `id` values →
+`batch_read({ model, ids: [...], fields: null })` or `get_record` for full detail
+on selected records only.
 
 ## Resources
 
