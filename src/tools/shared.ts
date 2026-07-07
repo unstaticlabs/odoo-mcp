@@ -10,6 +10,56 @@ export const DEFAULT_GENERIC_FIELDS = ["id", "display_name"];
 /** How the resolved field list was determined. */
 export type FieldSource = "explicit" | "preset" | "fallback";
 
+/** Named field presets for browse_records and related tooling. */
+export type NamedFieldPreset = "minimal" | "tracking_minimal" | "financial_minimal";
+
+export const NAMED_FIELD_PRESETS: readonly NamedFieldPreset[] = [
+  "minimal",
+  "tracking_minimal",
+  "financial_minimal"
+];
+
+/** Outcome of the pure {@link resolveNamedPreset} resolver. */
+export interface NamedFieldResolution {
+  fields: string[];
+  source: FieldSource;
+  model: string;
+  preset?: NamedFieldPreset;
+}
+
+/** Offset/limit paging metadata for browse_records responses. */
+export interface BrowsePageMetadata {
+  offset: number;
+  limit: number;
+  count: number;
+  returned: number;
+  has_more: boolean;
+}
+
+/** Chat-safe payload size threshold for browse_records capping. */
+export const BROWSE_PAYLOAD_BYTE_LIMIT = 64_000;
+
+export const BROWSE_MIN_PAGE_LIMIT = 1;
+export const BROWSE_DEFAULT_PAGE_LIMIT = 50;
+
+/** Richest → slimmest preset order used when downgrading oversized browse payloads. */
+export const NAMED_PRESET_DOWNGRADE_ORDER: readonly NamedFieldPreset[] = [
+  "financial_minimal",
+  "tracking_minimal",
+  "minimal"
+];
+
+/** Per-record JSON envelope overhead used by {@link estimateBrowsePayloadBytes}. */
+export const RECORD_OVERHEAD_BYTES = 20;
+
+/** Outcome of {@link capBrowsePage} limit/preset adjustments. */
+export interface CapBrowsePageResult {
+  limit: number;
+  preset: NamedFieldPreset;
+  adjusted: boolean;
+  adjustments: string[];
+}
+
 /** Outcome of the pure {@link resolveFields} resolver; consumed by the field-reporting layer. */
 export interface FieldResolution {
   fields: string[];
@@ -323,6 +373,60 @@ export const MODEL_FIELD_PRESETS: Record<string, string[]> = {
 };
 
 /**
+ * Per-model named field presets. `minimal` references {@link MODEL_FIELD_PRESETS} for lockstep
+ * curation; richer presets add tracking/financial subsets. Returned arrays alias these constants —
+ * callers must not mutate them.
+ */
+export const MODEL_NAMED_FIELD_PRESETS: Record<
+  string,
+  Partial<Record<NamedFieldPreset, readonly string[]>>
+> = {
+  "project.task": {
+    minimal: MODEL_FIELD_PRESETS["project.task"],
+    tracking_minimal: [
+      "id",
+      "name",
+      "stage_id",
+      "project_id",
+      "user_ids",
+      "priority",
+      "state",
+      "date_deadline"
+    ],
+    financial_minimal: ["id", "name", "stage_id", "project_id"]
+  },
+  "project.project": {
+    minimal: MODEL_FIELD_PRESETS["project.project"],
+    tracking_minimal: ["id", "name", "partner_id", "user_id", "stage_id", "active", "date_start"],
+    financial_minimal: MODEL_FIELD_PRESETS["project.project"]
+  },
+  "res.partner": {
+    minimal: MODEL_FIELD_PRESETS["res.partner"],
+    tracking_minimal: ["id", "name", "email", "phone", "country_id", "category_id"],
+    financial_minimal: [
+      "id",
+      "name",
+      "email",
+      "phone",
+      "vat",
+      "property_account_receivable_id"
+    ]
+  },
+  "res.users": {
+    minimal: MODEL_FIELD_PRESETS["res.users"],
+    tracking_minimal: ["id", "name", "login", "email", "active", "partner_id"],
+    financial_minimal: MODEL_FIELD_PRESETS["res.users"]
+  }
+};
+
+/** Cross-model named presets used when a model has no curated entry for the requested preset. */
+export const GENERIC_NAMED_FIELD_PRESETS: Record<NamedFieldPreset, readonly string[]> = {
+  minimal: DEFAULT_GENERIC_FIELDS,
+  tracking_minimal: ["id", "display_name", "state", "write_date"],
+  financial_minimal: ["id", "display_name", "amount_total", "currency_id", "state"]
+};
+
+/**
  * Pure, model-aware field resolver. No Odoo round-trip on any path.
  * - explicit non-empty requestedFields -> honored verbatim (order preserved), source "explicit"
  * - no fields + known model            -> curated preset, source "preset"
@@ -356,4 +460,165 @@ export function resolveFieldPreset(
 ): { fields: string[]; resolution: FieldPresetResolution } {
   const { fields, source } = resolveFields(model, requestedFields);
   return { fields, resolution: { source, model } };
+}
+
+/**
+ * Pure, model-aware named-preset resolver. No Odoo round-trip on any path.
+ * - explicit non-empty requestedFields -> honored verbatim (order preserved), source "explicit"
+ * - preset provided (or omitted -> "minimal") -> model curated preset when available, else generic
+ * - empty requestedFields array falls through to preset lookup (not explicit)
+ * - ALL_FIELDS_SENTINEL is returned verbatim as explicit
+ * Returned arrays alias shared module constants — callers must not mutate them.
+ */
+export function resolveNamedPreset(
+  model: string,
+  preset?: NamedFieldPreset | null,
+  requestedFields?: string[] | null
+): NamedFieldResolution {
+  if (requestedFields != null && requestedFields.length > 0) {
+    return { fields: requestedFields, source: "explicit", model };
+  }
+
+  const effectivePreset: NamedFieldPreset = preset ?? "minimal";
+  const modelPreset = MODEL_NAMED_FIELD_PRESETS[model]?.[effectivePreset];
+  if (modelPreset) {
+    return { fields: modelPreset as string[], source: "preset", model, preset: effectivePreset };
+  }
+  return {
+    fields: GENERIC_NAMED_FIELD_PRESETS[effectivePreset] as string[],
+    source: "fallback",
+    model,
+    preset: effectivePreset
+  };
+}
+
+/**
+ * Build offset/limit paging metadata for browse_records.
+ * `count` is the total matching rows (from search_count); `returned` is rows.length for this page.
+ */
+export function buildBrowsePageMetadata(input: {
+  offset: number;
+  limit: number;
+  count: number;
+  returned: number;
+}): BrowsePageMetadata {
+  const { offset, limit, count, returned } = input;
+  return {
+    offset,
+    limit,
+    count,
+    returned,
+    has_more: offset + returned < count
+  };
+}
+
+function roughWidth(value: unknown): number {
+  if (value === null || value === undefined || typeof value === "boolean") return 4;
+  if (typeof value === "number") return 8;
+  if (typeof value === "string") return value.length;
+  if (Array.isArray(value)) {
+    let total = 2;
+    for (const item of value) {
+      total += roughWidth(item) + 1;
+    }
+    return total;
+  }
+  if (typeof value === "object") {
+    let total = 2;
+    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+      total += key.length + roughWidth(entry) + 3;
+    }
+    return total;
+  }
+  return String(value).length;
+}
+
+const BROWSE_ENVELOPE_OVERHEAD_BYTES = 64;
+const FIELD_NAME_OVERHEAD_BYTES = 4;
+
+/** Heuristic payload size estimate for browse_records capping (no full JSON.stringify in hot path). */
+export function estimateBrowsePayloadBytes(records: unknown[], fields: string[]): number {
+  let total = BROWSE_ENVELOPE_OVERHEAD_BYTES;
+  for (const record of records) {
+    total += RECORD_OVERHEAD_BYTES;
+    if (record && typeof record === "object") {
+      const row = record as Record<string, unknown>;
+      for (const field of fields) {
+        total += field.length + FIELD_NAME_OVERHEAD_BYTES + roughWidth(row[field]);
+      }
+    } else {
+      for (const field of fields) {
+        total += field.length + FIELD_NAME_OVERHEAD_BYTES + 4;
+      }
+    }
+  }
+  return total;
+}
+
+/** True when {@link estimateBrowsePayloadBytes} exceeds {@link BROWSE_PAYLOAD_BYTE_LIMIT}. */
+export function isBrowsePayloadOversized(records: unknown[], fields: string[]): boolean {
+  return estimateBrowsePayloadBytes(records, fields) > BROWSE_PAYLOAD_BYTE_LIMIT;
+}
+
+function nextSlimmerPreset(preset: NamedFieldPreset): NamedFieldPreset | null {
+  const idx = NAMED_PRESET_DOWNGRADE_ORDER.indexOf(preset);
+  if (idx < 0 || idx >= NAMED_PRESET_DOWNGRADE_ORDER.length - 1) return null;
+  return NAMED_PRESET_DOWNGRADE_ORDER[idx + 1] ?? null;
+}
+
+/**
+ * Shrink page limit and/or downgrade named preset when the estimated payload exceeds
+ * {@link BROWSE_PAYLOAD_BYTE_LIMIT}. Explicit fields only shrink limit — preset is never downgraded.
+ */
+export function capBrowsePage(input: {
+  model: string;
+  preset: NamedFieldPreset;
+  limit: number;
+  records: unknown[];
+  explicitFields?: string[] | null;
+}): CapBrowsePageResult {
+  const { model, records, explicitFields } = input;
+  let limit = input.limit;
+  let preset = input.preset;
+  const adjustments: string[] = [];
+  const initialLimit = limit;
+  const initialPreset = preset;
+
+  const estimateFor = (pageLimit: number, activePreset: NamedFieldPreset, fields: string[]) =>
+    estimateBrowsePayloadBytes(records.slice(0, pageLimit), fields);
+
+  if (explicitFields?.length) {
+    while (
+      estimateFor(limit, preset, explicitFields) > BROWSE_PAYLOAD_BYTE_LIMIT &&
+      limit > BROWSE_MIN_PAGE_LIMIT
+    ) {
+      const nextLimit = Math.max(BROWSE_MIN_PAGE_LIMIT, Math.floor(limit / 2));
+      adjustments.push(`limit:${limit}→${nextLimit}`);
+      limit = nextLimit;
+    }
+  } else {
+    let fields = resolveNamedPreset(model, preset).fields;
+    while (estimateFor(limit, preset, fields) > BROWSE_PAYLOAD_BYTE_LIMIT) {
+      if (limit > BROWSE_MIN_PAGE_LIMIT) {
+        const nextLimit = Math.max(BROWSE_MIN_PAGE_LIMIT, Math.floor(limit / 2));
+        adjustments.push(`limit:${limit}→${nextLimit}`);
+        limit = nextLimit;
+        fields = resolveNamedPreset(model, preset).fields;
+        continue;
+      }
+
+      const slimmer = nextSlimmerPreset(preset);
+      if (!slimmer) break;
+      adjustments.push(`preset:${preset}→${slimmer}`);
+      preset = slimmer;
+      fields = resolveNamedPreset(model, preset).fields;
+    }
+  }
+
+  return {
+    limit,
+    preset,
+    adjusted: limit !== initialLimit || preset !== initialPreset,
+    adjustments
+  };
 }
