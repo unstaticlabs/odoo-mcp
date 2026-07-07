@@ -41,7 +41,7 @@ The server never logs, stores, or echoes your key.
 | `list_models` | read | — |
 | `get_fields` | read | `model` (string) → field name/type/label schema |
 | `projects.list_tasks` | read | `domain` (array), `fields` (string[]) — convenience wrapper over `project.task`; includes field reporting |
-| `aggregate_records` | read | `model` (string), `domain` (array), `groupby` (string[], Odoo `field:agg` syntax e.g. `invoice_date:month`), `aggregates` (string[], e.g. `amount_total:sum`, `__count`), `lazy` (bool, default true), `orderby` (string, optional) — wraps Odoo `read_group` |
+| `aggregate_records` | read | `model` (string), `domain` (array), `groupby` (string[], Odoo `field:agg` syntax e.g. `invoice_date:month`), `aggregates` (string[], e.g. `amount_total:sum`, `__count`), `lazy` (bool, default true), `orderby` (string, optional), `limit` (1–100, default 100, fallback scan cap), `offset` (int ≥ 0, default 0) — native `read_group` with bounded connector fallback |
 | `create_record` | write | `model` (string), `values` (object) |
 | `update_record` | write | `model` (string), `record_id` (positive int), `values` (object; x2many use Odoo command tuples, e.g. `[[6,0,ids]]`, `[[4,id]]`, `[[3,id]]`) |
 | `delete_record` | write | `model` (string), `record_id` (positive int) |
@@ -96,6 +96,50 @@ Tool responses include structured field reporting alongside the records:
 - `warnings` — when an **explicitly requested** field is omitted
 
 Use `get_fields` when you need the full field schema; the default read path does **not** call `fields_get`.
+
+### `aggregate_records` — grouped summaries
+
+Uses Odoo `read_group` when the model supports it. When native `read_group` returns
+`model_or_method_not_found` (HTTP 404) but `search_read` works, the connector performs a
+**bounded fallback**: one `search_count` + one `search_read` page (max **100** records per
+call), then groups in memory. Check `metadata.fallback` and `warnings` in the response.
+
+**Pagination (fallback only).** `limit` (default 100, max 100) and `offset` (default 0) control
+which slice of matching records is scanned. When `metadata.has_more` is true, increase `offset`
+and call again — the connector never auto-fetches additional pages.
+
+**Groupby matrix (fallback supports single-level only).**
+
+| Field type | Native `read_group` | Fallback |
+|---|---|---|
+| `many2one`, `selection`, `char`, `boolean`, `integer` | yes | yes |
+| `date`, `datetime` (+ `:day`/`:week`/`:month`/`:quarter`/`:year`) | yes | yes (UTC buckets) |
+| `one2many`, `many2many`, `binary`, `html`, `text`, `reference` | — | rejected at validation |
+
+**Aggregates.**
+
+| Token | Native | Fallback |
+|---|---|---|
+| `__count` | yes | yes |
+| `field:sum` | yes | yes |
+| `field:avg`, `:min`, `:max`, `:count` | yes | no (`unsupported_aggregate`) |
+
+Multi-level `groupby` (length > 1) is native-only; fallback refuses with `unsupported_aggregate`.
+
+**Error diagnosis** (JSON error envelope field `diagnosis`, alongside `error` / `details`):
+
+| `diagnosis` | When | Fallback attempted? |
+|---|---|---|
+| `permission_denied` | HTTP 401 / 403 | never |
+| `unsupported_model` | Unknown model or no `fields_get` / `search_read` | no |
+| `invalid_groupby` | Unknown or non-groupable groupby field | no (pre-native) |
+| `unsupported_aggregate` | Unsupported operator in fallback, or multi-level groupby | no |
+| `connector_bug` | Unexpected connector failure | no |
+
+Transient Odoo errors (`timeout`, `rate_limited`, 5xx, etc.) keep the standard `OdooErrorCode`
+in `error` with `recoverable: true` — no fallback. An HTTP 200 response with a JSON `{error: ...}`
+body (e.g. some Odoo builds rejecting `read_group` without 404) surfaces as `error: "unknown"` —
+also no fallback.
 
 ## Resources
 
