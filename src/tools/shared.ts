@@ -924,6 +924,13 @@ export interface NamedPresetResolution {
   model: string;
 }
 
+/** Browse-aligned field resolution for batch_read / get_record. */
+export interface BatchReadFieldsResolution {
+  fields: string[];
+  field_preset: NamedFieldPreset | null;
+  fields_resolution: { source: FieldSource; model: string };
+}
+
 const TRACKING_GENERIC_FALLBACK = ["id", "display_name", "state"];
 const FINANCIAL_GENERIC_FALLBACK = ["id", "display_name", "amount_total"];
 
@@ -1000,6 +1007,54 @@ export function resolveNamedFieldPreset(
     return { fields: modelFields, preset, source: "preset", model };
   }
   return { fields: PRESET_GENERIC_FALLBACKS[preset], preset, source: "fallback", model };
+}
+
+/**
+ * Three-way field resolver for batch_read / get_record — pure, no Odoo round-trip.
+ *
+ * Precedence (first match wins):
+ * 1. Explicit non-empty `fields` → returned verbatim, `field_preset: null`, source `"explicit"`.
+ *    Empty `[]` is **not** explicit. `ALL_FIELDS_SENTINEL` passes through as explicit.
+ * 2. Set `field_preset` (including `"minimal"`) with null/empty `fields` → delegates to
+ *    {@link resolveNamedFieldPreset} unchanged.
+ * 3. `field_preset` **undefined** with null/empty/omitted `fields` → delegates to
+ *    {@link resolveFields} (legacy MODEL_FIELD_PRESETS path); `field_preset` is always `null`
+ *    even when legacy source is `"preset"`.
+ *
+ * Use `undefined` vs a set value on `field_preset` to distinguish paths 2 and 3.
+ * Returned arrays alias shared module constants — callers must not mutate them.
+ */
+export function resolveBatchReadFields(
+  model: string,
+  options?: {
+    field_preset?: NamedFieldPreset;
+    fields?: string[] | null;
+  }
+): BatchReadFieldsResolution {
+  const fields = options?.fields;
+  if (fields != null && fields.length > 0) {
+    return {
+      fields,
+      field_preset: null,
+      fields_resolution: { source: "explicit", model }
+    };
+  }
+
+  if (options?.field_preset !== undefined) {
+    const named = resolveNamedFieldPreset(model, options.field_preset, fields);
+    return {
+      fields: named.fields,
+      field_preset: named.preset,
+      fields_resolution: { source: named.source, model: named.model }
+    };
+  }
+
+  const legacy = resolveFields(model, fields);
+  return {
+    fields: legacy.fields,
+    field_preset: null,
+    fields_resolution: { source: legacy.source, model: legacy.model }
+  };
 }
 
 export interface BrowsePageMeta {
