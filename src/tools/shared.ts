@@ -1191,8 +1191,9 @@ export type BrowseResourceUriInput = {
 
 /**
  * Parses `odoo://{model}/browse?…` query params into args for browseRecords.
- * Validation mirrors zBrowseRecordsInput in read.ts. Throws Error on invalid input.
- * When explicit `fields` are present, field_preset is parsed for metadata only.
+ * Validation mirrors zBrowseRecordsInput in read.ts (including the refine rule:
+ * explicit non-empty `fields` requires `field_preset` to be `"minimal"` or absent).
+ * Throws Error on invalid input.
  */
 export function parseBrowseResourceParams(url: URL, modelFromPath: string): BrowseResourceParams {
   const model = modelFromPath.trim();
@@ -1221,6 +1222,10 @@ export function parseBrowseResourceParams(url: URL, modelFromPath: string): Brow
     if (parsed.length > 0) {
       fields = parsed;
     }
+  }
+
+  if (fields != null && fields.length > 0 && field_preset !== "minimal") {
+    throw new Error("cannot set both explicit fields and a non-default field_preset");
   }
 
   const limitParam = url.searchParams.get("limit");

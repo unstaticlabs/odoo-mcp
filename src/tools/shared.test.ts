@@ -647,6 +647,15 @@ describe("browse resource URI", () => {
     expect(parseBrowseResourceParams(new URL(canonical), model).fields).toEqual(["id", "name", "partner_id"]);
   });
 
+  test("explicit fields combined with a non-default field_preset throws Error", () => {
+    expect(() =>
+      parseBrowseResourceParams(
+        new URL("odoo://sale.order/browse?fields=id%2Cname&field_preset=tracking_minimal"),
+        model
+      )
+    ).toThrow(/cannot set both explicit fields and a non-default field_preset/);
+  });
+
   test("each field_preset enum value accepted", () => {
     for (const preset of NAMED_FIELD_PRESET_VALUES) {
       const uri = buildBrowseResourceUri({ model, field_preset: preset });
