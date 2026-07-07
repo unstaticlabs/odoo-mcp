@@ -97,6 +97,63 @@ export interface FieldsReport {
   omitted_fields: FieldOmission[];
 }
 
+export type FieldPresetName = "minimal" | "tracking_minimal" | "financial_minimal";
+export const FIELD_PRESET_NAMES = ["minimal", "tracking_minimal", "financial_minimal"] as const;
+
+export interface PageMetadata {
+  offset: number;
+  limit: number;
+  count: number;
+  returned: number;
+  has_more: boolean;
+  next_cursor?: string;
+}
+
+/** Pure builder: `has_more = offset + returned < count`; clamps `returned` to >= 0. */
+export function buildPageMetadata(args: {
+  offset: number;
+  limit: number;
+  count: number;
+  returned: number;
+  next_cursor?: string;
+}): PageMetadata {
+  const returned = Math.max(0, args.returned);
+  const has_more = args.offset + returned < args.count;
+  const page: PageMetadata = {
+    offset: args.offset,
+    limit: args.limit,
+    count: args.count,
+    returned,
+    has_more
+  };
+  if (args.next_cursor !== undefined) {
+    page.next_cursor = args.next_cursor;
+  }
+  return page;
+}
+
+export interface CompactFieldResolution {
+  source: FieldSource;
+  model: string;
+  preset: FieldPresetName | null;
+}
+
+export interface CompactFieldsBlock {
+  /** Fields Odoo was asked to return (pre-report). */
+  resolved_fields: string[];
+  returned_fields: string[];
+  omitted_fields: FieldOmission[];
+  resolution: CompactFieldResolution;
+}
+
+export interface CompactReadEnvelope {
+  model: string;
+  records: Record<string, unknown>[];
+  fields: CompactFieldsBlock;
+  page: PageMetadata;
+  warnings: string[];
+}
+
 /** Exported for unit testing (see callOdoo export pattern). */
 export function computeFieldsReport(
   resolved: { fields: string[]; explicit: boolean },
@@ -216,6 +273,65 @@ export class AggregationError extends Error {
     this.name = "AggregationError";
     this.diagnosis = diagnosis;
   }
+}
+
+const zFieldOmission = z.object({
+  field: z.string(),
+  reason: z.enum(["absent-from-rows", "unknown-field"])
+});
+
+const zFieldSource = z.enum(["explicit", "preset", "fallback"]);
+
+const zFieldPresetName = z.enum(["minimal", "tracking_minimal", "financial_minimal"]);
+
+export const zPageMetadata = z.object({
+  offset: z.number(),
+  limit: z.number(),
+  count: z.number(),
+  returned: z.number(),
+  has_more: z.boolean(),
+  next_cursor: z.string().optional()
+});
+
+export const zCompactFieldsBlock = z.object({
+  resolved_fields: z.array(z.string()),
+  returned_fields: z.array(z.string()),
+  omitted_fields: z.array(zFieldOmission),
+  resolution: z.object({
+    source: zFieldSource,
+    model: z.string(),
+    preset: zFieldPresetName.nullable()
+  })
+});
+
+export const zCompactReadEnvelope = z.object({
+  model: z.string(),
+  records: zOdooRecords,
+  fields: zCompactFieldsBlock,
+  page: zPageMetadata,
+  warnings: zWarnings
+});
+
+export function buildCompactReadEnvelope(args: {
+  model: string;
+  records: Record<string, unknown>[];
+  resolved: { fields: string[]; resolution: CompactFieldResolution };
+  fieldsReport: FieldsReport;
+  page: PageMetadata;
+  warnings?: string[];
+}): CompactReadEnvelope {
+  return {
+    model: args.model,
+    records: args.records,
+    fields: {
+      resolved_fields: args.resolved.fields,
+      returned_fields: args.fieldsReport.returned_fields,
+      omitted_fields: args.fieldsReport.omitted_fields,
+      resolution: args.resolved.resolution
+    },
+    page: args.page,
+    warnings: args.warnings ?? []
+  };
 }
 
 export interface ErrorEnvelope {
@@ -400,16 +516,87 @@ export function parseDomainParam(uri: URL): unknown[] {
   return parsed;
 }
 
+async function resolveFieldsViaOdoo(
+  queue: OdooQueue,
+  conn: OdooConnection,
+  model: string,
+  fields: string[] | null
+): Promise<{ fields: string[]; fieldsMeta: Record<string, OdooFieldMeta> | null }> {
+  if (fields !== null && fields.length === 1 && fields[0] === ALL_FIELDS_SENTINEL) {
+    return { fields: [], fieldsMeta: null }; // empty fields array => Odoo search_read returns all fields natively
+  }
+  if (fields !== null) return { fields, fieldsMeta: null };
+
+  try {
+    const meta = (await queue.enqueue(conn, model, "fields_get", {
+      attributes: ["type", "store", "selection"]
+    })) as Record<string, OdooFieldMeta>;
+    return { fields: pickSmartFields(meta), fieldsMeta: meta };
+  } catch {
+    return { fields: DEFAULT_GENERIC_FIELDS, fieldsMeta: null }; // fields_get failed (e.g. bad model) — fall back rather than error the whole search
+  }
+}
+
+const MINIMAL_PROJECT_PROJECT_FIELDS = ["id", "name", "partner_id", "user_id", "stage_id"] as const;
+const MINIMAL_RES_PARTNER_FIELDS = ["id", "name", "email", "phone"] as const;
+const MINIMAL_RES_USERS_FIELDS = ["id", "name", "login", "email"] as const;
+
+const TRACKING_TASK_FIELDS = [
+  "id",
+  "name",
+  "stage_id",
+  "project_id",
+  "priority",
+  "user_ids",
+  "date_deadline"
+] as const;
+const TRACKING_PROJECT_FIELDS = ["id", "name", "stage_id", "user_id", "date_start", "date"] as const;
+const TRACKING_PARTNER_FIELDS = ["id", "name", "email", "phone", "category_id", "active"] as const;
+const TRACKING_USERS_FIELDS = ["id", "name", "login", "email", "active"] as const;
+
+const FINANCIAL_TASK_FIELDS = ["id", "name", "project_id", "planned_hours", "effective_hours"] as const;
+const FINANCIAL_PROJECT_FIELDS = ["id", "name", "partner_id", "analytic_account_id"] as const;
+const FINANCIAL_PARTNER_FIELDS = ["id", "name", "credit", "debit", "currency_id"] as const;
+
 /**
  * Static, model-aware field presets. Every {@link CORE_MODEL_ALLOWLIST} model has a curated,
  * read-safe entry; adding a model is a one-line map edit (no code-path change). `project.task`
  * reuses {@link DEFAULT_TASK_FIELDS} so the two stay in lockstep.
  */
 export const MODEL_FIELD_PRESETS: Record<string, string[]> = {
-  "project.task": DEFAULT_TASK_FIELDS, // id, name, stage_id, project_id
-  "project.project": ["id", "name", "partner_id", "user_id", "stage_id"],
-  "res.partner": ["id", "name", "email", "phone"],
-  "res.users": ["id", "name", "login", "email"]
+  "project.task": DEFAULT_TASK_FIELDS,
+  "project.project": [...MINIMAL_PROJECT_PROJECT_FIELDS],
+  "res.partner": [...MINIMAL_RES_PARTNER_FIELDS],
+  "res.users": [...MINIMAL_RES_USERS_FIELDS]
+};
+
+/** Universal fallback field list per preset (unknown models). */
+export const FIELD_PRESET_FALLBACKS: Record<FieldPresetName, readonly string[]> = {
+  minimal: DEFAULT_GENERIC_FIELDS,
+  tracking_minimal: ["id", "display_name", "state"],
+  financial_minimal: ["id", "display_name", "currency_id"]
+};
+
+/** Per-model overrides: preset → model → fields[]. */
+export const FIELD_PRESET_MODEL_OVERRIDES: Record<FieldPresetName, Record<string, readonly string[]>> = {
+  minimal: {
+    "project.task": DEFAULT_TASK_FIELDS,
+    "project.project": MINIMAL_PROJECT_PROJECT_FIELDS,
+    "res.partner": MINIMAL_RES_PARTNER_FIELDS,
+    "res.users": MINIMAL_RES_USERS_FIELDS
+  },
+  tracking_minimal: {
+    "project.task": TRACKING_TASK_FIELDS,
+    "project.project": TRACKING_PROJECT_FIELDS,
+    "res.partner": TRACKING_PARTNER_FIELDS,
+    "res.users": TRACKING_USERS_FIELDS
+  },
+  financial_minimal: {
+    "project.task": FINANCIAL_TASK_FIELDS,
+    "project.project": FINANCIAL_PROJECT_FIELDS,
+    "res.partner": FINANCIAL_PARTNER_FIELDS,
+    "res.users": MINIMAL_RES_USERS_FIELDS
+  }
 };
 
 /**
@@ -1009,4 +1196,40 @@ export async function browseRecords(
   }
 
   throw new Error("browseRecords: safeguard loop exhausted without result");
+}
+
+/**
+ * Pure, synchronous compact field resolver with named preset support. No Odoo round-trip.
+ * Precedence: explicit non-empty `fields` → preset override → universal fallback.
+ * Defaults to `"minimal"` when no preset is supplied. An empty `fields` array is not explicit.
+ * `ALL_FIELDS_SENTINEL` is returned verbatim as explicit. Returned arrays alias module
+ * constants — callers must not mutate them.
+ */
+export function resolveCompactFields(
+  model: string,
+  opts?: {
+    field_preset?: FieldPresetName | null;
+    fields?: string[] | null;
+  }
+): { fields: string[]; resolution: CompactFieldResolution } {
+  const requestedFields = opts?.fields;
+  if (requestedFields != null && requestedFields.length > 0) {
+    return {
+      fields: requestedFields,
+      resolution: { source: "explicit", model, preset: null }
+    };
+  }
+
+  const preset: FieldPresetName = opts?.field_preset ?? "minimal";
+  const override = FIELD_PRESET_MODEL_OVERRIDES[preset][model];
+  if (override) {
+    return {
+      fields: override as string[],
+      resolution: { source: "preset", model, preset }
+    };
+  }
+  return {
+    fields: FIELD_PRESET_FALLBACKS[preset] as string[],
+    resolution: { source: "fallback", model, preset }
+  };
 }
