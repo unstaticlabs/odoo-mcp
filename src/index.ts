@@ -5,8 +5,43 @@ import { oauthDefaultHandler } from "./oauth";
 export { callOdoo, OdooError, classifyOdooError, isRecoverable } from "./odoo";
 export type { OdooErrorCode } from "./odoo";
 export { OdooQueue } from "./odoo-queue";
-export { pickSmartFields, searchRecords, escapeHtml, countRecords, resolveFields, MODEL_FIELD_PRESETS, browseRecords, resolveNamedFieldPreset, buildBrowsePageMeta, applyBrowseSafeguard, NAMED_MODEL_FIELD_PRESETS, BROWSE_MAX_PAYLOAD_BYTES, BROWSE_MIN_LIMIT } from "./tools/shared";
-export type { FieldResolution, NamedFieldPreset, NamedPresetResolution, BrowseResult, BrowsePageMeta, BrowseSafeguardPlan } from "./tools/shared";
+export {
+  pickSmartFields,
+  searchRecords,
+  escapeHtml,
+  countRecords,
+  resolveFields,
+  MODEL_FIELD_PRESETS,
+  browseRecords,
+  resolveNamedFieldPreset,
+  buildBrowsePageMeta,
+  applyBrowseSafeguard,
+  NAMED_MODEL_FIELD_PRESETS,
+  BROWSE_MAX_PAYLOAD_BYTES,
+  BROWSE_MIN_LIMIT,
+  resolveCompactFields,
+  buildPageMetadata,
+  buildCompactReadEnvelope,
+  FIELD_PRESET_NAMES,
+  FIELD_PRESET_FALLBACKS,
+  FIELD_PRESET_MODEL_OVERRIDES,
+  zPageMetadata,
+  zCompactFieldsBlock,
+  zCompactReadEnvelope
+} from "./tools/shared";
+export type {
+  FieldResolution,
+  NamedFieldPreset,
+  NamedPresetResolution,
+  BrowseResult,
+  BrowsePageMeta,
+  BrowseSafeguardPlan,
+  FieldPresetName,
+  PageMetadata,
+  CompactReadEnvelope,
+  CompactFieldResolution,
+  CompactFieldsBlock
+} from "./tools/shared";
 export { parseButtonsFromArch, mergeModelActions } from "./tools/read";
 export { CURATED_MODEL_ACTIONS } from "./tools/actions-map";
 export { normalizeRecord, normalizeRecords, deriveWorkflowStatus } from "./normalizer";

@@ -10,6 +10,10 @@ import {
   decodeBrowseCursor,
   BROWSE_MAX_PAYLOAD_BYTES,
   BROWSE_MIN_LIMIT,
+  resolveCompactFields,
+  buildPageMetadata,
+  buildCompactReadEnvelope,
+  computeFieldsReport,
   CORE_MODEL_ALLOWLIST,
   DEFAULT_TASK_FIELDS,
   DEFAULT_GENERIC_FIELDS,
@@ -18,7 +22,6 @@ import {
   GENERIC_NAMED_FIELD_PRESETS,
   NAMED_FIELD_PRESETS,
   NAMED_MODEL_FIELD_PRESETS,
-  computeFieldsReport,
   ALL_FIELDS_SENTINEL,
   buildBrowsePageMetadata,
   estimateBrowsePayloadBytes,
@@ -27,6 +30,10 @@ import {
   BROWSE_PAYLOAD_BYTE_LIMIT,
   BROWSE_MIN_PAGE_LIMIT,
   BROWSE_DEFAULT_PAGE_LIMIT,
+  FIELD_PRESET_NAMES,
+  FIELD_PRESET_FALLBACKS,
+  FIELD_PRESET_MODEL_OVERRIDES,
+  type FieldPresetName,
 } from "./shared";
 
 describe("resolveFieldPreset", () => {
@@ -574,5 +581,223 @@ describe("browse cursor", () => {
     const cursor = encodeBrowseCursor({ offset: 10, model: "project.task", domain: [] });
     const decoded = decodeBrowseCursor(cursor, { model: "project.task", domain: [["id", ">", 0]] });
     expect(decoded).toEqual({ error: "cursor does not match current query" });
+  });
+});
+
+const EXPECTED_PRESET_FIELDS: Record<FieldPresetName, Record<string, readonly string[]>> = {
+  minimal: {
+    "project.task": DEFAULT_TASK_FIELDS,
+    "project.project": ["id", "name", "partner_id", "user_id", "stage_id"],
+    "res.partner": ["id", "name", "email", "phone"],
+    "res.users": ["id", "name", "login", "email"]
+  },
+  tracking_minimal: {
+    "project.task": ["id", "name", "stage_id", "project_id", "priority", "user_ids", "date_deadline"],
+    "project.project": ["id", "name", "stage_id", "user_id", "date_start", "date"],
+    "res.partner": ["id", "name", "email", "phone", "category_id", "active"],
+    "res.users": ["id", "name", "login", "email", "active"]
+  },
+  financial_minimal: {
+    "project.task": ["id", "name", "project_id", "planned_hours", "effective_hours"],
+    "project.project": ["id", "name", "partner_id", "analytic_account_id"],
+    "res.partner": ["id", "name", "credit", "debit", "currency_id"],
+    "res.users": ["id", "name", "login", "email"]
+  }
+};
+
+describe("resolveCompactFields", () => {
+  test("known model + field_preset minimal matches resolveFields", () => {
+    const compact = resolveCompactFields("project.task", { field_preset: "minimal" });
+    const legacy = resolveFields("project.task");
+    expect(compact.fields).toEqual(legacy.fields);
+    expect(compact.resolution.source).toBe("preset");
+    expect(compact.resolution.preset).toBe("minimal");
+    expect(compact.resolution.model).toBe("project.task");
+  });
+
+  test("each preset × each allowlisted model → override array, source preset", () => {
+    for (const preset of FIELD_PRESET_NAMES) {
+      for (const model of CORE_MODEL_ALLOWLIST) {
+        const { fields, resolution } = resolveCompactFields(model, { field_preset: preset });
+        expect(fields).toEqual(EXPECTED_PRESET_FIELDS[preset][model]);
+        expect(resolution).toEqual({ source: "preset", model, preset });
+      }
+    }
+  });
+
+  test("unknown model × each preset → fallback", () => {
+    for (const preset of FIELD_PRESET_NAMES) {
+      const { fields, resolution } = resolveCompactFields("some.unknown.model", { field_preset: preset });
+      expect(fields).toEqual(FIELD_PRESET_FALLBACKS[preset]);
+      expect(resolution).toEqual({ source: "fallback", model: "some.unknown.model", preset });
+    }
+  });
+
+  test("explicit fields win over any field_preset", () => {
+    const requested = ["name", "id", "custom_x"];
+    const { fields, resolution } = resolveCompactFields("project.task", {
+      field_preset: "tracking_minimal",
+      fields: requested
+    });
+    expect(fields).toEqual(requested);
+    expect(resolution).toEqual({ source: "explicit", model: "project.task", preset: null });
+  });
+
+  test("empty fields array falls through to default minimal preset", () => {
+    const { resolution } = resolveCompactFields("project.task", { fields: [] });
+    expect(resolution.source).toBe("preset");
+    expect(resolution.preset).toBe("minimal");
+  });
+
+  test("fields null + omitted preset defaults to minimal", () => {
+    const { resolution } = resolveCompactFields("project.task", { fields: null });
+    expect(resolution.source).toBe("preset");
+    expect(resolution.preset).toBe("minimal");
+  });
+
+  test("__all__ sentinel returned verbatim as explicit", () => {
+    const { fields, resolution } = resolveCompactFields("project.task", { fields: ["__all__"] });
+    expect(fields).toEqual(["__all__"]);
+    expect(resolution).toEqual({ source: "explicit", model: "project.task", preset: null });
+  });
+
+  test("resolveFields equivalence matrix", () => {
+    const models = [...CORE_MODEL_ALLOWLIST, "some.unknown.model"];
+    const fieldInputs: (string[] | null | undefined)[] = [
+      undefined,
+      null,
+      [],
+      ["name", "id"],
+      ["__all__"]
+    ];
+    for (const model of models) {
+      for (const fields of fieldInputs) {
+        const legacy = resolveFields(model, fields);
+        const compact = resolveCompactFields(model, { field_preset: "minimal", fields });
+        expect(compact.fields).toEqual(legacy.fields);
+        expect(compact.resolution.source).toBe(legacy.source);
+      }
+    }
+  });
+});
+
+describe("field-preset registry invariants", () => {
+  test("every CORE_MODEL_ALLOWLIST model has non-empty entry under each preset", () => {
+    for (const preset of FIELD_PRESET_NAMES) {
+      for (const model of CORE_MODEL_ALLOWLIST) {
+        const entry = FIELD_PRESET_MODEL_OVERRIDES[preset][model];
+        expect(entry).toBeDefined();
+        expect(entry.length).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  test("minimal project.task override aliases DEFAULT_TASK_FIELDS", () => {
+    expect(FIELD_PRESET_MODEL_OVERRIDES.minimal["project.task"]).toBe(DEFAULT_TASK_FIELDS);
+  });
+
+  test("MODEL_FIELD_PRESETS keys unchanged", () => {
+    expect(Object.keys(MODEL_FIELD_PRESETS).sort()).toEqual(
+      ["project.project", "project.task", "res.partner", "res.users"].sort()
+    );
+  });
+});
+
+describe("buildPageMetadata", () => {
+  test("full page has_more true", () => {
+    const page = buildPageMetadata({ offset: 0, limit: 10, count: 25, returned: 10 });
+    expect(page).toEqual({
+      offset: 0,
+      limit: 10,
+      count: 25,
+      returned: 10,
+      has_more: true
+    });
+    expect(page.next_cursor).toBeUndefined();
+  });
+
+  test("partial last page has_more false", () => {
+    const page = buildPageMetadata({ offset: 20, limit: 10, count: 25, returned: 5 });
+    expect(page.has_more).toBe(false);
+    expect(page.returned).toBe(5);
+  });
+
+  test("empty page has_more false", () => {
+    const page = buildPageMetadata({ offset: 0, limit: 10, count: 0, returned: 0 });
+    expect(page.has_more).toBe(false);
+    expect(page.returned).toBe(0);
+  });
+
+  test("next_cursor passed through when supplied", () => {
+    const page = buildPageMetadata({
+      offset: 0,
+      limit: 10,
+      count: 25,
+      returned: 10,
+      next_cursor: "abc123"
+    });
+    expect(page.next_cursor).toBe("abc123");
+  });
+
+  test("clamps negative returned to zero", () => {
+    const page = buildPageMetadata({ offset: 0, limit: 10, count: 5, returned: -3 });
+    expect(page.returned).toBe(0);
+    expect(page.has_more).toBe(true);
+  });
+});
+
+describe("buildCompactReadEnvelope", () => {
+  test("assembles complete envelope with default warnings", () => {
+    const resolved = resolveCompactFields("project.task");
+    const rows = [{ id: 1, name: "Task A", stage_id: [1, "Todo"], project_id: [2, "Proj"] }];
+    const warnings: string[] = [];
+    const fieldsReport = computeFieldsReport(
+      { fields: resolved.fields, explicit: false },
+      rows,
+      warnings,
+      "project.task"
+    );
+    const page = buildPageMetadata({ offset: 0, limit: 10, count: 1, returned: 1 });
+
+    const envelope = buildCompactReadEnvelope({
+      model: "project.task",
+      records: rows,
+      resolved,
+      fieldsReport,
+      page
+    });
+
+    expect(envelope.model).toBe("project.task");
+    expect(envelope.records).toEqual(rows);
+    expect(envelope.fields.resolved_fields).toEqual(resolved.fields);
+    expect(envelope.fields.returned_fields).toEqual(fieldsReport.returned_fields);
+    expect(envelope.fields.omitted_fields).toEqual(fieldsReport.omitted_fields);
+    expect(envelope.fields.resolution).toEqual(resolved.resolution);
+    expect(envelope.page).toEqual(page);
+    expect(envelope.warnings).toEqual([]);
+  });
+
+  test("empty records still success-shaped", () => {
+    const resolved = resolveCompactFields("project.task");
+    const fieldsReport = computeFieldsReport(
+      { fields: resolved.fields, explicit: false },
+      [],
+      [],
+      "project.task"
+    );
+    const page = buildPageMetadata({ offset: 0, limit: 10, count: 0, returned: 0 });
+
+    const envelope = buildCompactReadEnvelope({
+      model: "project.task",
+      records: [],
+      resolved,
+      fieldsReport,
+      page,
+      warnings: ["note"]
+    });
+
+    expect(envelope.records).toEqual([]);
+    expect(envelope.warnings).toEqual(["note"]);
+    expect(envelope.page.has_more).toBe(false);
   });
 });
