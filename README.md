@@ -52,6 +52,9 @@ The server never logs, stores, or echoes your key.
 - **Aggregates:** `__count`, or `field:sum` on `integer`, `float`, or `monetary` fields.
 - **Pre-flight errors** (returned as JSON envelopes, no `read_group` call): `invalid_groupby`,
   `unsupported_aggregate`.
+
+| Tool | Kind | Parameters |
+|---|---|---|
 | `create_record` | write | `model` (string), `values` (object) |
 | `update_record` | write | `model` (string), `record_id` (positive int), `values` (object; x2many use Odoo command tuples, e.g. `[[6,0,ids]]`, `[[4,id]]`, `[[3,id]]`) |
 | `delete_record` | write | `model` (string), `record_id` (positive int) |

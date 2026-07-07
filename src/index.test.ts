@@ -1692,6 +1692,31 @@ describe("aggregate_records pre-flight validation", () => {
     expect(result.content[0].text).not.toContain("secret-agg-preflight-key");
     expect(result.content[0].text).not.toContain("Bearer");
   });
+
+  test("calls fields_get with cache attributes before read_group", async () => {
+    const agent = await buildWriteToolAgent();
+    const log: { url: string; body: any }[] = [];
+    globalThis.fetch = mockOdoo(
+      {
+        "project.task/fields_get": TASK_FIELDS_META,
+        "project.task/read_group": [{ stage_id: 1, __count: 2 }]
+      },
+      log
+    );
+
+    const handler = getToolHandler(agent, "aggregate_records");
+    await handler({
+      model: "project.task",
+      domain: [],
+      groupby: ["stage_id"],
+      aggregates: ["__count"],
+      lazy: true
+    });
+
+    const fieldsGetCall = log.find((entry) => entry.url.includes("/fields_get"));
+    expect(fieldsGetCall).toBeDefined();
+    expect(fieldsGetCall!.body.attributes).toEqual(["type", "string", "selection", "relation", "store"]);
+  });
 });
 
 describe("get_fields tool callOdoo call shape", () => {
