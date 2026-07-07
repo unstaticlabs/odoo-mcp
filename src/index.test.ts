@@ -2707,6 +2707,218 @@ describe("browse_records", () => {
   });
 });
 
+describe("search_records_compact", () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  test("tool is registered after agent.init()", async () => {
+    const agent = await buildWriteToolAgent();
+    expect(agent.server._registeredTools.search_records_compact).toBeDefined();
+  });
+
+  test("happy path calls search_count then search_read with resolved preset fields", async () => {
+    const agent = await buildWriteToolAgent();
+    const rows = [{ id: 1, name: "Task A", stage_id: [1, "In Progress"], project_id: [2, "Proj"] }];
+    const fetchCalls: { url: string; body: any }[] = [];
+    globalThis.fetch = mock(async (url: string, init: any) => {
+      fetchCalls.push({ url: url as string, body: JSON.parse(init.body) });
+      const method = (url as string).split("/").pop();
+      if (method === "search_count") {
+        return new Response(JSON.stringify({ result: 1 }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      return new Response(JSON.stringify({ result: rows }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }) as any;
+
+    const handler = validatedToolHandler(agent.server, "search_records_compact");
+    const result = await handler({ model: "project.task", domain: [], field_preset: "minimal", limit: 25, offset: 0 });
+
+    expect(result.isError).toBeUndefined();
+    expect(result.structuredContent).toBeDefined();
+    expect(fetchCalls.length).toBe(2);
+    expect(fetchCalls[0].url).toContain("/project.task/search_count");
+    expect(fetchCalls[1].url).toContain("/project.task/search_read");
+    expect(fetchCalls[1].body.fields).toEqual(["id", "name", "stage_id", "project_id"]);
+    expect(result.structuredContent.model).toBe("project.task");
+    expect(result.structuredContent.page).toMatchObject({
+      offset: 0,
+      limit: 25,
+      count: 1,
+      returned: 1,
+      has_more: false
+    });
+    expect(result.structuredContent.fields.resolution.source).toBe("preset");
+    expect(result.structuredContent.fields.resolved_fields).toEqual(["id", "name", "stage_id", "project_id"]);
+    expect(result.structuredContent.fields.returned_fields).toEqual(["id", "name", "stage_id", "project_id"]);
+  });
+
+  test("empty domain match returns records [] with page.count 0, not isError", async () => {
+    const agent = await buildWriteToolAgent();
+    globalThis.fetch = mock(async (url: string) => {
+      const method = (url as string).split("/").pop();
+      if (method === "search_count") {
+        return new Response(JSON.stringify({ result: 0 }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      return new Response(JSON.stringify({ result: [] }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }) as any;
+
+    const handler = getToolHandler(agent, "search_records_compact");
+    const result = await handler({ model: "account.move", domain: [["id", "=", -1]] });
+
+    expect(result.isError).toBeUndefined();
+    expect(result.structuredContent.records).toEqual([]);
+    expect(result.structuredContent.page.count).toBe(0);
+    expect(result.structuredContent.page.returned).toBe(0);
+  });
+
+  test("pagination stability with ordered ids", async () => {
+    const agent = await buildWriteToolAgent();
+    const allRows = Array.from({ length: 30 }, (_, i) => ({ id: i + 1, name: `Row ${i + 1}` }));
+
+    globalThis.fetch = mock(async (url: string, init: any) => {
+      const method = (url as string).split("/").pop();
+      if (method === "search_count") {
+        return new Response(JSON.stringify({ result: 30 }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      const body = JSON.parse(init.body);
+      const slice = allRows.slice(body.offset, body.offset + body.limit);
+      return new Response(JSON.stringify({ result: slice }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }) as any;
+
+    const handler = getToolHandler(agent, "search_records_compact");
+
+    const page1 = await handler({
+      model: "project.task",
+      domain: [],
+      fields: ["id", "name"],
+      limit: 10,
+      offset: 0,
+      order: "id asc"
+    });
+    expect(page1.structuredContent.records.map((r: any) => r.id)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    expect(page1.structuredContent.page.has_more).toBe(true);
+
+    const page2 = await handler({
+      model: "project.task",
+      domain: [],
+      fields: ["id", "name"],
+      limit: 10,
+      offset: 10,
+      order: "id asc"
+    });
+    expect(page2.structuredContent.records.map((r: any) => r.id)).toEqual([11, 12, 13, 14, 15, 16, 17, 18, 19, 20]);
+    expect(page2.structuredContent.page.has_more).toBe(true);
+
+    const page1Ids = new Set(page1.structuredContent.records.map((r: any) => r.id));
+    const page2Ids = page2.structuredContent.records.map((r: any) => r.id);
+    for (const id of page2Ids) {
+      expect(page1Ids.has(id)).toBe(false);
+    }
+  });
+
+  test("inputSchema rejects explicit fields combined with a non-default field_preset", async () => {
+    const agent = await buildWriteToolAgent();
+    const tool = agent.server._registeredTools.search_records_compact;
+    const parsed = tool.inputSchema.safeParse({
+      model: "project.task",
+      domain: [],
+      field_preset: "tracking_minimal",
+      fields: ["id", "name"]
+    });
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) {
+      expect(parsed.error.issues.some((i: { message: string }) => i.message.includes("non-default field_preset"))).toBe(true);
+    }
+  });
+
+  test("field presets resolve correct search_read fields on known and unknown models", async () => {
+    const { FIELD_PRESET_FALLBACKS } = await import("./tools/shared");
+    const agent = await buildWriteToolAgent();
+
+    const cases = [
+      { model: "project.task", preset: "minimal", expectedFields: ["id", "name", "stage_id", "project_id"], source: "preset" },
+      { model: "project.task", preset: "tracking_minimal", expectedFields: ["id", "name", "stage_id", "project_id", "priority", "user_ids", "date_deadline"], source: "preset" },
+      { model: "project.task", preset: "financial_minimal", expectedFields: ["id", "name", "project_id", "planned_hours", "effective_hours"], source: "preset" },
+      { model: "some.unknown.model", preset: "minimal", expectedFields: [...FIELD_PRESET_FALLBACKS.minimal], source: "fallback" },
+      { model: "some.unknown.model", preset: "financial_minimal", expectedFields: [...FIELD_PRESET_FALLBACKS.financial_minimal], source: "fallback" }
+    ] as const;
+
+    for (const { model, preset, expectedFields, source } of cases) {
+      const fetchCalls: { url: string; body: any }[] = [];
+      globalThis.fetch = mock(async (url: string, init: any) => {
+        fetchCalls.push({ url: url as string, body: JSON.parse(init.body) });
+        const method = (url as string).split("/").pop();
+        if (method === "search_count") {
+          return new Response(JSON.stringify({ result: 0 }), { status: 200, headers: { "Content-Type": "application/json" } });
+        }
+        return new Response(JSON.stringify({ result: [] }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }) as any;
+
+      const handler = getToolHandler(agent, "search_records_compact");
+      const result = await handler({ model, domain: [], field_preset: preset, limit: 25 });
+
+      const searchRead = fetchCalls.find((c) => c.url.includes("/search_read"));
+      expect(searchRead?.body.fields).toEqual(expectedFields);
+      expect(result.structuredContent.fields.resolution.source).toBe(source);
+      expect(result.structuredContent.fields.resolution.preset).toBe(preset);
+    }
+  });
+
+  test("explicit fields set resolution source explicit with null preset", async () => {
+    const agent = await buildWriteToolAgent();
+    const fetchCalls: { url: string; body: any }[] = [];
+    globalThis.fetch = mock(async (url: string, init: any) => {
+      fetchCalls.push({ url: url as string, body: JSON.parse(init.body) });
+      const method = (url as string).split("/").pop();
+      if (method === "search_count") {
+        return new Response(JSON.stringify({ result: 1 }), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      return new Response(JSON.stringify({ result: [{ id: 1, name: "A" }] }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }) as any;
+
+    const handler = getToolHandler(agent, "search_records_compact");
+    const result = await handler({
+      model: "project.task",
+      domain: [],
+      fields: ["id", "name"],
+      limit: 25
+    });
+
+    expect(fetchCalls.find((c) => c.url.includes("/search_read"))?.body.fields).toEqual(["id", "name"]);
+    expect(result.structuredContent.fields.resolution).toEqual({
+      source: "explicit",
+      model: "project.task",
+      preset: null
+    });
+  });
+
+  test("search_count false skips search_count and uses heuristic has_more", async () => {
+    const agent = await buildWriteToolAgent();
+    const rows = Array.from({ length: 10 }, (_, i) => ({ id: i + 1, name: `Row ${i + 1}` }));
+    const fetchCalls: { url: string; body: any }[] = [];
+    globalThis.fetch = mock(async (url: string, init: any) => {
+      fetchCalls.push({ url: url as string, body: JSON.parse(init.body) });
+      return new Response(JSON.stringify({ result: rows }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }) as any;
+
+    const handler = getToolHandler(agent, "search_records_compact");
+    const result = await handler({
+      model: "project.task",
+      domain: [],
+      fields: ["id", "name"],
+      limit: 10,
+      offset: 0,
+      search_count: false
+    });
+
+    expect(fetchCalls.length).toBe(1);
+    expect(fetchCalls[0].url).toContain("/search_read");
+    expect(result.structuredContent.warnings.some((w: string) => w.includes("search_count=false"))).toBe(true);
+    expect(result.structuredContent.page.has_more).toBe(true);
+    expect(result.structuredContent.page.returned).toBe(10);
+  });
+});
+
 describe("search_count", () => {
   afterEach(() => {
     globalThis.fetch = originalFetch;

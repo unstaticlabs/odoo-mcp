@@ -25,6 +25,7 @@ export {
   resolveFields,
   MODEL_FIELD_PRESETS,
   browseRecords,
+  searchRecordsCompact,
   resolveNamedFieldPreset,
   buildBrowsePageMeta,
   applyBrowseSafeguard,

@@ -16,6 +16,8 @@ import {
   pickSmartFields,
   requireConnection,
   searchRecords,
+  searchRecordsCompact,
+  zCompactReadEnvelope,
   zOdooRecord,
   zOdooRecords,
   zWarnings
@@ -209,6 +211,53 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
   );
 
   const zNamedFieldPreset = z.enum(NAMED_FIELD_PRESET_VALUES);
+
+  const zSearchRecordsCompactInput = z
+    .object({
+      model: z.string(),
+      domain: z.array(z.any()).default([]),
+      field_preset: zNamedFieldPreset.default("minimal"),
+      fields: z.array(z.string()).nullable().default(null),
+      limit: z.number().int().min(1).max(100).default(25),
+      offset: z.number().int().min(0).default(0),
+      order: z.string().optional(),
+      search_count: z.boolean().default(true)
+    })
+    .refine(
+      (data) =>
+        data.fields == null || data.fields.length === 0 || data.field_preset === "minimal",
+      { message: "cannot set both explicit fields and a non-default field_preset" }
+    );
+
+  server.registerTool(
+    "search_records_compact",
+    {
+      title: "Search Records (compact)",
+      description:
+        "Read-only: compact paginated Odoo search_read for triage. Defaults to field_preset=minimal, limit=25. " +
+        "Returns CompactReadEnvelope with nested fields manifest and page metadata. " +
+        "Drill into selected ids via batch_read or get_record. " +
+        'Pass stable order (e.g. "id asc") when paging.',
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      inputSchema: zSearchRecordsCompactInput,
+      outputSchema: zCompactReadEnvelope
+    },
+    async (input) => {
+      if (!input.model?.trim()) return mcpError("model must be a non-empty string");
+      try {
+        const warnings: string[] = [];
+        const envelope = await searchRecordsCompact(
+          queue,
+          requireConnection(getProps()),
+          input,
+          warnings
+        );
+        return mcpStructured(envelope as unknown as Record<string, unknown>);
+      } catch (err) {
+        return mcpErrorFromException(err, { model: input.model, method: "search_read" });
+      }
+    }
+  );
 
   const zBrowseRecordsInput = z
     .object({
