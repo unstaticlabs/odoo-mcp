@@ -198,6 +198,26 @@ export const zWarnings = z.array(z.string()).describe("Non-fatal issues encounte
 
 export type AggregationPreflightErrorCode = "invalid_groupby" | "unsupported_aggregate";
 
+export const AGGREGATE_FALLBACK_MAX_RECORDS = 100;
+
+export type AggregationDiagnosis =
+  | "unsupported_model"
+  | "invalid_groupby"
+  | "permission_denied"
+  | "unsupported_aggregate"
+  | "connector_bug";
+
+/** Thrown by aggregateRecords for pre-check and fallback refusal paths (not transient Odoo errors). */
+export class AggregationError extends Error {
+  diagnosis: AggregationDiagnosis;
+
+  constructor(diagnosis: AggregationDiagnosis, message: string) {
+    super(message);
+    this.name = "AggregationError";
+    this.diagnosis = diagnosis;
+  }
+}
+
 export interface ErrorEnvelope {
   error: string;
   model: string | null;
@@ -205,6 +225,8 @@ export interface ErrorEnvelope {
   http_status: number | null;
   details: string;
   recoverable: boolean;
+  diagnosis?: AggregationDiagnosis;
+  message?: string;
 }
 
 export interface ErrorContext {
@@ -213,6 +235,18 @@ export interface ErrorContext {
 }
 
 function buildErrorEnvelope(err: unknown, context: ErrorContext): ErrorEnvelope {
+  if (err instanceof AggregationError) {
+    return {
+      error: err.diagnosis,
+      diagnosis: err.diagnosis,
+      message: err.message,
+      model: context.model ?? null,
+      method: context.method ?? null,
+      http_status: null,
+      details: err.message,
+      recoverable: false
+    };
+  }
   if (err instanceof OdooError) {
     return {
       error: err.code,
@@ -231,6 +265,12 @@ function buildErrorEnvelope(err: unknown, context: ErrorContext): ErrorEnvelope 
     details: err instanceof Error ? err.message : String(err),
     recoverable: false
   };
+}
+
+/** Machine-classifiable aggregation error envelope (isError:true). */
+export function mcpAggregationError(diagnosis: AggregationDiagnosis, message: string, context: ErrorContext = {}) {
+  const envelope = buildErrorEnvelope(new AggregationError(diagnosis, message), context);
+  return { content: [{ type: "text" as const, text: JSON.stringify(envelope) }], isError: true as const };
 }
 
 /** Machine-classifiable JSON error envelope for MCP tool results (isError:true). */

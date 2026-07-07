@@ -1632,7 +1632,7 @@ describe("aggregate_records pre-flight validation", () => {
       model: "project.task",
       domain: [],
       groupby: ["stage_id"],
-      aggregates: ["amount_total:avg"],
+      aggregates: ["stage_id:sum"],
       lazy: true
     });
 

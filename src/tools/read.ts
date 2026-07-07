@@ -3,12 +3,10 @@ import { z } from "zod";
 import type { OdooQueue } from "../odoo-queue";
 import type { Props } from "../server";
 import { CURATED_MODEL_ACTIONS, type CuratedAction } from "./actions-map";
-import { validateAggregationRequest } from "../aggregation";
 import {
   CORE_MODEL_ALLOWLIST,
   DEFAULT_TASK_FIELDS,
   countRecords,
-  mcpAggregationPreflightError,
   mcpError,
   mcpErrorFromException,
   mcpStructured,
@@ -19,6 +17,7 @@ import {
   zOdooRecords,
   zWarnings
 } from "./shared";
+import { aggregateRecords } from "../aggregation";
 import { deriveWorkflowStatus, normalizeRecords } from "../normalizer";
 import { type CachedFieldMeta, type TtlCache, getFieldsCached } from "../cache";
 import { OdooError } from "../odoo";
@@ -236,13 +235,17 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
     {
       title: "Aggregate Records",
       description:
-        "Read-only: model-agnostic Odoo read_group (grouped aggregation). `groupby` and `aggregates` entries " +
-        "follow Odoo's read_group `field:agg` syntax (e.g. `amount_total:sum`, `invoice_date:month`, `__count`).\n\n" +
+        "Read-only: model-agnostic Odoo grouped aggregation via native `read_group`, with a bounded connector-side " +
+        "fallback when read_group is unavailable. Fallback scans at most 100 records per call (`limit`/`offset`); " +
+        "check `metadata.fallback` and `warnings` in the response. See README for groupby matrix and error codes.\n\n" +
+        "`groupby` and `aggregates` follow Odoo read_group syntax (e.g. `amount_total:sum`, `invoice_date:month`, `__count`).\n\n" +
         "Example 1 — group vendor bills by month:\n" +
         '{ "model": "account.move", "domain": [["move_type", "=", "in_invoice"]], ' +
         '"groupby": ["invoice_date:month"], "aggregates": ["amount_total:sum"] }\n\n' +
-        "Example 2 — count expenses per employee:\n" +
-        '{ "model": "hr.expense", "groupby": ["employee_id"], "aggregates": ["__count"] }',
+        "Example 2 — count tasks per stage (native path):\n" +
+        '{ "model": "project.task", "groupby": ["stage_id"], "aggregates": ["__count"] } → metadata.fallback=false\n\n' +
+        "Example 3 — fallback with pagination when has_more is true:\n" +
+        '{ "model": "custom.model", "groupby": ["state"], "aggregates": ["__count"], "limit": 100, "offset": 100 }',
       annotations: { readOnlyHint: true, openWorldHint: false },
       inputSchema: {
         model: z.string(),
@@ -250,32 +253,42 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
         groupby: z.array(z.string()).min(1),
         aggregates: z.array(z.string()).min(1),
         lazy: z.boolean().default(true),
-        orderby: z.string().optional()
+        orderby: z.string().optional(),
+        limit: z.number().int().min(1).max(100).default(100),
+        offset: z.number().int().min(0).default(0)
       },
       outputSchema: {
-        groups: zOdooRecords.describe("read_group result rows: one object per group with the groupby keys and aggregate values")
+        groups: zOdooRecords.describe("read_group-compatible rows: groupby keys and aggregate values per group"),
+        metadata: z
+          .object({
+            fallback: z.boolean().describe("true when connector-side in-memory grouping was used instead of native read_group"),
+            records_scanned: z.number().int().describe("Records read in fallback (0 for native read_group)"),
+            total_matching: z.number().int().optional().describe("search_count total when fallback was used"),
+            has_more: z.boolean().describe("true when more matching records exist beyond this page"),
+            groupby: z.array(z.string()),
+            aggregates: z.array(z.string())
+          })
+          .describe("Aggregation path metadata"),
+        warnings: zWarnings
       }
     },
-    async ({ model, domain, groupby, aggregates, lazy, orderby }) => {
+    async ({ model, domain, groupby, aggregates, lazy, orderby, limit, offset }) => {
       if (!model || !model.trim()) return mcpError("model must be a non-empty string");
       try {
-        const conn = requireConnection(getProps());
-        const fieldsMeta = await getFieldsCached(cache, queue, conn, model);
-        const validation = validateAggregationRequest(groupby, aggregates, fieldsMeta);
-        if (!validation.ok) {
-          return mcpAggregationPreflightError(validation.issue.code, validation.issue.details, {
-            model,
-            field: validation.issue.field
-          });
-        }
-        const rows = await queue.enqueue(conn, model, "read_group", {
+        const result = await aggregateRecords(queue, cache, requireConnection(getProps()), {
+          model,
           domain,
-          fields: aggregates,
           groupby,
+          aggregates,
           lazy,
-          ...(orderby ? { orderby } : {})
+          orderby,
+          limit,
+          offset
         });
-        return mcpStructured({ groups: rows as Record<string, unknown>[] }, JSON.stringify(rows, null, 2));
+        return mcpStructured(
+          result as unknown as Record<string, unknown>,
+          JSON.stringify(result.groups, null, 2)
+        );
       } catch (err) {
         return mcpErrorFromException(err, { model, method: "read_group" });
       }
