@@ -42,19 +42,6 @@ The server never logs, stores, or echoes your key.
 | `get_fields` | read | `model` (string) → field name/type/label schema |
 | `projects.list_tasks` | read | `domain` (array), `fields` (string[]) — convenience wrapper over `project.task` |
 | `aggregate_records` | read | `model` (string), `domain` (array), `groupby` (string[], Odoo `field:agg` syntax e.g. `invoice_date:month`), `aggregates` (string[], e.g. `amount_total:sum`, `__count`), `lazy` (bool, default true), `orderby` (string, optional) — wraps Odoo `read_group` |
-
-**`aggregate_records` validation.** Before calling Odoo `read_group`, the server validates `groupby` and
-`aggregates` against cached `fields_get` metadata:
-
-- **Groupby:** `many2one`, `selection`, `date`, and `datetime` fields (stored only). Date/datetime fields
-  may use an optional granularity bucket: `day`, `week`, `month`, `quarter`, or `year`
-  (e.g. `invoice_date:month`). Bare date/datetime fields are allowed (Odoo default grouping).
-- **Aggregates:** `__count`, or `field:sum` on `integer`, `float`, or `monetary` fields.
-- **Pre-flight errors** (returned as JSON envelopes, no `read_group` call): `invalid_groupby`,
-  `unsupported_aggregate`.
-
-| Tool | Kind | Parameters |
-|---|---|---|
 | `create_record` | write | `model` (string), `values` (object) |
 | `update_record` | write | `model` (string), `record_id` (positive int), `values` (object; x2many use Odoo command tuples, e.g. `[[6,0,ids]]`, `[[4,id]]`, `[[3,id]]`) |
 | `delete_record` | write | `model` (string), `record_id` (positive int) |
@@ -67,6 +54,16 @@ The server never logs, stores, or echoes your key.
 | `bookkeeping.fetch_attachment` | read | `attachment_id` (positive int), `max_bytes` (positive int, default `10485760`) — attachment metadata + base64 content unless URL-type or over `max_bytes` |
 | `bookkeeping.preview_returns` | read | `company` (positive int), `from`/`to` (string), `return_type_xmlids` (string[] min 1) — which `account.return` cards should exist; blank periodicity → `configuration_issues` |
 | `bookkeeping.plan_safe_write` | validate-only | `operation` (enum: `create_or_update_report_external_value`, `create_manual_tax_return`, `update_return_type_periodicity`, `create_lock_exception`), `company` (string), `values` (object) — dry-run write plan + HMAC confirmation token; never writes |
+
+**`aggregate_records` validation.** Before calling Odoo `read_group`, the server validates `groupby` and
+`aggregates` against cached `fields_get` metadata:
+
+- **Groupby:** `many2one`, `selection`, `date`, and `datetime` fields (stored only). Date/datetime fields
+  may use an optional granularity bucket: `day`, `week`, `month`, `quarter`, or `year`
+  (e.g. `invoice_date:month`). Bare date/datetime fields are allowed (Odoo default grouping).
+- **Aggregates:** `__count`, or `field:sum` on `integer`, `float`, or `monetary` fields.
+- **Pre-flight errors** (returned as JSON envelopes, no `read_group` call): `invalid_groupby`,
+  `unsupported_aggregate`.
 
 Writes are gated by *your* Odoo user's access rights and record rules (BYO-key), so a caller
 can only do what their Odoo account permits.
