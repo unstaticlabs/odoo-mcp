@@ -42,6 +42,16 @@ The server never logs, stores, or echoes your key.
 | `get_fields` | read | `model` (string) → field name/type/label schema |
 | `projects.list_tasks` | read | `domain` (array), `fields` (string[]) — convenience wrapper over `project.task` |
 | `aggregate_records` | read | `model` (string), `domain` (array), `groupby` (string[], Odoo `field:agg` syntax e.g. `invoice_date:month`), `aggregates` (string[], e.g. `amount_total:sum`, `__count`), `lazy` (bool, default true), `orderby` (string, optional) — wraps Odoo `read_group` |
+
+**`aggregate_records` validation.** Before calling Odoo `read_group`, the server validates `groupby` and
+`aggregates` against cached `fields_get` metadata:
+
+- **Groupby:** `many2one`, `selection`, `date`, and `datetime` fields (stored only). Date/datetime fields
+  may use an optional granularity bucket: `day`, `week`, `month`, `quarter`, or `year`
+  (e.g. `invoice_date:month`). Bare date/datetime fields are allowed (Odoo default grouping).
+- **Aggregates:** `__count`, or `field:sum` on `integer`, `float`, or `monetary` fields.
+- **Pre-flight errors** (returned as JSON envelopes, no `read_group` call): `invalid_groupby`,
+  `unsupported_aggregate`.
 | `create_record` | write | `model` (string), `values` (object) |
 | `update_record` | write | `model` (string), `record_id` (positive int), `values` (object; x2many use Odoo command tuples, e.g. `[[6,0,ids]]`, `[[4,id]]`, `[[3,id]]`) |
 | `delete_record` | write | `model` (string), `record_id` (positive int) |

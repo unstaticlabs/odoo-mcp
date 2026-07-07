@@ -1572,6 +1572,128 @@ describe("aggregate_records tool callOdoo call shape", () => {
   });
 });
 
+describe("aggregate_records pre-flight validation", () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const TASK_FIELDS_META = {
+    stage_id: { type: "many2one", string: "Stage", store: true },
+    amount_total: { type: "monetary", string: "Total", store: true },
+    state: { type: "selection", string: "Status", store: true }
+  };
+
+  function mockOdoo(routes: Record<string, unknown>, log?: { url: string; body: any }[]) {
+    return mock(async (url: string, init: any) => {
+      const key = Object.keys(routes).find((k) => url.endsWith(`/json/2/${k}`));
+      if (log) log.push({ url, body: init?.body ? JSON.parse(init.body) : undefined });
+      const outcome = key ? routes[key] : undefined;
+      if (outcome instanceof Error) {
+        return new Response(JSON.stringify({ error: { message: outcome.message } }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+      return new Response(JSON.stringify({ result: outcome ?? [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+  }
+
+  test("invalid groupby — no read_group call", async () => {
+    const agent = await buildWriteToolAgent();
+    const log: { url: string; body: any }[] = [];
+    globalThis.fetch = mockOdoo({ "project.task/fields_get": TASK_FIELDS_META }, log);
+
+    const handler = getToolHandler(agent, "aggregate_records");
+    const result = await handler({
+      model: "project.task",
+      domain: [],
+      groupby: ["bogus_field"],
+      aggregates: ["__count"],
+      lazy: true
+    });
+
+    expect(result.isError).toBe(true);
+    const envelope = JSON.parse(result.content[0].text);
+    expect(envelope.error).toBe("invalid_groupby");
+    expect(envelope.method).toBe("read_group");
+    expect(log.some((entry) => entry.url.includes("/read_group"))).toBe(false);
+  });
+
+  test("unsupported aggregate — no read_group call", async () => {
+    const agent = await buildWriteToolAgent();
+    const log: { url: string; body: any }[] = [];
+    globalThis.fetch = mockOdoo({ "project.task/fields_get": TASK_FIELDS_META }, log);
+
+    const handler = getToolHandler(agent, "aggregate_records");
+    const result = await handler({
+      model: "project.task",
+      domain: [],
+      groupby: ["stage_id"],
+      aggregates: ["amount_total:avg"],
+      lazy: true
+    });
+
+    expect(result.isError).toBe(true);
+    const envelope = JSON.parse(result.content[0].text);
+    expect(envelope.error).toBe("unsupported_aggregate");
+    expect(log.some((entry) => entry.url.includes("/read_group"))).toBe(false);
+  });
+
+  test("happy path — read_group called once with unchanged body shape", async () => {
+    const agent = await buildWriteToolAgent();
+    const log: { url: string; body: any }[] = [];
+    globalThis.fetch = mockOdoo(
+      {
+        "project.task/fields_get": TASK_FIELDS_META,
+        "project.task/read_group": [{ stage_id: 1, amount_total: 100, __count: 3 }]
+      },
+      log
+    );
+
+    const handler = getToolHandler(agent, "aggregate_records");
+    const result = await handler({
+      model: "project.task",
+      domain: [["active", "=", true]],
+      groupby: ["stage_id"],
+      aggregates: ["amount_total:sum", "__count"],
+      lazy: true,
+      orderby: "stage_id"
+    });
+
+    expect(result.isError).toBeUndefined();
+    const readGroupCalls = log.filter((entry) => entry.url.includes("/read_group"));
+    expect(readGroupCalls.length).toBe(1);
+    expect(readGroupCalls[0].body).toEqual({
+      domain: [["active", "=", true]],
+      fields: ["amount_total:sum", "__count"],
+      groupby: ["stage_id"],
+      lazy: true,
+      orderby: "stage_id"
+    });
+  });
+
+  test("pre-flight error does not leak API key", async () => {
+    const agent = await buildWriteToolAgent();
+    agent.props = { odooBaseUrl: "http://example.com", odooDb: "test-db", odooApiKey: "secret-agg-preflight-key" };
+    globalThis.fetch = mockOdoo({ "project.task/fields_get": TASK_FIELDS_META });
+
+    const handler = getToolHandler(agent, "aggregate_records");
+    const result = await handler({
+      model: "project.task",
+      domain: [],
+      groupby: ["bogus_field"],
+      aggregates: ["__count"],
+      lazy: true
+    });
+
+    expect(result.content[0].text).not.toContain("secret-agg-preflight-key");
+    expect(result.content[0].text).not.toContain("Bearer");
+  });
+});
+
 describe("get_fields tool callOdoo call shape", () => {
   afterEach(() => {
     globalThis.fetch = originalFetch;

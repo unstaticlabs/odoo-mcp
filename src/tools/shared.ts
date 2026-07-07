@@ -146,6 +146,8 @@ export const zRecordContainer = z.object({ model: z.string(), records: z.array(z
 
 export const zWarnings = z.array(z.string()).describe("Non-fatal issues encountered while assembling the result");
 
+export type AggregationPreflightErrorCode = "invalid_groupby" | "unsupported_aggregate";
+
 export interface ErrorEnvelope {
   error: string;
   model: string | null;
@@ -184,6 +186,23 @@ function buildErrorEnvelope(err: unknown, context: ErrorContext): ErrorEnvelope 
 /** Machine-classifiable JSON error envelope for MCP tool results (isError:true). */
 export function mcpErrorFromException(err: unknown, context: ErrorContext = {}) {
   const envelope = buildErrorEnvelope(err, context);
+  return { content: [{ type: "text" as const, text: JSON.stringify(envelope) }], isError: true as const };
+}
+
+/** Pre-flight aggregation validation failure — returned before any read_group Odoo call. */
+export function mcpAggregationPreflightError(
+  code: AggregationPreflightErrorCode,
+  details: string,
+  context: { model: string; field?: string }
+) {
+  const envelope: ErrorEnvelope = {
+    error: code,
+    model: context.model,
+    method: "read_group",
+    http_status: null,
+    details,
+    recoverable: false
+  };
   return { content: [{ type: "text" as const, text: JSON.stringify(envelope) }], isError: true as const };
 }
 
