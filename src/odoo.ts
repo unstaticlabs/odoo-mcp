@@ -39,6 +39,104 @@ export function isRecoverable(code: OdooErrorCode): boolean {
   return RECOVERABLE_CODES.has(code);
 }
 
+/** Domain-specific diagnosis for `read_group` / aggregate_records failures. */
+export type AggregationDiagnosisCode =
+  | "unsupported_model"
+  | "invalid_groupby"
+  | "permission_denied"
+  | "unsupported_aggregate"
+  | "connector_bug";
+
+export type AggregationErrorContext = {
+  model: string;
+  method: "read_group";
+  httpStatus: number;
+  /** Normalized lowercase details for pattern matching. */
+  details: string;
+  odooCode?: OdooErrorCode;
+};
+
+/** Trim, lowercase, and collapse runs of whitespace for stable payload matching. */
+export function normalizeOdooDetails(raw: string): string {
+  return raw.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+/** Substring patterns observed in Odoo 17+ JSON-2 `read_group` groupby errors. */
+export const GROUPBY_ERROR_PATTERNS: readonly string[] = [
+  "invalid field",
+  "unknown field",
+  "groupby",
+  "group by",
+  "not groupable",
+  "cannot group",
+  "invalid groupby"
+];
+
+/** Substring patterns for aggregate-function errors (evaluated after groupby patterns). */
+export const AGGREGATE_ERROR_PATTERNS: readonly string[] = [
+  "invalid aggregator",
+  "invalid aggregate",
+  "aggregation function"
+];
+
+const AGGREGATE_FIELD_SPEC_SUFFIXES = [":sum", ":avg", ":count", ":min", ":max"] as const;
+const AGGREGATE_NOT_SUPPORTED_FUNCS = ["sum", "avg", "count", "min", "max"] as const;
+
+/** True when normalized Odoo payload text indicates an invalid groupby field. */
+export function matchInvalidGroupby(details: string): boolean {
+  const normalized = normalizeOdooDetails(details);
+  for (const pattern of GROUPBY_ERROR_PATTERNS) {
+    if (normalized.includes(pattern)) return true;
+  }
+  if (/field "[^"]+" (does not exist|is not a valid field)/.test(normalized)) return true;
+  return false;
+}
+
+/** True when normalized Odoo payload text indicates an unsupported aggregate function. */
+export function matchUnsupportedAggregate(details: string): boolean {
+  const normalized = normalizeOdooDetails(details);
+  for (const pattern of AGGREGATE_ERROR_PATTERNS) {
+    if (normalized.includes(pattern)) return true;
+  }
+  if (AGGREGATE_FIELD_SPEC_SUFFIXES.some((suffix) => normalized.includes(suffix))) return true;
+  if (normalized.includes("not supported")) {
+    if (AGGREGATE_NOT_SUPPORTED_FUNCS.some((fn) => normalized.includes(fn))) return true;
+  }
+  return false;
+}
+
+/**
+ * Map HTTP status + Odoo payload patterns to an aggregation diagnosis code.
+ * Evaluated in priority order; first match wins. Does not alter {@link classifyOdooError}.
+ */
+export function classifyAggregationDiagnosis(
+  ctx: AggregationErrorContext
+): AggregationDiagnosisCode | "unauthorized" | "permission_denied" {
+  if (ctx.httpStatus === 401) return "unauthorized";
+  if (ctx.httpStatus === 403) return "permission_denied";
+  if (ctx.httpStatus === 404 && ctx.method === "read_group") return "unsupported_model";
+  if (ctx.httpStatus === 400) {
+    if (matchInvalidGroupby(ctx.details)) return "invalid_groupby";
+    if (matchUnsupportedAggregate(ctx.details)) return "unsupported_aggregate";
+    return "connector_bug";
+  }
+  return "connector_bug";
+}
+
+/** Convenience wrapper that builds context from a thrown {@link OdooError}. */
+export function aggregationDiagnosisFromOdooError(
+  err: OdooError,
+  ctx: { model: string }
+): AggregationDiagnosisCode | "unauthorized" | "permission_denied" {
+  return classifyAggregationDiagnosis({
+    model: ctx.model,
+    method: "read_group",
+    httpStatus: err.httpStatus ?? 0,
+    details: normalizeOdooDetails(err.details),
+    odooCode: err.code
+  });
+}
+
 export interface OdooErrorParams {
   message: string;
   code: OdooErrorCode;

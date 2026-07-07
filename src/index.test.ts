@@ -38,6 +38,10 @@ const {
   mergeModelActions,
   CURATED_MODEL_ACTIONS,
   deriveWorkflowStatus,
+  classifyAggregationDiagnosis,
+  normalizeOdooDetails,
+  matchInvalidGroupby,
+  matchUnsupportedAggregate,
   McpAgent,
   default: handler
 } = await import("./index");
@@ -369,6 +373,84 @@ describe("OdooError classification", () => {
     expect(error.recoverable).toBe(true);
     expect(error.details).not.toContain("secret-classify-key");
     expect(error.details).not.toContain("Bearer");
+  });
+});
+
+describe("classifyAggregationDiagnosis", () => {
+  const baseCtx = {
+    model: "project.task",
+    method: "read_group" as const,
+    details: ""
+  };
+
+  const cases: Array<{
+    name: string;
+    httpStatus: number;
+    details: string;
+    expected: string;
+  }> = [
+    { name: "401 unauthorized", httpStatus: 401, details: "invalid api key", expected: "unauthorized" },
+    { name: "403 permission_denied", httpStatus: 403, details: "access denied", expected: "permission_denied" },
+    {
+      name: "404 unsupported_model",
+      httpStatus: 404,
+      details: "model not found",
+      expected: "unsupported_model"
+    },
+    {
+      name: "400 invalid_groupby via invalid field",
+      httpStatus: 400,
+      details: "Invalid field 'foo' in groupby",
+      expected: "invalid_groupby"
+    },
+    {
+      name: "400 invalid_groupby via field does not exist",
+      httpStatus: 400,
+      details: 'Field "bogus" does not exist',
+      expected: "invalid_groupby"
+    },
+    {
+      name: "400 unsupported_aggregate",
+      httpStatus: 400,
+      details: "Invalid aggregator for amount",
+      expected: "unsupported_aggregate"
+    },
+    {
+      name: "400 unsupported_aggregate via :sum suffix",
+      httpStatus: 400,
+      details: "Cannot use amount:sum on this field",
+      expected: "unsupported_aggregate"
+    },
+    {
+      name: "400 opaque maps to connector_bug",
+      httpStatus: 400,
+      details: "Unexpected validation failure",
+      expected: "connector_bug"
+    },
+    { name: "500 maps to connector_bug", httpStatus: 500, details: "internal server error", expected: "connector_bug" },
+    { name: "502 maps to connector_bug", httpStatus: 502, details: "bad gateway", expected: "connector_bug" }
+  ];
+
+  for (const { name, httpStatus, details, expected } of cases) {
+    test(name, () => {
+      const diagnosis = classifyAggregationDiagnosis({
+        ...baseCtx,
+        httpStatus,
+        details: normalizeOdooDetails(details)
+      });
+      expect(diagnosis).toBe(expected);
+    });
+  }
+
+  test("groupby match wins over aggregate match on 400", () => {
+    const details = normalizeOdooDetails("Invalid field with :sum aggregate hint");
+    expect(matchInvalidGroupby(details)).toBe(true);
+    expect(classifyAggregationDiagnosis({ ...baseCtx, httpStatus: 400, details })).toBe("invalid_groupby");
+  });
+
+  test("matchUnsupportedAggregate detects not supported + sum", () => {
+    const details = normalizeOdooDetails("Aggregation sum is not supported on this field");
+    expect(matchUnsupportedAggregate(details)).toBe(true);
   });
 });
 

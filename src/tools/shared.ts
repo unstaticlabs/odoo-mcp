@@ -1,5 +1,11 @@
 import { z } from "zod";
-import { OdooError, type OdooConnection } from "../odoo";
+import {
+  OdooError,
+  classifyAggregationDiagnosis,
+  normalizeOdooDetails,
+  type AggregationDiagnosisCode,
+  type OdooConnection
+} from "../odoo";
 import type { OdooQueue } from "../odoo-queue";
 import type { Props } from "../server";
 import type { TtlCache } from "../cache";
@@ -341,13 +347,25 @@ export interface ErrorEnvelope {
   http_status: number | null;
   details: string;
   recoverable: boolean;
-  diagnosis?: AggregationDiagnosis;
+  diagnosis?: AggregationDiagnosis | "unauthorized";
   message?: string;
 }
+
+export type AggregationErrorEnvelope = ErrorEnvelope & {
+  diagnosis: AggregationDiagnosisCode | "unauthorized" | "permission_denied";
+  operation: "aggregate_records";
+};
 
 export interface ErrorContext {
   model?: string;
   method?: string;
+}
+
+/** Redact Odoo API keys and bearer tokens from error detail text. */
+export function redactDetails(text: string): string {
+  return text
+    .replace(/Bearer\s+\S+/gi, "Bearer [REDACTED]")
+    .replace(/odoo_[a-z0-9]+/gi, "[REDACTED]");
 }
 
 function buildErrorEnvelope(err: unknown, context: ErrorContext): ErrorEnvelope {
@@ -409,6 +427,51 @@ export function mcpAggregationPreflightError(
     details,
     recoverable: false
   };
+  return { content: [{ type: "text" as const, text: JSON.stringify(envelope) }], isError: true as const };
+}
+
+function buildAggregationErrorEnvelope(
+  err: unknown,
+  context: { model: string; method?: "read_group" }
+): AggregationErrorEnvelope {
+  const method = context.method ?? "read_group";
+  if (err instanceof OdooError) {
+    const diagnosis = classifyAggregationDiagnosis({
+      model: context.model,
+      method: "read_group",
+      httpStatus: err.httpStatus ?? 0,
+      details: normalizeOdooDetails(err.details),
+      odooCode: err.code
+    });
+    return {
+      error: diagnosis,
+      diagnosis,
+      operation: "aggregate_records",
+      model: err.model,
+      method: err.method,
+      http_status: err.httpStatus,
+      details: redactDetails(err.details),
+      recoverable: diagnosis === "unsupported_model"
+    };
+  }
+  return {
+    error: "connector_bug",
+    diagnosis: "connector_bug",
+    operation: "aggregate_records",
+    model: context.model,
+    method,
+    http_status: null,
+    details: redactDetails(err instanceof Error ? err.message : String(err)),
+    recoverable: false
+  };
+}
+
+/** Aggregation-aware JSON error envelope with diagnosis codes for read_group failures. */
+export function mcpAggregationErrorFromException(
+  err: unknown,
+  context: { model: string; method?: "read_group" }
+) {
+  const envelope = buildAggregationErrorEnvelope(err, context);
   return { content: [{ type: "text" as const, text: JSON.stringify(envelope) }], isError: true as const };
 }
 
