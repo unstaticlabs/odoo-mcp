@@ -2,12 +2,23 @@ import { describe, expect, test } from "bun:test";
 import {
   resolveFieldPreset,
   resolveFields,
+  resolveNamedPreset,
   CORE_MODEL_ALLOWLIST,
   DEFAULT_TASK_FIELDS,
   DEFAULT_GENERIC_FIELDS,
   MODEL_FIELD_PRESETS,
+  MODEL_NAMED_FIELD_PRESETS,
+  GENERIC_NAMED_FIELD_PRESETS,
+  NAMED_FIELD_PRESETS,
   computeFieldsReport,
   ALL_FIELDS_SENTINEL,
+  buildBrowsePageMetadata,
+  estimateBrowsePayloadBytes,
+  isBrowsePayloadOversized,
+  capBrowsePage,
+  BROWSE_PAYLOAD_BYTE_LIMIT,
+  BROWSE_MIN_PAGE_LIMIT,
+  BROWSE_DEFAULT_PAGE_LIMIT,
 } from "./shared";
 
 describe("resolveFieldPreset", () => {
@@ -177,5 +188,243 @@ describe("computeFieldsReport", () => {
     expect(report.returned_fields).toEqual([]);
     expect(report.omitted_fields).toEqual([]);
     expect(warnings).toEqual([]);
+  });
+});
+
+describe("resolveNamedPreset", () => {
+  test("minimal on each CORE_MODEL_ALLOWLIST model matches MODEL_FIELD_PRESETS", () => {
+    for (const model of CORE_MODEL_ALLOWLIST) {
+      const r = resolveNamedPreset(model, "minimal");
+      expect(r.fields).toBe(MODEL_FIELD_PRESETS[model]);
+      expect(r.source).toBe("preset");
+      expect(r.preset).toBe("minimal");
+      expect(r.model).toBe(model);
+    }
+  });
+
+  test("tracking_minimal and financial_minimal on known models are non-empty curated presets", () => {
+    for (const model of CORE_MODEL_ALLOWLIST) {
+      for (const preset of ["tracking_minimal", "financial_minimal"] as const) {
+        const r = resolveNamedPreset(model, preset);
+        const expected = MODEL_NAMED_FIELD_PRESETS[model]![preset]!;
+        expect(r.fields).toBe(expected);
+        expect(r.fields.length).toBeGreaterThan(0);
+        expect(r.source).toBe("preset");
+        expect(r.preset).toBe(preset);
+      }
+    }
+  });
+
+  test("tracking_minimal is a superset or distinct from minimal on project.task", () => {
+    const minimal = resolveNamedPreset("project.task", "minimal").fields;
+    const tracking = resolveNamedPreset("project.task", "tracking_minimal").fields;
+    expect(tracking.length).toBeGreaterThan(minimal.length);
+    for (const field of minimal) {
+      expect(tracking).toContain(field);
+    }
+  });
+
+  test("unknown model uses GENERIC_NAMED_FIELD_PRESETS with source fallback", () => {
+    for (const preset of NAMED_FIELD_PRESETS) {
+      const r = resolveNamedPreset("some.unknown.model", preset);
+      expect(r.fields).toBe(GENERIC_NAMED_FIELD_PRESETS[preset]);
+      expect(r.source).toBe("fallback");
+      expect(r.preset).toBe(preset);
+      expect(r.model).toBe("some.unknown.model");
+    }
+  });
+
+  test("explicit fields override any preset without preset field", () => {
+    const requested = ["name", "id", "custom_x"];
+    const r = resolveNamedPreset("project.task", "financial_minimal", requested);
+    expect(r).toEqual({ fields: requested, source: "explicit", model: "project.task" });
+    expect(r.preset).toBeUndefined();
+  });
+
+  test("empty requestedFields falls through to minimal preset", () => {
+    const r = resolveNamedPreset("project.task", "financial_minimal", []);
+    expect(r.source).toBe("preset");
+    expect(r.preset).toBe("financial_minimal");
+    expect(r.fields).toBe(MODEL_NAMED_FIELD_PRESETS["project.task"]!.financial_minimal);
+  });
+
+  test("omitted preset arg defaults to minimal", () => {
+    const r = resolveNamedPreset("project.task");
+    expect(r.preset).toBe("minimal");
+    expect(r.fields).toBe(MODEL_FIELD_PRESETS["project.task"]);
+    expect(r.source).toBe("preset");
+  });
+
+  test("__all__ sentinel returned verbatim as explicit", () => {
+    const r = resolveNamedPreset("project.task", "minimal", [ALL_FIELDS_SENTINEL]);
+    expect(r).toEqual({ fields: [ALL_FIELDS_SENTINEL], source: "explicit", model: "project.task" });
+    expect(r.preset).toBeUndefined();
+  });
+
+  test("returned preset arrays alias constants — mutating a copy does not affect the constant", () => {
+    const r = resolveNamedPreset("project.task", "minimal");
+    const copy = [...r.fields];
+    copy.push("mutated");
+    expect(MODEL_FIELD_PRESETS["project.task"]).toEqual(DEFAULT_TASK_FIELDS);
+    expect(copy).not.toEqual(MODEL_FIELD_PRESETS["project.task"]);
+  });
+});
+
+describe("buildBrowsePageMetadata", () => {
+  test("normal page has has_more true", () => {
+    expect(buildBrowsePageMetadata({ offset: 0, limit: 50, count: 120, returned: 50 })).toEqual({
+      offset: 0,
+      limit: 50,
+      count: 120,
+      returned: 50,
+      has_more: true
+    });
+  });
+
+  test("last page has has_more false", () => {
+    expect(buildBrowsePageMetadata({ offset: 100, limit: 50, count: 120, returned: 20 })).toEqual({
+      offset: 100,
+      limit: 50,
+      count: 120,
+      returned: 20,
+      has_more: false
+    });
+  });
+
+  test("empty page has has_more false", () => {
+    expect(buildBrowsePageMetadata({ offset: 0, limit: 50, count: 0, returned: 0 })).toEqual({
+      offset: 0,
+      limit: 50,
+      count: 0,
+      returned: 0,
+      has_more: false
+    });
+  });
+
+  test("single-row tail has has_more false", () => {
+    expect(buildBrowsePageMetadata({ offset: 99, limit: 50, count: 100, returned: 1 })).toEqual({
+      offset: 99,
+      limit: 50,
+      count: 100,
+      returned: 1,
+      has_more: false
+    });
+  });
+});
+
+function makeFatRecordsForFields(
+  count: number,
+  fields: string[],
+  valueLen: number
+): Record<string, unknown>[] {
+  const records: Record<string, unknown>[] = [];
+  for (let i = 0; i < count; i++) {
+    const row: Record<string, unknown> = {};
+    for (const field of fields) {
+      if (field === "id") {
+        row[field] = i;
+      } else if (field.endsWith("_id") && field !== "display_name") {
+        row[field] = [i, "Label"];
+      } else {
+        row[field] = "x".repeat(valueLen);
+      }
+    }
+    records.push(row);
+  }
+  return records;
+}
+
+describe("payload size / capBrowsePage", () => {
+  test("BROWSE_DEFAULT_PAGE_LIMIT is 50", () => {
+    expect(BROWSE_DEFAULT_PAGE_LIMIT).toBe(50);
+  });
+
+  test("small synthetic records are not adjusted", () => {
+    const records = [{ id: 1, name: "A" }];
+    const fields = ["id", "name"];
+    expect(isBrowsePayloadOversized(records, fields)).toBe(false);
+    const result = capBrowsePage({
+      model: "project.task",
+      preset: "financial_minimal",
+      limit: 50,
+      records
+    });
+    expect(result.adjusted).toBe(false);
+    expect(result.adjustments).toEqual([]);
+  });
+
+  test("oversized with explicit fields shrinks limit only", () => {
+    const fields = Array.from({ length: 20 }, (_, i) => `field_${i}`);
+    const records = makeFatRecordsForFields(50, fields, 500);
+    expect(estimateBrowsePayloadBytes(records, fields)).toBeGreaterThan(BROWSE_PAYLOAD_BYTE_LIMIT);
+
+    const result = capBrowsePage({
+      model: "project.task",
+      preset: "financial_minimal",
+      limit: 50,
+      records,
+      explicitFields: fields
+    });
+    expect(result.preset).toBe("financial_minimal");
+    expect(result.limit).toBeLessThan(50);
+    expect(result.adjusted).toBe(true);
+    expect(result.adjustments.some((a) => a.startsWith("limit:"))).toBe(true);
+    expect(result.adjustments.some((a) => a.startsWith("preset:"))).toBe(false);
+  });
+
+  test("oversized with named preset shrinks limit then downgrades preset", () => {
+    const fields = resolveNamedPreset("project.task", "financial_minimal").fields;
+    const records = makeFatRecordsForFields(8, fields, 70_000);
+    expect(estimateBrowsePayloadBytes(records.slice(0, 1), fields)).toBeGreaterThan(
+      BROWSE_PAYLOAD_BYTE_LIMIT
+    );
+
+    const result = capBrowsePage({
+      model: "project.task",
+      preset: "financial_minimal",
+      limit: 8,
+      records
+    });
+    expect(result.adjusted).toBe(true);
+    expect(result.adjustments.some((a) => a.startsWith("limit:") || a.startsWith("preset:"))).toBe(
+      true
+    );
+  });
+
+  test("at BROWSE_MIN_PAGE_LIMIT and minimal preset still oversized reports best effort", () => {
+    const fields = resolveNamedPreset("project.task", "minimal").fields;
+    const records = makeFatRecordsForFields(1, fields, 100_000);
+    expect(estimateBrowsePayloadBytes(records, fields)).toBeGreaterThan(BROWSE_PAYLOAD_BYTE_LIMIT);
+
+    const result = capBrowsePage({
+      model: "project.task",
+      preset: "financial_minimal",
+      limit: 50,
+      records
+    });
+    expect(result.limit).toBe(BROWSE_MIN_PAGE_LIMIT);
+    expect(result.preset).toBe("minimal");
+    expect(result.adjusted).toBe(true);
+    expect(result.adjustments.length).toBeGreaterThan(0);
+    expect(
+      isBrowsePayloadOversized(records.slice(0, result.limit), fields)
+    ).toBe(true);
+  });
+
+  test("estimateBrowsePayloadBytes is monotonic in rows and fields", () => {
+    const base = [{ id: 1, name: "A", state: "open" }];
+    const moreRows = [...base, { id: 2, name: "B", state: "done" }];
+    const baseFields = ["id", "name"];
+    const moreFields = ["id", "name", "state"];
+
+    const e1 = estimateBrowsePayloadBytes(base, baseFields);
+    const e2 = estimateBrowsePayloadBytes(moreRows, baseFields);
+    const e3 = estimateBrowsePayloadBytes(base, moreFields);
+    const e4 = estimateBrowsePayloadBytes(moreRows, moreFields);
+
+    expect(e2).toBeGreaterThanOrEqual(e1);
+    expect(e3).toBeGreaterThanOrEqual(e1);
+    expect(e4).toBeGreaterThanOrEqual(e3);
+    expect(e4).toBeGreaterThanOrEqual(e2);
   });
 });
