@@ -44,8 +44,26 @@ Why this shape:
 | **Determinism** | The model reasons over one frozen JSON document, not a live, shifting Odoo state fetched call-by-call. |
 | **Safety** | Writes are two-phase (validate → confirm → write); reads are read-only by default; nothing auto-reconciles or guesses tax treatment. |
 
-> **Rule for assistants:** reach for `bookkeeping.*` tools for any bookkeeping/tax-close
-> task. Use raw Odoo CRUD only for data these tools do not cover.
+> **Rule for assistants:** reach for `bookkeeping.*` tools for **bookkeeping/tax-close work
+> only**. Never route project-management notes through bookkeeping — task descriptions,
+> chatter (`message_post`), and `mail.activity` rows on `project.task` / `project.project`
+> (even when they mention banking, B2C exports, or operational deadlines) belong on the
+> generic write tools: `create_record`, `update_record`, `post_message`, or
+> `batch_post_message`. Conversely, never use generic `create_record` / `update_record` for
+> accounting models (`account.*`, payroll, bank, tax) — only the four operations supported
+> by `bookkeeping.plan_safe_write` may mutate the ledger. Use raw Odoo CRUD for read paths
+> and models neither lane covers.
+
+### Project management vs accounting writes
+
+| Intent | Tool lane | Examples |
+|---|---|---|
+| Task triage, assignee activities, chatter | `create_record`, `update_record`, `post_message`, `batch_post_message` on `project.task`, `mail.activity`, … | "Remind Valentin: B2C bank export deadline Friday" on a hygiene task |
+| Tax close, external report values, return cards, lock exceptions | `bookkeeping.plan_safe_write` (validate-only) → human-confirmed apply | CA12 `box_22` carryover, missing `account.return`, lock-date exception |
+
+`bookkeeping.plan_safe_write` accepts **only** the four enumerated `operation` values and
+rejects PM-shaped `values` (e.g. `res_model: "project.task"`). It never creates or updates
+`project.task`, `mail.activity`, or chatter.
 
 ---
 
@@ -336,11 +354,18 @@ unrecognized, it reports a `configuration_issues` entry instead of guessing peri
 
 ### 4.7 `bookkeeping.plan_safe_write`
 
-**Validate-only — NEVER writes to Odoo.** Runs read-only checks (company/field existence,
-record state, period consistency, duplicates, lock dates) for a proposed bookkeeping write
-and returns a *would-write* plan plus an HMAC confirmation token. A `confirmation_token` is
-issued only when `status` is `safe` (or a `duplicate_found` that resolves to an in-place
-update); never for `blocked` or `needs_lock_exception`.
+**Validate-only — NEVER writes to Odoo.** Accounting/tax-close mutations **only** — not for
+`project.task`, `mail.activity`, or chatter. Project-management notes (including text that
+mentions banking, exports, or deadlines) must use `create_record`, `update_record`,
+`post_message`, or `batch_post_message` instead; generic `create_record` must not be used for
+`account.*` or other ledger models.
+
+Runs read-only checks (company/field existence, record state, period consistency, duplicates,
+lock dates) for a proposed bookkeeping write and returns a *would-write* plan plus an HMAC
+confirmation token. A `confirmation_token` is issued only when `status` is `safe` (or a
+`duplicate_found` that resolves to an in-place update); never for `blocked` or
+`needs_lock_exception`. PM-shaped `values` (e.g. `res_model: "project.task"`) are rejected
+before any Odoo reads.
 
 | Field | Type | Required | Default | Notes |
 |---|---|---|---|---|

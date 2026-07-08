@@ -20,9 +20,12 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
     {
       title: "Create Record",
       description:
-        "Write: create a single Odoo record of the given model. When the model is project.task, the response carries a " +
-        "trace_token (src-…) that is also stamped into the task's chatter — you MUST surface that token verbatim in your " +
-        "visible reply to the user so the conversation can be found again from the Odoo task.",
+        "Write: create a single Odoo record of the given model. Use for project-management records " +
+        "(project.task, mail.activity on project.task/project.project, …). Do NOT use for accounting, payroll, " +
+        "bank, or tax models (account.*, hr.payroll.*, …) — those mutations go through bookkeeping.plan_safe_write " +
+        "only. When the model is project.task, the response carries a trace_token (src-…) that is also stamped into " +
+        "the task's chatter — you MUST surface that token verbatim in your visible reply to the user so the " +
+        "conversation can be found again from the Odoo task.",
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
       inputSchema: {
         model: z.string().min(1),

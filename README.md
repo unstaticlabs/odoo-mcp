@@ -55,7 +55,7 @@ The server never logs, stores, or echoes your key.
 | `bookkeeping.list_source_documents` | read | `model` (string, default `account.move`), `record_id` (positive int) — `ir.attachment` source docs tagged `original_source`/`official_pdf`/`other` |
 | `bookkeeping.fetch_attachment` | read | `attachment_id` (positive int), `max_bytes` (positive int, default `10485760`) — attachment metadata + base64 content unless URL-type or over `max_bytes` |
 | `bookkeeping.preview_returns` | read | `company` (positive int), `from`/`to` (string), `return_type_xmlids` (string[] min 1) — which `account.return` cards should exist; blank periodicity → `configuration_issues` |
-| `bookkeeping.plan_safe_write` | validate-only | `operation` (enum: `create_or_update_report_external_value`, `create_manual_tax_return`, `update_return_type_periodicity`, `create_lock_exception`), `company` (string), `values` (object) — dry-run write plan + HMAC confirmation token; never writes |
+| `bookkeeping.plan_safe_write` | validate-only | `operation` (enum: `create_or_update_report_external_value`, `create_manual_tax_return`, `update_return_type_periodicity`, `create_lock_exception`), `company` (string), `values` (object) — dry-run write plan + HMAC confirmation token; never writes; **accounting/tax-close only** |
 
 **`aggregate_records` validation.** Before calling Odoo `read_group`, the server validates `groupby` and
 `aggregates` against cached `fields_get` metadata:
@@ -70,6 +70,14 @@ The server never logs, stores, or echoes your key.
 Writes are gated by *your* Odoo user's access rights and record rules (BYO-key), so a caller
 can only do what their Odoo account permits.
 
+> **Write lanes (PM vs accounting).** Project-management notes — task descriptions, chatter,
+> `mail.activity` on `project.task` / `project.project`, including text that mentions banking,
+> B2C exports, or operational deadlines — use **`create_record`**, **`update_record`**,
+> **`post_message`**, or **`batch_post_message`**. Do **not** route those through
+> `bookkeeping.plan_safe_write`. Accounting, payroll, bank, and tax mutations use
+> **`bookkeeping.plan_safe_write`** only (four supported operations); do **not** use generic
+> `create_record` for `account.*` or other ledger models — the connector blocks them.
+>
 > **Bookkeeping safety.** The `bookkeeping.*` tools are **read-only by default**. Writes are
 > **two-phase**: `bookkeeping.plan_safe_write` only *validates* and returns a would-write
 > plan plus an HMAC confirmation token — it **never writes**, and the actual write happens

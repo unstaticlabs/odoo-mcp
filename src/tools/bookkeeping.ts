@@ -1865,6 +1865,39 @@ async function planLockExceptionOp(
   });
 }
 
+/** Project-management models that must never be routed through bookkeeping.plan_safe_write. */
+export const BOOKKEEPING_EXCLUDED_PM_MODELS = new Set([
+  "project.task",
+  "project.project",
+  "mail.activity",
+  "project.tags",
+  "project.task.type",
+  "project.project.stage",
+  "project.task.stage"
+]);
+
+/**
+ * Reject PM-shaped payloads misrouted to bookkeeping.plan_safe_write.
+ * Returns a user-facing error message, or null when values look bookkeeping-scoped.
+ */
+export function rejectProjectManagementSafeWrite(values: Record<string, unknown>): string | null {
+  const resModel = values.res_model;
+  if (typeof resModel === "string" && BOOKKEEPING_EXCLUDED_PM_MODELS.has(resModel)) {
+    return (
+      `Project-management writes targeting ${resModel} must not use bookkeeping.plan_safe_write. ` +
+      "Use create_record, update_record, post_message, or batch_post_message instead."
+    );
+  }
+  const model = values.model;
+  if (typeof model === "string" && BOOKKEEPING_EXCLUDED_PM_MODELS.has(model)) {
+    return (
+      `Project-management writes for model ${model} must not use bookkeeping.plan_safe_write. ` +
+      "Use create_record, update_record, post_message, or batch_post_message instead."
+    );
+  }
+  return null;
+}
+
 export function registerSafeWritePlannerTools(
   server: McpServer,
   getProps: () => Props | undefined,
@@ -1877,11 +1910,15 @@ export function registerSafeWritePlannerTools(
     {
       title: "Plan Safe Write (validate-only)",
       description:
-        "Validate-only: NEVER writes to Odoo. Runs read-only checks (company/field existence, record state, period " +
-        "consistency, duplicates, lock dates) for a proposed bookkeeping write and returns a would-write plan plus an " +
-        "HMAC confirmation token. Supported operations: create_or_update_report_external_value, create_manual_tax_return, " +
-        "update_return_type_periodicity, create_lock_exception. A confirmation_token is issued only when status is 'safe' " +
-        "or a 'duplicate_found' that resolves to an in-place update; never for 'blocked' or 'needs_lock_exception'.",
+        "Validate-only: NEVER writes to Odoo. Accounting/tax-close mutations only — supports exactly four operations: " +
+        "create_or_update_report_external_value, create_manual_tax_return, update_return_type_periodicity, " +
+        "create_lock_exception. Do NOT use for project-management work (project.task descriptions/chatter, " +
+        "mail.activity on tasks, triage notes mentioning banking or deadlines) — use create_record, update_record, " +
+        "post_message, or batch_post_message instead. Do NOT use generic create_record for accounting models " +
+        "(account.*, etc.) — use this tool. Runs read-only checks (company/field existence, record state, period " +
+        "consistency, duplicates, lock dates) and returns a would-write plan plus an HMAC confirmation token. " +
+        "A confirmation_token is issued only when status is 'safe' or a 'duplicate_found' that resolves to an " +
+        "in-place update; never for 'blocked' or 'needs_lock_exception'.",
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
       inputSchema: {
         operation: z.enum([
@@ -1919,6 +1956,9 @@ export function registerSafeWritePlannerTools(
     },
     async ({ operation, company, values }) => {
       try {
+        const pmReject = rejectProjectManagementSafeWrite(values);
+        if (pmReject) return mcpError(pmReject);
+
         const conn = requireConnection(getProps());
         const companyId = await resolveCompanyId(queue, conn, company);
         if (companyId == null) return mcpError(`Company not found: ${company}`);

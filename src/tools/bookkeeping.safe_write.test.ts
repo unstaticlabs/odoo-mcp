@@ -3,7 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { TtlCache } from "../cache";
 import type { OdooQueue } from "../odoo-queue";
 import { toWritePlan, verifyConfirmationToken, type PlanResult } from "../safety";
-import { registerSafeWritePlannerTools } from "./bookkeeping";
+import { registerSafeWritePlannerTools, rejectProjectManagementSafeWrite } from "./bookkeeping";
 import { validatedToolHandler } from "./structured-test-util";
 
 const props = { odooBaseUrl: "http://example.com", odooDb: "test-db", odooApiKey: "secret-key" };
@@ -74,6 +74,54 @@ const CA12_VALUES = {
   value: 942,
   name: "Applied carryover balance"
 };
+
+describe("rejectProjectManagementSafeWrite", () => {
+  test("mail.activity-shaped values with res_model project.task are rejected", () => {
+    const reason = rejectProjectManagementSafeWrite({
+      res_model: "project.task",
+      res_id: 990,
+      note: "B2C bank export deadline for Valentin"
+    });
+    expect(reason).toContain("project.task");
+    expect(reason).toContain("create_record");
+    expect(reason).toContain("bookkeeping.plan_safe_write");
+  });
+
+  test("values with model project.task are rejected", () => {
+    const reason = rejectProjectManagementSafeWrite({
+      model: "project.task",
+      record_id: 7,
+      body: "Bank reconciliation follow-up"
+    });
+    expect(reason).toContain("project.task");
+  });
+
+  test("accounting external-value payload is not rejected", () => {
+    expect(rejectProjectManagementSafeWrite(CA12_VALUES)).toBeNull();
+  });
+});
+
+describe("bookkeeping.plan_safe_write — project-management rejection", () => {
+  test("PM-shaped values return tool error without Odoo calls", async () => {
+    const enqueue = mock(async () => {
+      throw new Error("Odoo should not be called for PM-shaped plan_safe_write");
+    });
+    const handler = buildHandler({ enqueue } as unknown as OdooQueue);
+    const result = await handler({
+      operation: "create_or_update_report_external_value",
+      company: "ACME FR",
+      values: {
+        res_model: "project.task",
+        res_id: 990,
+        note: "Valentin: B2C banking export deadline Friday"
+      }
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("project.task");
+    expect(result.content[0].text).toContain("create_record");
+    expect(enqueue).not.toHaveBeenCalled();
+  });
+});
 
 describe("bookkeeping.plan_safe_write — create_or_update_report_external_value", () => {
   test("happy path issues a token that verifies against the reconstructed plan", async () => {
