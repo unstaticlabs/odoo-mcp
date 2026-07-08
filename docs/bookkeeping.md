@@ -17,7 +17,8 @@ Registered on the MCP server in [`src/server.ts`](../src/server.ts) (`registerBo
 ## 1. Snapshot-first philosophy
 
 Assistants must **not** drive bookkeeping through raw Odoo CRUD (`search_records`,
-`update_record`, …). Instead the flow is:
+`update_record`, …). `plan_safe_write` does not cover `project.task`, chatter, or
+`mail.activity` — those are generic write tools. Instead the flow is:
 
 1. **Few batched Odoo calls** — one tool call assembles everything needed (lock dates,
    report structure, return types, external values, key-account balances) in a handful of

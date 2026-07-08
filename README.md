@@ -80,6 +80,17 @@ can only do what their Odoo account permits.
 > [docs/bookkeeping.md](docs/bookkeeping.md) for the snapshot-first workflow, rate-limit and
 > cache model, full tool reference, and worked CA12 walkthroughs.
 
+### Project-management writes vs bookkeeping
+
+- **PM task notes, chatter, and activities** — use `create_record`, `update_record`, `post_message`,
+  `batch_post_message`, or `call_model_method` on `project.task`, `project.project`, or `mail.activity`
+  with `res_model` ∈ `{project.task, project.project}`.
+- **Operational text** may reference banking, B2C exports, VAT, payroll handoffs, deadlines — the
+  connector classifies by **model + method + field names**, not free-text keywords.
+- **Accounting / tax / ledger mutations** — **`bookkeeping.plan_safe_write` only** (four operations
+  documented in [docs/bookkeeping.md](docs/bookkeeping.md)). It never handles PM models.
+- **Multi-task chatter** — see [docs/testing.md](docs/testing.md) § bulk chatter reads.
+
 ### Field selection
 
 For `search_records`, `get_record`, `batch_read`, and `projects.list_tasks`:

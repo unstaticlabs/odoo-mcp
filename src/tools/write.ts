@@ -5,6 +5,9 @@ import type { Props } from "../server";
 import { assessWriteOperation, isMutatingOdooMethod } from "../write-safety";
 import { mcpError, mcpErrorFromException, mcpStructured, mcpWriteBlockedError, plaintextToHtml, requireConnection } from "./shared";
 
+const PM_WRITE_ROUTING_NOTE =
+  " Project-management notes (including banking/B2C/deadline operational text) on project.task / project.project / mail.activity→project.* are allowed. For accounting mutations use bookkeeping.plan_safe_write only.";
+
 function gateWrite(model: string, method: string, args: Record<string, unknown>) {
   if (!isMutatingOdooMethod(method)) return null;
   const verdict = assessWriteOperation({ model, method, args });
@@ -22,7 +25,8 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
       description:
         "Write: create a single Odoo record of the given model. When the model is project.task, the response carries a " +
         "trace_token (src-…) that is also stamped into the task's chatter — you MUST surface that token verbatim in your " +
-        "visible reply to the user so the conversation can be found again from the Odoo task.",
+        "visible reply to the user so the conversation can be found again from the Odoo task." +
+        PM_WRITE_ROUTING_NOTE,
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
       inputSchema: {
         model: z.string().min(1),
@@ -96,7 +100,7 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
     "post_message",
     {
       title: "Post Chatter Message",
-      description: "Write: post a message (chatter log/comment) to a single Odoo record.",
+      description: "Write: post a message (chatter log/comment) to a single Odoo record." + PM_WRITE_ROUTING_NOTE,
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
       inputSchema: {
         model: z.string(),
@@ -140,7 +144,8 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
     {
       title: "Update Record",
       description:
-        "Write: update fields on a single Odoo record by id. x2many fields need Odoo command tuples (e.g. [[6,0,ids]], [[4,id]], [[3,id]]).",
+        "Write: update fields on a single Odoo record by id. x2many fields need Odoo command tuples (e.g. [[6,0,ids]], [[4,id]], [[3,id]])." +
+        PM_WRITE_ROUTING_NOTE,
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
       inputSchema: {
         model: z.string().min(1),
@@ -217,7 +222,8 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
       description:
         "Write: post a chatter message to multiple Odoo records of one model. message_post is per-record. " +
         "Each `messages` entry posts to one record_id. Bodies are HTML-escaped unless body_is_html is true. " +
-        "Fail-fast: a mid-loop error aborts remaining posts; already-posted messages are NOT rolled back.",
+        "Fail-fast: a mid-loop error aborts remaining posts; already-posted messages are NOT rolled back." +
+        PM_WRITE_ROUTING_NOTE,
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
       inputSchema: {
         model: z.string(),
@@ -299,7 +305,8 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
     {
       title: "Call Model Method (advanced)",
       description:
-        "Escape hatch: call an arbitrary Odoo model method. Odoo's JSON-2 API has NO positional args — every body key is bound as a named kwarg (record-bound methods take a top-level `ids`). Pass record ids via `ids` and all other parameters via `kwargs`.",
+        "Escape hatch: call an arbitrary Odoo model method. Odoo's JSON-2 API has NO positional args — every body key is bound as a named kwarg (record-bound methods take a top-level `ids`). Pass record ids via `ids` and all other parameters via `kwargs`." +
+        PM_WRITE_ROUTING_NOTE,
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
       inputSchema: {
         model: z.string(),
