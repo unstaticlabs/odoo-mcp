@@ -5,6 +5,7 @@ import {
   resolveFields,
   resolveNamedPreset,
   resolveNamedFieldPreset,
+  resolveBatchReadFields,
   buildBrowsePageMeta,
   applyBrowseSafeguard,
   encodeBrowseCursor,
@@ -496,6 +497,100 @@ describe("resolveNamedFieldPreset", () => {
     const r = resolveNamedFieldPreset("project.task", undefined, []);
     expect(r.preset).toBe("minimal");
     expect(r.source).toBe("preset");
+  });
+});
+
+describe("resolveBatchReadFields", () => {
+  test("minimal preset resolves known models from curated lists", () => {
+    const task = resolveBatchReadFields("project.task", { field_preset: "minimal" });
+    expect(task.fields).toEqual(DEFAULT_TASK_FIELDS);
+    expect(task.field_preset).toBe("minimal");
+    expect(task.fields_resolution.source).toBe("preset");
+
+    const move = resolveBatchReadFields("account.move", { field_preset: "minimal" });
+    expect(move.fields).toEqual(NAMED_MODEL_FIELD_PRESETS.minimal["account.move"]);
+    expect(move.fields_resolution.source).toBe("preset");
+  });
+
+  test("tracking_minimal and financial_minimal resolve model-specific fields", () => {
+    const tracking = resolveBatchReadFields("project.task", { field_preset: "tracking_minimal" });
+    expect(tracking.fields).toContain("priority");
+    expect(tracking.field_preset).toBe("tracking_minimal");
+
+    const financial = resolveBatchReadFields("account.move", { field_preset: "financial_minimal" });
+    expect(financial.fields).toContain("amount_untaxed");
+    expect(financial.field_preset).toBe("financial_minimal");
+  });
+
+  test("unknown model falls back per preset", () => {
+    const minimal = resolveBatchReadFields("x.custom.model", { field_preset: "minimal" });
+    expect(minimal.fields).toEqual(DEFAULT_GENERIC_FIELDS);
+    expect(minimal.fields_resolution.source).toBe("fallback");
+
+    const tracking = resolveBatchReadFields("x.custom.model", { field_preset: "tracking_minimal" });
+    expect(tracking.fields).toEqual(["id", "display_name", "state"]);
+    expect(tracking.fields_resolution.source).toBe("fallback");
+
+    const financial = resolveBatchReadFields("x.custom.model", { field_preset: "financial_minimal" });
+    expect(financial.fields).toEqual(["id", "display_name", "amount_total"]);
+    expect(financial.fields_resolution.source).toBe("fallback");
+  });
+
+  test("explicit fields win with field_preset null", () => {
+    const r = resolveBatchReadFields("project.task", {
+      field_preset: "tracking_minimal",
+      fields: ["id", "name"]
+    });
+    expect(r.fields).toEqual(["id", "name"]);
+    expect(r.field_preset).toBeNull();
+    expect(r.fields_resolution.source).toBe("explicit");
+  });
+
+  test("__all__ sentinel returned verbatim as explicit", () => {
+    const r = resolveBatchReadFields("project.task", { fields: ["__all__"] });
+    expect(r.fields).toEqual(["__all__"]);
+    expect(r.field_preset).toBeNull();
+    expect(r.fields_resolution.source).toBe("explicit");
+  });
+
+  test("no options delegates to legacy resolveFields with field_preset null", () => {
+    const r = resolveBatchReadFields("project.task");
+    const legacy = resolveFields("project.task");
+    expect(r.fields).toEqual(legacy.fields);
+    expect(r.fields_resolution).toEqual({ source: legacy.source, model: legacy.model });
+    expect(r.field_preset).toBeNull();
+  });
+
+  test("null fields delegates to legacy resolveFields with field_preset null", () => {
+    const r = resolveBatchReadFields("project.task", { fields: null });
+    const legacy = resolveFields("project.task", null);
+    expect(r.fields).toEqual(legacy.fields);
+    expect(r.fields_resolution).toEqual({ source: legacy.source, model: legacy.model });
+    expect(r.field_preset).toBeNull();
+  });
+
+  test("empty fields array uses legacy path not named minimal preset", () => {
+    const r = resolveBatchReadFields("project.task", { fields: [] });
+    const legacy = resolveFields("project.task", []);
+    expect(r.fields).toEqual(legacy.fields);
+    expect(r.fields_resolution).toEqual({ source: legacy.source, model: legacy.model });
+    expect(r.field_preset).toBeNull();
+  });
+
+  test("unknown model with no preset matches legacy resolveFields", () => {
+    const r = resolveBatchReadFields("some.unknown.model");
+    const legacy = resolveFields("some.unknown.model");
+    expect(r.fields).toEqual(legacy.fields);
+    expect(r.fields_resolution).toEqual({ source: legacy.source, model: legacy.model });
+    expect(r.field_preset).toBeNull();
+  });
+
+  test("set field_preset minimal differs from legacy no-preset path", () => {
+    const named = resolveBatchReadFields("project.task", { field_preset: "minimal" });
+    const legacy = resolveBatchReadFields("project.task");
+    expect(named.field_preset).toBe("minimal");
+    expect(legacy.field_preset).toBeNull();
+    expect(named.fields).toEqual(legacy.fields);
   });
 });
 
