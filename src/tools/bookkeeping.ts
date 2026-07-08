@@ -17,6 +17,7 @@ import {
   type PlanResult
 } from "../safety";
 import type { Props } from "../server";
+import { PROJECT_MANAGEMENT_MODELS } from "../write-safety";
 import { mcpError, mcpErrorFromException, mcpStructured, requireConnection, zOdooRecords, zRecordContainer, zWarnings } from "./shared";
 
 type FieldsMeta = Record<string, CachedFieldMeta>;
@@ -1865,37 +1866,46 @@ async function planLockExceptionOp(
   });
 }
 
-/** Project-management models that must never be routed through bookkeeping.plan_safe_write. */
-export const BOOKKEEPING_EXCLUDED_PM_MODELS = new Set([
-  "project.task",
-  "project.project",
-  "mail.activity",
-  "project.tags",
-  "project.task.type",
-  "project.project.stage",
-  "project.task.stage"
-]);
+const PM_MODEL_HINT_KEYS = new Set(["res_model", "model"]);
+
+/** Max nesting depth when scanning plan_safe_write values for PM model hints. */
+const PM_HINT_SCAN_MAX_DEPTH = 8;
+
+function findPmModelHint(value: unknown, depth = 0): string | null {
+  if (depth > PM_HINT_SCAN_MAX_DEPTH || value == null || typeof value !== "object") return null;
+
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findPmModelHint(item, depth + 1);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+  for (const key of PM_MODEL_HINT_KEYS) {
+    const hinted = record[key];
+    if (typeof hinted === "string" && PROJECT_MANAGEMENT_MODELS.has(hinted)) return hinted;
+  }
+  for (const child of Object.values(record)) {
+    const found = findPmModelHint(child, depth + 1);
+    if (found) return found;
+  }
+  return null;
+}
 
 /**
  * Reject PM-shaped payloads misrouted to bookkeeping.plan_safe_write.
+ * Walks nested objects/arrays for `res_model` / `model` hints targeting PM models.
  * Returns a user-facing error message, or null when values look bookkeeping-scoped.
  */
 export function rejectProjectManagementSafeWrite(values: Record<string, unknown>): string | null {
-  const resModel = values.res_model;
-  if (typeof resModel === "string" && BOOKKEEPING_EXCLUDED_PM_MODELS.has(resModel)) {
-    return (
-      `Project-management writes targeting ${resModel} must not use bookkeeping.plan_safe_write. ` +
-      "Use create_record, update_record, post_message, or batch_post_message instead."
-    );
-  }
-  const model = values.model;
-  if (typeof model === "string" && BOOKKEEPING_EXCLUDED_PM_MODELS.has(model)) {
-    return (
-      `Project-management writes for model ${model} must not use bookkeeping.plan_safe_write. ` +
-      "Use create_record, update_record, post_message, or batch_post_message instead."
-    );
-  }
-  return null;
+  const pmModel = findPmModelHint(values);
+  if (!pmModel) return null;
+  return (
+    `Project-management writes targeting ${pmModel} must not use bookkeeping.plan_safe_write. ` +
+    "Use create_record, update_record, post_message, or batch_post_message instead."
+  );
 }
 
 export function registerSafeWritePlannerTools(
@@ -1914,8 +1924,9 @@ export function registerSafeWritePlannerTools(
         "create_or_update_report_external_value, create_manual_tax_return, update_return_type_periodicity, " +
         "create_lock_exception. Do NOT use for project-management work (project.task descriptions/chatter, " +
         "mail.activity on tasks, triage notes mentioning banking or deadlines) — use create_record, update_record, " +
-        "post_message, or batch_post_message instead. Do NOT use generic create_record for accounting models " +
-        "(account.*, etc.) — use this tool. Runs read-only checks (company/field existence, record state, period " +
+        "post_message, or batch_post_message instead. PM-shaped values (including nested res_model/model hints) are " +
+        "rejected before planning. Do NOT use generic create_record for accounting models (account.*, etc.) — the " +
+        "write-safety gate blocks them; use this tool. Runs read-only checks (company/field existence, record state, period " +
         "consistency, duplicates, lock dates) and returns a would-write plan plus an HMAC confirmation token. " +
         "A confirmation_token is issued only when status is 'safe' or a 'duplicate_found' that resolves to an " +
         "in-place update; never for 'blocked' or 'needs_lock_exception'.",

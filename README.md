@@ -74,9 +74,11 @@ can only do what their Odoo account permits.
 > `mail.activity` on `project.task` / `project.project`, including text that mentions banking,
 > B2C exports, or operational deadlines — use **`create_record`**, **`update_record`**,
 > **`post_message`**, or **`batch_post_message`**. Do **not** route those through
-> `bookkeeping.plan_safe_write`. Accounting, payroll, bank, and tax mutations use
+> `bookkeeping.plan_safe_write` (it rejects PM-shaped `values`, including nested
+> `res_model` / `model` hints). Accounting, payroll, bank, and tax mutations use
 > **`bookkeeping.plan_safe_write`** only (four supported operations); do **not** use generic
-> `create_record` for `account.*` or other ledger models — the connector blocks them.
+> `create_record` / `update_record` for `account.*` or other ledger models — the connector
+> **write-safety gate** on generic write tools rejects those models.
 >
 > **Bookkeeping safety.** The `bookkeeping.*` tools are **read-only by default**. Writes are
 > **two-phase**: `bookkeeping.plan_safe_write` only *validates* and returns a would-write

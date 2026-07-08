@@ -50,9 +50,9 @@ Why this shape:
 > (even when they mention banking, B2C exports, or operational deadlines) belong on the
 > generic write tools: `create_record`, `update_record`, `post_message`, or
 > `batch_post_message`. Conversely, never use generic `create_record` / `update_record` for
-> accounting models (`account.*`, payroll, bank, tax) — only the four operations supported
-> by `bookkeeping.plan_safe_write` may mutate the ledger. Use raw Odoo CRUD for read paths
-> and models neither lane covers.
+> accounting models (`account.*`, payroll, bank, tax) — the connector write-safety gate rejects
+> those models; only the four operations supported by `bookkeeping.plan_safe_write` may
+> mutate the ledger. Use raw Odoo CRUD for read paths and models neither lane covers.
 
 ### Project management vs accounting writes
 
@@ -62,8 +62,9 @@ Why this shape:
 | Tax close, external report values, return cards, lock exceptions | `bookkeeping.plan_safe_write` (validate-only) → human-confirmed apply | CA12 `box_22` carryover, missing `account.return`, lock-date exception |
 
 `bookkeeping.plan_safe_write` accepts **only** the four enumerated `operation` values and
-rejects PM-shaped `values` (e.g. `res_model: "project.task"`). It never creates or updates
-`project.task`, `mail.activity`, or chatter.
+rejects PM-shaped `values` at any nesting depth (any `res_model` / `model` hint targeting
+`project.task`, `mail.activity`, etc.). It never creates or updates `project.task`,
+`mail.activity`, or chatter.
 
 ---
 
@@ -357,15 +358,15 @@ unrecognized, it reports a `configuration_issues` entry instead of guessing peri
 **Validate-only — NEVER writes to Odoo.** Accounting/tax-close mutations **only** — not for
 `project.task`, `mail.activity`, or chatter. Project-management notes (including text that
 mentions banking, exports, or deadlines) must use `create_record`, `update_record`,
-`post_message`, or `batch_post_message` instead; generic `create_record` must not be used for
-`account.*` or other ledger models.
+`post_message`, or `batch_post_message` instead; generic `create_record` / `update_record` on
+`account.*` or other ledger models are rejected by the connector write-safety gate.
 
 Runs read-only checks (company/field existence, record state, period consistency, duplicates,
 lock dates) for a proposed bookkeeping write and returns a *would-write* plan plus an HMAC
 confirmation token. A `confirmation_token` is issued only when `status` is `safe` (or a
 `duplicate_found` that resolves to an in-place update); never for `blocked` or
-`needs_lock_exception`. PM-shaped `values` (e.g. `res_model: "project.task"`) are rejected
-before any Odoo reads.
+`needs_lock_exception`. PM-shaped `values` (including nested `res_model` / `model` hints) are
+rejected before any Odoo reads.
 
 | Field | Type | Required | Default | Notes |
 |---|---|---|---|---|

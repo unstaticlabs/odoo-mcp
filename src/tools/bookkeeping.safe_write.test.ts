@@ -96,6 +96,26 @@ describe("rejectProjectManagementSafeWrite", () => {
     expect(reason).toContain("project.task");
   });
 
+  test("nested res_model project.task hint is rejected", () => {
+    const reason = rejectProjectManagementSafeWrite({
+      report_line_code: "box_22",
+      activity: {
+        res_model: "project.task",
+        res_id: 990,
+        note: "B2C bank export deadline"
+      }
+    });
+    expect(reason).toContain("project.task");
+    expect(reason).toContain("create_record");
+  });
+
+  test("nested model mail.activity hint inside array is rejected", () => {
+    const reason = rejectProjectManagementSafeWrite({
+      items: [{ model: "mail.activity", summary: "Follow up" }]
+    });
+    expect(reason).toContain("mail.activity");
+  });
+
   test("accounting external-value payload is not rejected", () => {
     expect(rejectProjectManagementSafeWrite(CA12_VALUES)).toBeNull();
   });
@@ -119,6 +139,24 @@ describe("bookkeeping.plan_safe_write — project-management rejection", () => {
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain("project.task");
     expect(result.content[0].text).toContain("create_record");
+    expect(enqueue).not.toHaveBeenCalled();
+  });
+
+  test("nested PM-shaped values return tool error without Odoo calls", async () => {
+    const enqueue = mock(async () => {
+      throw new Error("Odoo should not be called for nested PM-shaped plan_safe_write");
+    });
+    const handler = buildHandler({ enqueue } as unknown as OdooQueue);
+    const result = await handler({
+      operation: "create_or_update_report_external_value",
+      company: "ACME FR",
+      values: {
+        report_line_code: "box_22",
+        payload: { activity: { res_model: "project.task", note: "Bank export deadline" } }
+      }
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("project.task");
     expect(enqueue).not.toHaveBeenCalled();
   });
 });
