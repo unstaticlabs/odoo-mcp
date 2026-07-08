@@ -7,7 +7,7 @@
   "vars": {
     // Dev default for the safe-write confirmation-token HMAC. Override with a real
     // secret in production via `wrangler secret put CONFIRMATION_SECRET`.
-    "CONFIRMATION_SECRET": "dev-confirmation-secret-do-not-use-in-prod"
+    // "CONFIRMATION_SECRET": "dev-confirmation-secret-do-not-use-in-prod" <-- not a line here because this is a secret. otherwise when creating the secret, wrangler will complain that this is declared as a plaintext var.
   },
   "kv_namespaces": [
     {
