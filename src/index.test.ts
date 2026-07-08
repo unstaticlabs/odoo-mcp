@@ -1158,12 +1158,12 @@ describe("create_record provenance stamping", () => {
     expect(text.indexOf(bodyToken)).toBeLessThan(text.indexOf("77"));
   });
 
-  test("other model: single enqueue, no token, no marker post", async () => {
+  test("non-task model without provenance stamp: project.tags create passes safety gate", async () => {
     const queue = makeStubQueue({ createId: 5 });
     const agent = await buildAgentWithQueue(queue);
     const handler = getToolHandler(agent, "create_record");
 
-    const result = await handler({ model: "res.partner", values: { name: "Acme" } });
+    const result = await handler({ model: "project.tags", values: { name: "urgent" } });
     const text = result.content[0].text as string;
 
     expect(queue.calls.length).toBe(1);
@@ -1171,6 +1171,20 @@ describe("create_record provenance stamping", () => {
     expect(text).toContain("5");
     expect(text).not.toContain("Trace token");
     expect(text).not.toContain("[agent-source]");
+  });
+
+  test("res.partner create is blocked by connector safety before any Odoo call", async () => {
+    const queue = makeStubQueue({ createId: 5 });
+    const agent = await buildAgentWithQueue(queue);
+    const handler = getToolHandler(agent, "create_record");
+
+    const result = await handler({ model: "res.partner", values: { name: "Acme" } });
+
+    expect(result.isError).toBe(true);
+    expect(queue.calls.length).toBe(0);
+    const envelope = JSON.parse(result.content[0].text);
+    expect(envelope.error).toBe("write_blocked");
+    expect(envelope.intent).toBe("financial_mutation");
   });
 
   test("post failure isolation: still returns id + warning, isError not set", async () => {
@@ -1287,6 +1301,59 @@ describe("chatter HTML escaping — no double-escape", () => {
 
     const post = queue.calls.find((c) => c.method === "message_post")!;
     expect(post.args.body_is_html).toBe(true);
+  });
+});
+
+describe("write safety gate (connector)", () => {
+  test("post_message allows banking/B2C operational note text on project.task", async () => {
+    const queue = makeStubQueue();
+    const agent = await buildAgentWithQueue(queue);
+    const handler = getToolHandler(agent, "post_message");
+
+    const body =
+      "USL Admin: coordinate B2C bank export with Valentin before the operational deadline.";
+    const result = await handler({ model: "project.task", record_id: 7, body, body_is_html: false });
+
+    expect(result.isError).toBeUndefined();
+    expect(queue.calls.some((c) => c.method === "message_post")).toBe(true);
+  });
+
+  test("update_record blocks account.move before Odoo is called", async () => {
+    const queue = makeStubQueue();
+    const agent = await buildAgentWithQueue(queue);
+    const handler = getToolHandler(agent, "update_record");
+
+    const result = await handler({ model: "account.move", record_id: 1, values: { ref: "INV/1" } });
+
+    expect(result.isError).toBe(true);
+    expect(queue.calls.length).toBe(0);
+    const envelope = JSON.parse(result.content[0].text);
+    expect(envelope.error).toBe("write_blocked");
+    expect(envelope.intent).toBe("financial_mutation");
+  });
+
+  test("call_model_method read bypasses the write safety gate", async () => {
+    const agent = await buildWriteToolAgent();
+    const fetchCalls: { url: string; body: any }[] = [];
+    globalThis.fetch = mock(async (url: string, init: any) => {
+      fetchCalls.push({ url, body: JSON.parse(init.body) });
+      return new Response(JSON.stringify({ result: [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+
+    const handler = getToolHandler(agent, "call_model_method");
+    const result = await handler({
+      model: "account.move",
+      method: "read",
+      ids: [1],
+      kwargs: { fields: ["name"] },
+      args: []
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(fetchCalls.length).toBe(1);
   });
 });
 
@@ -2137,13 +2204,13 @@ describe("JSON error envelope (tool handlers)", () => {
     );
 
     const handler = getToolHandler(agent, "update_record");
-    const result = await handler({ model: "account.move", record_id: 1, values: { state: "posted" } });
+    const result = await handler({ model: "project.task", record_id: 1, values: { name: "Renamed" } });
 
     expect(result.isError).toBe(true);
     const envelope = JSON.parse(result.content[0].text);
     expect(envelope).toEqual({
       error: "permission_denied",
-      model: "account.move",
+      model: "project.task",
       method: "write",
       http_status: 403,
       details: "Access Denied by Odoo",
@@ -2210,12 +2277,12 @@ describe("JSON error envelope (tool handlers)", () => {
     globalThis.fetch = fetchMock;
 
     const handler = getToolHandler(agent, "update_record");
-    const result = await handler({ model: "account.move", record_id: 1, values: { state: "posted" } });
+    const result = await handler({ model: "project.task", record_id: 1, values: { name: "X" } });
 
     expect(result.isError).toBe(true);
     const envelope = JSON.parse(result.content[0].text);
     expect(envelope.error).toBe("unknown");
-    expect(envelope.model).toBe("account.move");
+    expect(envelope.model).toBe("project.task");
     expect(envelope.method).toBe("write");
     expect(envelope.recoverable).toBe(false);
     expect(fetchMock.mock.calls.length).toBe(0);
