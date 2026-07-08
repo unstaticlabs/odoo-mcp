@@ -2,7 +2,17 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { OdooQueue } from "../odoo-queue";
 import type { Props } from "../server";
-import { mcpError, mcpErrorFromException, mcpStructured, plaintextToHtml, requireConnection } from "./shared";
+import { assessWriteOperation, isMutatingOdooMethod } from "../write-safety";
+import { mcpError, mcpErrorFromException, mcpStructured, mcpWriteBlockedError, plaintextToHtml, requireConnection } from "./shared";
+
+function gateWrite(model: string, method: string, args: Record<string, unknown>) {
+  if (!isMutatingOdooMethod(method)) return null;
+  const verdict = assessWriteOperation({ model, method, args });
+  if (!verdict.allowed) {
+    return mcpWriteBlockedError({ model, method }, verdict);
+  }
+  return null;
+}
 
 export function registerWriteTools(server: McpServer, getProps: () => Props | undefined, queue: OdooQueue) {
   server.registerTool(
@@ -31,6 +41,9 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
       }
     },
     async ({ model, values }) => {
+      const blocked = gateWrite(model, "create", { vals_list: [values] });
+      if (blocked) return blocked;
+
       const props = getProps();
       let conn: ReturnType<typeof requireConnection>;
       let id: number;
@@ -99,6 +112,12 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
     async ({ model, record_id, body, subtype, body_is_html }) => {
       if (!model || !model.trim()) return mcpError("model must be a non-empty string");
       if (!Number.isInteger(record_id) || record_id <= 0) return mcpError("record_id must be a positive integer");
+      const blocked = gateWrite(model, "message_post", {
+        ids: [record_id],
+        body,
+        ...(subtype ? { subtype_xmlid: subtype } : {})
+      });
+      if (blocked) return blocked;
       try {
         const result = await queue.enqueue(requireConnection(getProps()), model, "message_post", {
           ids: [record_id],
@@ -133,6 +152,8 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
       }
     },
     async ({ model, record_id, values }) => {
+      const blocked = gateWrite(model, "write", { ids: [record_id], vals: values });
+      if (blocked) return blocked;
       try {
         await queue.enqueue(requireConnection(getProps()), model, "write", {
           ids: [record_id],
@@ -177,6 +198,8 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
         const conn = requireConnection(getProps());
         const results: { record_id: number; ok: boolean }[] = [];
         for (const u of updates) {
+          const blocked = gateWrite(model, "write", { ids: [u.record_id], vals: u.values });
+          if (blocked) return blocked;
           await queue.enqueue(conn, model, "write", { ids: [u.record_id], vals: u.values });
           results.push({ record_id: u.record_id, ok: true });
         }
@@ -221,6 +244,12 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
         const conn = requireConnection(getProps());
         const results: unknown[] = [];
         for (const m of messages) {
+          const blocked = gateWrite(model, "message_post", {
+            ids: [m.record_id],
+            body: m.body,
+            ...(m.subtype ? { subtype_xmlid: m.subtype } : {})
+          });
+          if (blocked) return blocked;
           const res = await queue.enqueue(conn, model, "message_post", {
             ids: [m.record_id],
             body: m.body_is_html ? m.body : plaintextToHtml(m.body),
@@ -254,6 +283,8 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
       }
     },
     async ({ model, record_id }) => {
+      const blocked = gateWrite(model, "unlink", { ids: [record_id] });
+      if (blocked) return blocked;
       try {
         await queue.enqueue(requireConnection(getProps()), model, "unlink", { ids: [record_id] });
         return mcpStructured({ ok: true }, JSON.stringify(true, null, 2));
@@ -292,6 +323,8 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
       }
       try {
         const body = { ...kwargs, ...(ids !== undefined ? { ids } : {}) };
+        const blocked = gateWrite(model, method, body);
+        if (blocked) return blocked;
         const result = await queue.enqueue(requireConnection(getProps()), model, method, body);
         return mcpStructured({ result }, JSON.stringify(result, null, 2));
       } catch (err) {

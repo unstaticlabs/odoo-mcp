@@ -361,6 +361,32 @@ export interface ErrorContext {
   method?: string;
 }
 
+export type WriteBlockedIntent = "project_management" | "financial_mutation" | "disallowed";
+
+export type WriteBlockedErrorEnvelope = ErrorEnvelope & {
+  error: "write_blocked";
+  intent: WriteBlockedIntent;
+  blocked_fields?: string[];
+};
+
+/** Connector safety rejection — returned before any Odoo call when a write fails the allowlist. */
+export function mcpWriteBlockedError(
+  context: { model: string; method: string },
+  verdict: { intent: WriteBlockedIntent; reason?: string; blocked_fields?: string[] }
+) {
+  const envelope: WriteBlockedErrorEnvelope = {
+    error: "write_blocked",
+    intent: verdict.intent,
+    model: context.model,
+    method: context.method,
+    http_status: null,
+    details: verdict.reason ?? "Write blocked by connector safety layer.",
+    recoverable: false,
+    ...(verdict.blocked_fields?.length ? { blocked_fields: verdict.blocked_fields } : {})
+  };
+  return { content: [{ type: "text" as const, text: JSON.stringify(envelope) }], isError: true as const };
+}
+
 /** Redact Odoo API keys and bearer tokens from error detail text. */
 export function redactDetails(text: string): string {
   return text
