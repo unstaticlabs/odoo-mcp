@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { z } from "zod";
 import { OdooError } from "../odoo";
 import {
   resolveFieldPreset,
@@ -6,6 +7,10 @@ import {
   resolveNamedPreset,
   resolveNamedFieldPreset,
   resolveBatchReadFields,
+  FIELD_PRESET_FIELDS_MUTUAL_EXCLUSION_MESSAGE,
+  isFieldPresetFieldsCompatible,
+  fieldPresetFieldsMutualExclusionRefine,
+  fieldPresetFieldsMutualExclusionRefinement,
   buildBrowsePageMeta,
   applyBrowseSafeguard,
   encodeBrowseCursor,
@@ -595,6 +600,137 @@ describe("resolveBatchReadFields", () => {
     expect(named.field_preset).toBe("minimal");
     expect(legacy.field_preset).toBeNull();
     expect(named.fields).toEqual(legacy.fields);
+  });
+});
+
+describe("isFieldPresetFieldsCompatible", () => {
+  describe("pass matrix", () => {
+    for (const preset of NAMED_FIELD_PRESET_VALUES) {
+      test(`null fields with preset ${preset}`, () => {
+        expect(isFieldPresetFieldsCompatible({ fields: null, field_preset: preset })).toBe(true);
+      });
+    }
+
+    for (const preset of NAMED_FIELD_PRESET_VALUES) {
+      test(`empty fields with preset ${preset}`, () => {
+        expect(isFieldPresetFieldsCompatible({ fields: [], field_preset: preset })).toBe(true);
+      });
+    }
+
+    test("non-empty fields with minimal preset", () => {
+      expect(isFieldPresetFieldsCompatible({ fields: ["id"], field_preset: "minimal" })).toBe(true);
+    });
+
+    test("non-empty fields with omitted preset", () => {
+      expect(isFieldPresetFieldsCompatible({ fields: ["id"] })).toBe(true);
+    });
+
+    test("non-empty fields with null preset", () => {
+      expect(isFieldPresetFieldsCompatible({ fields: ["id"], field_preset: null })).toBe(true);
+    });
+
+    for (const preset of NAMED_FIELD_PRESET_VALUES) {
+      test(`preset-only with null fields and ${preset}`, () => {
+        expect(isFieldPresetFieldsCompatible({ fields: null, field_preset: preset })).toBe(true);
+      });
+    }
+  });
+
+  describe("fail matrix", () => {
+    const nonDefaultPresets = NAMED_FIELD_PRESET_VALUES.filter((p) => p !== "minimal");
+
+    for (const preset of nonDefaultPresets) {
+      test(`non-empty fields ["id"] with ${preset}`, () => {
+        expect(isFieldPresetFieldsCompatible({ fields: ["id"], field_preset: preset })).toBe(false);
+      });
+
+      test(`non-empty fields ["id", "name"] with ${preset}`, () => {
+        expect(isFieldPresetFieldsCompatible({ fields: ["id", "name"], field_preset: preset })).toBe(
+          false
+        );
+      });
+    }
+  });
+
+  test("FIELD_PRESET_FIELDS_MUTUAL_EXCLUSION_MESSAGE matches browse/read error string", () => {
+    expect(FIELD_PRESET_FIELDS_MUTUAL_EXCLUSION_MESSAGE).toBe(
+      "cannot set both explicit fields and a non-default field_preset"
+    );
+  });
+});
+
+describe("fieldPresetFieldsMutualExclusionRefinement", () => {
+  const zStubReadInput = z
+    .object({
+      field_preset: z.enum(NAMED_FIELD_PRESET_VALUES).nullable().optional(),
+      fields: z.array(z.string()).nullable()
+    })
+    .refine(fieldPresetFieldsMutualExclusionRefine, fieldPresetFieldsMutualExclusionRefinement);
+
+  test("rejects tracking_minimal with explicit fields", () => {
+    const result = zStubReadInput.safeParse({
+      fields: ["id", "name"],
+      field_preset: "tracking_minimal"
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(
+        result.error.issues.some((i) => i.message === FIELD_PRESET_FIELDS_MUTUAL_EXCLUSION_MESSAGE)
+      ).toBe(true);
+    }
+  });
+
+  test("rejects financial_minimal with explicit fields", () => {
+    const result = zStubReadInput.safeParse({
+      fields: ["id", "name"],
+      field_preset: "financial_minimal"
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(
+        result.error.issues.some((i) => i.message === FIELD_PRESET_FIELDS_MUTUAL_EXCLUSION_MESSAGE)
+      ).toBe(true);
+    }
+  });
+
+  test("accepts null fields with tracking_minimal preset", () => {
+    const result = zStubReadInput.safeParse({
+      fields: null,
+      field_preset: "tracking_minimal"
+    });
+    expect(result.success).toBe(true);
+  });
+
+  test("accepts empty fields with financial_minimal preset", () => {
+    const result = zStubReadInput.safeParse({
+      fields: [],
+      field_preset: "financial_minimal"
+    });
+    expect(result.success).toBe(true);
+  });
+
+  test("accepts non-empty fields with minimal preset", () => {
+    const result = zStubReadInput.safeParse({
+      fields: ["id"],
+      field_preset: "minimal"
+    });
+    expect(result.success).toBe(true);
+  });
+
+  test("accepts non-empty fields with omitted preset", () => {
+    const result = zStubReadInput.safeParse({
+      fields: ["id"],
+      field_preset: undefined
+    });
+    expect(result.success).toBe(true);
+  });
+
+  test("accepts non-empty fields with null preset", () => {
+    const result = zStubReadInput.safeParse({
+      fields: ["id"],
+      field_preset: null
+    });
+    expect(result.success).toBe(true);
   });
 });
 
