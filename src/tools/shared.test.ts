@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { z } from "zod";
 import { OdooError } from "../odoo";
 import {
   resolveFieldPreset,
@@ -14,6 +15,11 @@ import {
   buildBrowseResourceUri,
   BROWSE_DEFAULT_LIMIT,
   NAMED_FIELD_PRESET_VALUES,
+  FIELD_PRESET_FIELDS_MUTUAL_EXCLUSION_MESSAGE,
+  isFieldPresetFieldsCompatible,
+  fieldPresetFieldsMutualExclusionRefine,
+  fieldPresetFieldsMutualExclusionRefinement,
+  type FieldPresetFieldsInput,
   BROWSE_MAX_PAYLOAD_BYTES,
   BROWSE_MIN_LIMIT,
   resolveCompactFields,
@@ -595,6 +601,56 @@ describe("resolveBatchReadFields", () => {
     expect(named.field_preset).toBe("minimal");
     expect(legacy.field_preset).toBeNull();
     expect(named.fields).toEqual(legacy.fields);
+  });
+});
+
+describe("isFieldPresetFieldsCompatible / fieldPresetFieldsMutualExclusionRefinement", () => {
+  type PredicateCase = FieldPresetFieldsInput & { expected: boolean };
+
+  test.each([
+    { fields: null, field_preset: "minimal", expected: true },
+    { fields: null, field_preset: "tracking_minimal", expected: true },
+    { fields: null, field_preset: "financial_minimal", expected: true },
+    { fields: [], field_preset: "tracking_minimal", expected: true },
+    { fields: [], field_preset: "financial_minimal", expected: true },
+    { fields: ["id"], field_preset: "minimal", expected: true },
+    { fields: ["id"], field_preset: undefined, expected: true },
+    { fields: ["id"], field_preset: null, expected: true },
+    { fields: ["id", "name"], field_preset: undefined, expected: true },
+    { fields: ["id"], field_preset: "tracking_minimal", expected: false },
+    { fields: ["id"], field_preset: "financial_minimal", expected: false },
+    { field_preset: "tracking_minimal", expected: true }
+  ] satisfies PredicateCase[])("isFieldPresetFieldsCompatible(%j) → %s", ({ fields, field_preset, expected }: PredicateCase) => {
+    expect(isFieldPresetFieldsCompatible({ fields, field_preset })).toBe(expected);
+  });
+
+  test("FIELD_PRESET_FIELDS_MUTUAL_EXCLUSION_MESSAGE is exact browse error string", () => {
+    expect(FIELD_PRESET_FIELDS_MUTUAL_EXCLUSION_MESSAGE).toBe(
+      "cannot set both explicit fields and a non-default field_preset"
+    );
+  });
+
+  const stubSchema = z
+    .object({
+      field_preset: z.enum(NAMED_FIELD_PRESET_VALUES).nullable().optional(),
+      fields: z.array(z.string()).nullable()
+    })
+    .refine(fieldPresetFieldsMutualExclusionRefine, fieldPresetFieldsMutualExclusionRefinement);
+
+  test("stub schema rejects non-empty fields with non-default preset", () => {
+    expect(() =>
+      stubSchema.parse({ fields: ["id"], field_preset: "tracking_minimal" })
+    ).toThrow(/cannot set both explicit fields and a non-default field_preset/);
+  });
+
+  test.each([
+    { fields: ["id"], field_preset: "minimal" },
+    { fields: ["id"], field_preset: null },
+    { fields: ["id"] },
+    { fields: [], field_preset: "tracking_minimal" },
+    { fields: null, field_preset: "financial_minimal" }
+  ] satisfies FieldPresetFieldsInput[])("stub schema accepts %j", (input: FieldPresetFieldsInput) => {
+    expect(() => stubSchema.parse(input)).not.toThrow();
   });
 });
 

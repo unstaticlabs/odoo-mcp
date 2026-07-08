@@ -917,6 +917,37 @@ export function capBrowsePage(input: {
 
 export const NAMED_FIELD_PRESET_VALUES = ["minimal", "tracking_minimal", "financial_minimal"] as const;
 
+/** Exact browse/parseBrowseResourceParams mutual-exclusion error. */
+export const FIELD_PRESET_FIELDS_MUTUAL_EXCLUSION_MESSAGE =
+  "cannot set both explicit fields and a non-default field_preset" as const;
+
+export type FieldPresetFieldsInput = {
+  fields?: string[] | null;
+  field_preset?: NamedFieldPreset | null;
+};
+
+/** Exported for unit testing. */
+export function isFieldPresetFieldsCompatible(
+  input: FieldPresetFieldsInput,
+): boolean {
+  const { fields, field_preset } = input;
+  if (fields == null || fields.length === 0) return true;
+  if (field_preset == null) return true;
+  return field_preset === "minimal";
+}
+
+/** Zod .refine() callback — returns true when input is compatible. */
+export function fieldPresetFieldsMutualExclusionRefine(
+  data: FieldPresetFieldsInput,
+): boolean {
+  return isFieldPresetFieldsCompatible(data);
+}
+
+/** Tuple for .refine(fieldPresetFieldsMutualExclusionRefine, fieldPresetFieldsMutualExclusionRefinement) */
+export const fieldPresetFieldsMutualExclusionRefinement = {
+  message: FIELD_PRESET_FIELDS_MUTUAL_EXCLUSION_MESSAGE,
+} as const;
+
 export interface NamedPresetResolution {
   fields: string[];
   preset: NamedFieldPreset | null;
