@@ -155,6 +155,36 @@ describe("assessWriteOperation — PM field allowlist", () => {
     expect(verdict.allowed).toBe(false);
     expect(verdict.intent).toBe("disallowed");
   });
+
+  test("mail.activity create without res_model is disallowed", () => {
+    const verdict = assessWriteOperation({
+      model: "mail.activity",
+      method: "create",
+      args: {
+        vals_list: [
+          {
+            summary: "CEO follow-up",
+            note: "Banking export deadline with Valentin.",
+            activity_type_id: 4,
+            user_id: 7
+          }
+        ]
+      }
+    });
+    expect(verdict.allowed).toBe(false);
+    expect(verdict.intent).toBe("disallowed");
+    expect(verdict.reason).toContain("res_model");
+  });
+
+  test("non-allowlisted model message_post is disallowed", () => {
+    const verdict = assessWriteOperation({
+      model: "sale.order",
+      method: "message_post",
+      args: { ids: [1], body: "Operational note about banking deadline." }
+    });
+    expect(verdict.allowed).toBe(false);
+    expect(verdict.intent).toBe("disallowed");
+  });
 });
 
 describe("isMutatingOdooMethod", () => {
