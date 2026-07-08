@@ -35,6 +35,7 @@ The server never logs, stores, or echoes your key.
 | Tool | Kind | Parameters |
 |---|---|---|
 | `search_records` | read | `model` (string), `domain` (array, default `[]`), `fields` (string[] \| null → curated preset), `limit` (1–100, default 10), `order` (string, optional, e.g. `"name desc"`), `offset` (int ≥ 0, default 0) → includes `returned_fields`, `omitted_fields`, `warnings` |
+| `search_records_compact` | read | `model` (string), `domain` (array, default `[]`), `field_preset` (`minimal` \| `tracking_minimal` \| `financial_minimal`, default `minimal`), `fields` (string[] \| null — explicit override; mutually exclusive with non-default preset), `limit` (1–100, default 25), `offset` (int ≥ 0, default 0), `order` (string, optional), `search_count` (boolean, default `true`) → `CompactReadEnvelope`: nested `fields` manifest (`resolved_fields`, `returned_fields`, `omitted_fields`, `resolution`) and `page` (`offset`, `limit`, `count`, `returned`, `has_more`) |
 | `browse_records` | read | `model` (string), `domain` (array, default `[]`), `field_preset` (`minimal` \| `tracking_minimal` \| `financial_minimal`, default `minimal`), `fields` (string[] \| null — explicit override; mutually exclusive with non-default preset), `limit` (1–100, default 25), `offset` (int ≥ 0, default 0), `cursor` (string \| null, optional — stable continuation token), `order` (string, optional) → compact rows with `page`, `field_preset`, `fields_resolution`, `returned_fields`, `omitted_fields`, `warnings`, optional `safeguard_applied` |
 | `search_count` | read | `model` (string), `domain` (array, default `[]`) → `{ count }` via `search_count`, without fetching records |
 | `get_record` | read | `model` (string), `record_id` (positive int), `fields` (string[] \| null → curated preset) → includes field reporting |
@@ -142,46 +143,39 @@ in `error` with `recoverable: true` — no fallback. An HTTP 200 response with a
 body (e.g. some Odoo builds rejecting `read_group` without 404) surfaces as `error: "unknown"` —
 also no fallback.
 
-For `browse_records`, use named **field presets** (compact, no `fields_get` round-trip):
-- `minimal` (default) — id, name, and a few key scalar fields per model,
-- `tracking_minimal` — workflow/triage fields (stage, priority, deadlines, …),
-- `financial_minimal` — amounts, dates, and partner refs (no x2many/binary).
+For compact paginated triage, use `search_records_compact` or `browse_records` — see
+[Compact browse](#compact-browse-search_records_compact-vs-browse_records) below.
 
-Explicit `fields` override any preset. Every response includes `page` metadata
-(`count`, `has_more`, `next_offset`) so agents can page safely without a separate
-`search_count` call.
-
-**Browse workflow:** `browse_records` → scan compact rows and note `id` values →
+**Browse workflow:** `search_records_compact` or `browse_records` → scan compact rows and note `id` values →
 `batch_read({ model, ids: [...], fields: null })` or `get_record` for full detail
 on selected records only.
 
-### Compact browse (`browse_records`)
+### Compact browse (`search_records_compact` vs `browse_records`)
 
-Use `browse_records` when you need to triage many matches without overflowing the chat
-response. It returns a **small field subset per row** (via named presets or explicit
-`fields`), plus paging metadata and field provenance.
+Use **`search_records_compact`** when you want a nested `CompactReadEnvelope` with a `fields`
+manifest (`resolved_fields`, `returned_fields`, `omitted_fields`, `resolution`) and offset/limit
+paging only. Set `search_count: false` to skip the `search_count` round-trip (page `has_more`
+becomes heuristic when the page is full).
 
-**Paging:** every success response includes `page` with `offset`, `limit`, `count` (total
-matching rows), `returned` (rows in this page), and `has_more`. Continue with the next page
-by increasing `offset` by `returned` while `has_more` is true. Pass a stable `order` when
-paging so row order stays consistent across calls.
+Use **`browse_records`** when you need a flat response with cursor continuation (`cursor` /
+`page.next_cursor`), mandatory total `count`, and automatic payload-size safeguards.
 
-**Field presets:** `field_preset` selects a model-aware compact field list:
+Both tools share named **field presets** (compact, no `fields_get` round-trip):
 - `minimal` — curated core columns for known models (`project.task`, `project.project`,
   `res.partner`, `res.users`); generic `id` + `display_name` fallback for unknown models.
 - `tracking_minimal` — workflow/triage fields (stage, assignees, deadlines, state, …).
 - `financial_minimal` — amount/partner/account oriented subsets where curated.
 
-When both `field_preset` and explicit `fields` are supplied, **explicit `fields` win** and a
-`warnings` entry notes the override. The response always states which fields were returned
-(`returned_fields`) and which were omitted (`omitted_fields` + reasons).
+When both `field_preset` and explicit `fields` are supplied, **explicit `fields` win**.
+`search_records_compact` nests field provenance under `fields`; `browse_records` flattens it
+as `field_preset`, `fields_resolution`, `returned_fields`, and `omitted_fields`.
+
+**Paging:** pass a stable `order` when scanning multiple pages. `search_records_compact`
+uses offset/limit only. `browse_records` also supports `cursor` / `page.next_cursor` and
+shrinks oversized pages automatically (`safeguard_applied`).
 
 **Drill-down:** ids from compact rows can be fetched in full with existing `batch_read` or
 `get_record` — no separate expand tool is required.
-
-**Oversized pages:** when a page would exceed a chat-safe payload threshold, the tool shrinks
-`limit` and/or downgrades the preset before (or after) the Odoo fetch and records the
-adjustment in `warnings` rather than failing the call.
 
 ## Resources
 

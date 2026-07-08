@@ -26,8 +26,8 @@ npx @modelcontextprotocol/inspector
 ```
 
 In the Inspector UI: transport **Streamable HTTP**, URL `http://localhost:8787/mcp`, and add the
-three headers above. Then **List Tools** and try `search_records` or `browse_records`
-(compact paginated triage with `field_preset`, `offset` or `cursor` paging).
+three headers above. Then **List Tools** and try `search_records`, `search_records_compact`, or
+`browse_records` (compact paginated triage with `field_preset` and offset/limit or cursor paging).
 
 ### b) Claude Code
 
@@ -94,7 +94,23 @@ await client.close();
 ODOO_API_KEY=… ODOO_URL=https://your-org.odoo.com ODOO_DB=your-db node smoke.mjs
 ```
 
-### e) `browse_records` hermetic coverage
+### e) `search_records_compact` hermetic coverage
+
+`bun test` exercises `search_records_compact` without a live Odoo instance:
+
+- **Single-page happy path** — `CompactReadEnvelope` schema validation (nested `fields` manifest
+  and `page` metadata).
+- **Empty page** — success envelope with `records: []` and `page.count: 0` (not `isError`).
+- **Two-page pagination stability** — `offset` + stable `order`; asserts `has_more`, `count`,
+  and no duplicate ids across pages.
+- **Field presets** — `minimal`, `tracking_minimal`, and `financial_minimal` on known models
+  plus unknown-model fallback (`resolveCompactFields` in `shared.test.ts`).
+- **Explicit fields** — non-empty `fields` override `field_preset`; `fields.resolution.source`
+  is `explicit` and `fields.resolution.preset` is `null`.
+- **`search_count: false`** — single `search_read` Odoo call; warning about skipped count;
+  heuristic `page.has_more` when the page is full.
+
+### f) `browse_records` hermetic coverage
 
 
 `bun test` exercises `browse_records` without a live Odoo instance:

@@ -1261,6 +1261,76 @@ export async function browseRecords(
   throw new Error("browseRecords: safeguard loop exhausted without result");
 }
 
+export async function searchRecordsCompact(
+  queue: OdooQueue,
+  conn: OdooConnection,
+  options: {
+    model: string;
+    domain: unknown[];
+    field_preset?: FieldPresetName;
+    fields?: string[] | null;
+    limit?: number;
+    offset?: number;
+    order?: string;
+    search_count?: boolean;
+  },
+  warnings: string[] = []
+): Promise<CompactReadEnvelope> {
+  const model = options.model;
+  if (!model || !model.trim()) throw new Error("model must be a non-empty string");
+
+  const limit = Math.min(options.limit ?? 25, 100);
+  const offset = options.offset ?? 0;
+  const domain = options.domain;
+  const order = options.order;
+
+  const resolved = resolveCompactFields(model, {
+    field_preset: options.field_preset,
+    fields: options.fields
+  });
+
+  let count: number;
+  if (options.search_count !== false) {
+    count = await countRecords(queue, conn, model, domain);
+  } else {
+    warnings.push("Total count skipped (search_count=false); has_more is heuristic.");
+    count = offset;
+  }
+
+  const rows = (await queue.enqueue(conn, model, "search_read", {
+    domain,
+    fields: resolved.fields,
+    limit,
+    offset,
+    ...(order ? { order } : {})
+  })) as Record<string, unknown>[];
+
+  const fieldsReport = computeFieldsReport(
+    { fields: resolved.fields, explicit: resolved.resolution.source === "explicit" },
+    rows,
+    warnings,
+    model
+  );
+
+  if (options.search_count === false) {
+    count = offset + rows.length;
+  }
+
+  const page = buildPageMetadata({ offset, limit, count, returned: rows.length });
+  if (options.search_count === false) {
+    page.has_more = rows.length === limit;
+  }
+
+  return buildCompactReadEnvelope({
+    model,
+    records: rows,
+    resolved,
+    fieldsReport,
+    page,
+    warnings
+  });
+}
+
 /**
  * Pure, synchronous compact field resolver with named preset support. No Odoo round-trip.
  * Precedence: explicit non-empty `fields` → preset override → universal fallback.
