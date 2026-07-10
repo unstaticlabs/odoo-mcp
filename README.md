@@ -45,6 +45,9 @@ The server never logs, stores, or echoes your key.
 | `expand_record` | read | `model` (string), `record_id` (positive int), `relations` (string[]), `include_chatter` (bool, default true), `include_attachments` (bool, default true), `relation_limit` (1–50, default 10) — record + optional x2many relations, chatter, attachments; caps at 8 Odoo calls |
 | `projects.list_tasks` | read | `domain` (array), `fields` (string[]) — convenience wrapper over `project.task`; includes field reporting |
 | `projects.list_chatter` | read | `task_ids` (positive int[], 1–25), `limit_per_task` (1–50, default 20), `order` (string, default `"date desc"`) — canonical multi-task PM chatter; one scoped `mail.message` query per task; caps at 8 Odoo calls |
+| `projects.create_activity` | write | `task_id`, `summary`, `note`, `date_deadline`, `user_id`, `activity_type_id` — creates `mail.activity` on `project.task` |
+| `projects.post_note` | write | `task_id`, `note`, optional `body_is_html` — `project.task` chatter via `message_post` |
+| `projects.update_task` | write | `task_id` + optional `name`, `description`, `date_deadline`, `stage_id`, `priority` — curated `project.task` write; rejects empty updates |
 | [`aggregate_records`](#aggregate_records--grouped-summaries) | read | `model` (string), `domain` (array), `groupby` (string[], Odoo `field:agg` syntax e.g. `invoice_date:month`), `aggregates` (string[], e.g. `amount_total:sum`, `__count`), `lazy` (bool, default true), `orderby` (string, optional), `limit` (1–100, default 100, fallback scan cap), `offset` (int ≥ 0, default 0) — native `read_group` with bounded connector fallback |
 | `create_record` | write | `model` (string), `values` (object) |
 | `update_record` | write | `model` (string), `record_id` (positive int), `values` (object; x2many use Odoo command tuples, e.g. `[[6,0,ids]]`, `[[4,id]]`, `[[3,id]]`) |
@@ -82,13 +85,13 @@ can only do what their Odoo account permits.
 
 ### Project-management writes vs bookkeeping
 
-- **PM task notes, chatter, and activities** — use `create_record`, `update_record`, `post_message`,
-  `batch_post_message`, or `call_model_method` on `project.task`, `project.project`, or `mail.activity`
-  with `res_model` ∈ `{project.task, project.project}`.
-- **Operational text** may reference banking, B2C exports, VAT, payroll handoffs, deadlines — the
-  connector classifies by **model + method + field names**, not free-text keywords.
+- **PM task notes, chatter, and activities** — **`projects.create_activity`**, **`projects.post_note`**,
+  **`projects.update_task`**.
+- **Operational text** (banking, B2C exports, VAT, payroll handoffs, deadlines) is safe on these tools.
 - **Accounting / tax / ledger mutations** — **`bookkeeping.plan_safe_write` only** (four operations
   documented in [docs/bookkeeping.md](docs/bookkeeping.md)). It never handles PM models.
+- **Generic CRUD** — `create_record`, `post_message`, `update_record` remain for other models once the
+  connector gate lands (#1517).
 - **Multi-task chatter** — see [docs/testing.md](docs/testing.md) § bulk chatter reads.
 
 ### Field selection
