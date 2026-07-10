@@ -17,7 +17,6 @@ import {
   type PlanResult
 } from "../safety";
 import type { Props } from "../server";
-import { PROJECT_MANAGEMENT_MODELS } from "../write-safety";
 import { mcpError, mcpErrorFromException, mcpStructured, requireConnection, zOdooRecords, zRecordContainer, zWarnings } from "./shared";
 
 type FieldsMeta = Record<string, CachedFieldMeta>;
@@ -1866,48 +1865,6 @@ async function planLockExceptionOp(
   });
 }
 
-const PM_MODEL_HINT_KEYS = new Set(["res_model", "model"]);
-
-/** Max nesting depth when scanning plan_safe_write values for PM model hints. */
-const PM_HINT_SCAN_MAX_DEPTH = 8;
-
-function findPmModelHint(value: unknown, depth = 0): string | null {
-  if (depth > PM_HINT_SCAN_MAX_DEPTH || value == null || typeof value !== "object") return null;
-
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const found = findPmModelHint(item, depth + 1);
-      if (found) return found;
-    }
-    return null;
-  }
-
-  const record = value as Record<string, unknown>;
-  for (const key of PM_MODEL_HINT_KEYS) {
-    const hinted = record[key];
-    if (typeof hinted === "string" && PROJECT_MANAGEMENT_MODELS.has(hinted)) return hinted;
-  }
-  for (const child of Object.values(record)) {
-    const found = findPmModelHint(child, depth + 1);
-    if (found) return found;
-  }
-  return null;
-}
-
-/**
- * Reject PM-shaped payloads misrouted to bookkeeping.plan_safe_write.
- * Walks nested objects/arrays for `res_model` / `model` hints targeting PM models.
- * Returns a user-facing error message, or null when values look bookkeeping-scoped.
- */
-export function rejectProjectManagementSafeWrite(values: Record<string, unknown>): string | null {
-  const pmModel = findPmModelHint(values);
-  if (!pmModel) return null;
-  return (
-    `Project-management writes targeting ${pmModel} must not use bookkeeping.plan_safe_write. ` +
-    "Use create_record, update_record, post_message, or batch_post_message instead."
-  );
-}
-
 export function registerSafeWritePlannerTools(
   server: McpServer,
   getProps: () => Props | undefined,
@@ -1967,9 +1924,6 @@ export function registerSafeWritePlannerTools(
     },
     async ({ operation, company, values }) => {
       try {
-        const pmReject = rejectProjectManagementSafeWrite(values);
-        if (pmReject) return mcpError(pmReject);
-
         const conn = requireConnection(getProps());
         const companyId = await resolveCompanyId(queue, conn, company);
         if (companyId == null) return mcpError(`Company not found: ${company}`);

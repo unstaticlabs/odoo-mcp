@@ -79,7 +79,7 @@ can only do what their Odoo account permits.
 > 
 > * **Rejection:** PM-shaped payloads (e.g. nested `res_model`/`model` hints targeting PM models) sent to `bookkeeping.plan_safe_write` are structurally rejected before planning.
 > * **Write safety:** Generic `create_record`/`update_record` calls targeting ledger models (`account.*`, payroll, bank, tax) are blocked by the connector write-safety gate. Use `bookkeeping.plan_safe_write` instead.
-> * **Bulk chatter reads (anti-pattern):** Do not run bulk `search_records` on `mail.message` containing finance keywords. Prefer per-task `expand_record({ include_chatter: true })` or `projects.list_chatter({ task_ids })`.
+> * **Bulk chatter reads (anti-pattern):** Do not use `search_records` on `mail.message` with `body`/`preview` and a `res_id in [...]` domain across multiple tasks. Prefer per-task `expand_record({ include_chatter: true })` or `projects.list_chatter({ task_ids })` (see [docs/bookkeeping.md §7](docs/bookkeeping.md#7-bulk-chatter-reads-anti-pattern)).
 > * **Bookkeeping safety:** The `bookkeeping.*` tools are **read-only by default**. Writes are **two-phase**: `bookkeeping.plan_safe_write` only *validates* and returns a would-write plan plus an HMAC confirmation token — it **never writes**, and the actual write happens only after explicit human confirmation.
 > 
 > See [docs/bookkeeping.md](docs/bookkeeping.md) for the snapshot-first workflow, rate-limit and cache model, full tool reference, and worked CA12 walkthroughs.
