@@ -1323,28 +1323,24 @@ describe("write safety gate (connector)", () => {
     expect(messagePosts).toHaveLength(1);
   });
 
-  test("create_record for mail.activity with PM note text reaches Odoo", async () => {
-    const queue = makeStubQueue({ createId: 99 });
+  test("update_record allows finance-keyword description on project.task and reaches Odoo", async () => {
+    const queue = makeStubQueue();
     const agent = await buildAgentWithQueue(queue);
-    const handler = getToolHandler(agent, "create_record");
+    const handler = getToolHandler(agent, "update_record");
 
     const result = await handler({
-      model: "mail.activity",
-      values: {
-        res_model: "project.task",
-        res_id: 42,
-        summary: FINANCE_KEYWORD_PM_TEXT.activitySummary,
-        note: FINANCE_KEYWORD_PM_TEXT.activityNote,
-        activity_type_id: 4,
-        user_id: 7,
-        date_deadline: "2026-07-15"
-      }
+      model: "project.task",
+      record_id: 990,
+      values: { description: FINANCE_KEYWORD_PM_TEXT.taskDescription }
     });
 
     expect(result.isError).toBeUndefined();
-    expect(queue.calls.length).toBe(1);
-    expect(queue.calls[0].model).toBe("mail.activity");
-    expect(queue.calls[0].method).toBe("create");
+    expect(queue.calls).toHaveLength(1);
+    expect(queue.calls[0]).toMatchObject({
+      model: "project.task",
+      method: "write",
+      args: { ids: [990], vals: { description: FINANCE_KEYWORD_PM_TEXT.taskDescription } }
+    });
   });
 
   test("update_record blocks account.move before Odoo is called", async () => {
@@ -1361,23 +1357,22 @@ describe("write safety gate (connector)", () => {
     expect(envelope.intent).toBe("financial_mutation");
   });
 
-  test("post_message on non-allowlisted model is blocked before Odoo", async () => {
+  test("update_record blocks finance-keyword text on account.move (structure over content)", async () => {
     const queue = makeStubQueue();
     const agent = await buildAgentWithQueue(queue);
-    const handler = getToolHandler(agent, "post_message");
+    const handler = getToolHandler(agent, "update_record");
 
     const result = await handler({
-      model: "sale.order",
+      model: "account.move",
       record_id: 1,
-      body: "Banking deadline note.",
-      body_is_html: false
+      values: { narration: FINANCE_KEYWORD_PM_TEXT.chatterBody }
     });
 
     expect(result.isError).toBe(true);
     expect(queue.calls.length).toBe(0);
     const envelope = JSON.parse(result.content[0].text);
     expect(envelope.error).toBe("write_blocked");
-    expect(envelope.intent).toBe("disallowed");
+    expect(envelope.intent).toBe("financial_mutation");
   });
 
   test("call_model_method read bypasses the write safety gate", async () => {
@@ -1402,6 +1397,109 @@ describe("write safety gate (connector)", () => {
 
     expect(result.isError).toBeUndefined();
     expect(fetchCalls.length).toBe(1);
+  });
+
+  test("create_record for mail.activity with PM note text reaches Odoo", async () => {
+    const queue = makeStubQueue({ createId: 99 });
+    const agent = await buildAgentWithQueue(queue);
+    const handler = getToolHandler(agent, "create_record");
+
+    const result = await handler({
+      model: "mail.activity",
+      values: {
+        res_model: "project.task",
+        res_id: 42,
+        summary: FINANCE_KEYWORD_PM_TEXT.activitySummary,
+        note: FINANCE_KEYWORD_PM_TEXT.activityNote,
+        activity_type_id: 4,
+        user_id: 7,
+        date_deadline: "2026-07-15"
+      }
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(queue.calls.length).toBe(1);
+    expect(queue.calls[0].model).toBe("mail.activity");
+    expect(queue.calls[0].method).toBe("create");
+  });
+
+  test("call_model_method allows mail.activity create with PM note text", async () => {
+    const queue = makeStubQueue({ createId: 101 });
+    const agent = await buildAgentWithQueue(queue);
+    const handler = getToolHandler(agent, "call_model_method");
+
+    const result = await handler({
+      model: "mail.activity",
+      method: "create",
+      kwargs: {
+        vals_list: [
+          {
+            res_model: "project.task",
+            res_id: 42,
+            summary: FINANCE_KEYWORD_PM_TEXT.activitySummary,
+            note: FINANCE_KEYWORD_PM_TEXT.activityNote,
+            activity_type_id: 4,
+            user_id: 7,
+            date_deadline: "2026-07-15"
+          }
+        ]
+      },
+      args: []
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(queue.calls.length).toBe(1);
+    expect(queue.calls[0]).toMatchObject({
+      model: "mail.activity",
+      method: "create",
+      args: {
+        vals_list: [
+          expect.objectContaining({
+            res_model: "project.task",
+            note: FINANCE_KEYWORD_PM_TEXT.activityNote
+          })
+        ]
+      }
+    });
+  });
+
+  test("batch_post_message allows finance-keyword chatter on project.task", async () => {
+    const queue = makeStubQueue();
+    const agent = await buildAgentWithQueue(queue);
+    const handler = getToolHandler(agent, "batch_post_message");
+
+    const result = await handler({
+      model: "project.task",
+      messages: [
+        { record_id: 990, body: FINANCE_KEYWORD_PM_TEXT.chatterBody, body_is_html: false },
+        { record_id: 954, body: FINANCE_KEYWORD_PM_TEXT.chatterBody, body_is_html: false }
+      ]
+    });
+
+    expect(result.isError).toBeUndefined();
+    const posts = queue.calls.filter((c) => c.method === "message_post");
+    expect(posts).toHaveLength(2);
+    expect(posts[0].args.ids).toEqual([990]);
+    expect(posts[1].args.ids).toEqual([954]);
+  });
+
+  test("post_message on non-allowlisted model is blocked before Odoo", async () => {
+    const queue = makeStubQueue();
+    const agent = await buildAgentWithQueue(queue);
+    const handler = getToolHandler(agent, "post_message");
+
+    const result = await handler({
+      model: "sale.order",
+      record_id: 1,
+      body: "Banking deadline note.",
+      body_is_html: false
+    });
+
+    expect(result.isError).toBe(true);
+    expect(queue.calls.length).toBe(0);
+    const envelope = JSON.parse(result.content[0].text);
+    expect(envelope.error).toBe("write_blocked");
+    expect(envelope.intent).toBe("disallowed");
   });
 
   test("create_record for res.partner is blocked before Odoo", async () => {
