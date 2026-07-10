@@ -15,8 +15,8 @@ read + client connectivity.
 - Per-request BYO-key: read `Authorization: Bearer`, `X-Odoo-Url`, `X-Odoo-Db`;
   call Odoo as that user.
 - Per-origin **rate-limiter Durable Object** (token bucket, ~1 req/s).
-- `projects.*` **read** tools: e.g. `list_projects`, `list_tasks`, `get_task`,
-  `list_stages`.
+- `projects.*` **read** tools: e.g. `list_projects`, `list_tasks`, `list_chatter`,
+  `get_task`, `list_stages`.
 - **Local dev proven:** `wrangler dev` + MCP **Inspector** against
   `http://localhost:8787/mcp`, secrets in `.dev.vars`, dev auth bypass working.
 - **Clients connect:** Claude Code and Claude connect to the hosted endpoint and

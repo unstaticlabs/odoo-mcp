@@ -7,6 +7,7 @@ import {
   type OdooConnection
 } from "../odoo";
 import type { OdooQueue } from "../odoo-queue";
+import { normalizeRecords } from "../normalizer";
 import type { Props } from "../server";
 import type { TtlCache } from "../cache";
 
@@ -1622,4 +1623,33 @@ export function resolveCompactFields(
     fields: FIELD_PRESET_FALLBACKS[preset] as string[],
     resolution: { source: "fallback", model, preset }
   };
+}
+
+/** Max Odoo round-trips per expand_record / projects.list_chatter invocation. */
+export const MAX_ODOO_CALLS_PER_READ_EXPANSION = 8;
+
+const CHATTER_MESSAGE_FIELDS = ["date", "author_id", "body", "message_type"] as const;
+
+/** Scoped mail.message search_read for a single record's chatter thread. */
+export async function fetchRecordChatter(
+  queue: OdooQueue,
+  conn: OdooConnection,
+  model: string,
+  recordId: number,
+  opts?: { limit?: number; order?: string }
+): Promise<unknown> {
+  try {
+    const rows = (await queue.enqueue(conn, "mail.message", "search_read", {
+      domain: [
+        ["model", "=", model],
+        ["res_id", "=", recordId]
+      ],
+      fields: [...CHATTER_MESSAGE_FIELDS],
+      limit: opts?.limit ?? 20,
+      order: opts?.order ?? "date desc"
+    })) as Record<string, unknown>[];
+    return normalizeRecords(rows);
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : String(err) };
+  }
 }

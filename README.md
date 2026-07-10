@@ -42,7 +42,9 @@ The server never logs, stores, or echoes your key.
 | `batch_read` | read | `model` (string), `ids` (positive int[], min 1, capped at 100), `fields` (string[] \| null → curated preset) → rows via `search_read` + field reporting |
 | `list_models` | read | — |
 | `get_fields` | read | `model` (string) → field name/type/label schema |
+| `expand_record` | read | `model` (string), `record_id` (positive int), `relations` (string[]), `include_chatter` (bool, default true), `include_attachments` (bool, default true), `relation_limit` (1–50, default 10) — record + optional x2many relations, chatter, attachments; caps at 8 Odoo calls |
 | `projects.list_tasks` | read | `domain` (array), `fields` (string[]) — convenience wrapper over `project.task`; includes field reporting |
+| `projects.list_chatter` | read | `task_ids` (positive int[], 1–25), `limit_per_task` (1–50, default 20), `order` (string, default `"date desc"`) — canonical multi-task PM chatter; one scoped `mail.message` query per task; caps at 8 Odoo calls |
 | [`aggregate_records`](#aggregate_records--grouped-summaries) | read | `model` (string), `domain` (array), `groupby` (string[], Odoo `field:agg` syntax e.g. `invoice_date:month`), `aggregates` (string[], e.g. `amount_total:sum`, `__count`), `lazy` (bool, default true), `orderby` (string, optional), `limit` (1–100, default 100, fallback scan cap), `offset` (int ≥ 0, default 0) — native `read_group` with bounded connector fallback |
 | `create_record` | write | `model` (string), `values` (object) |
 | `update_record` | write | `model` (string), `record_id` (positive int), `values` (object; x2many use Odoo command tuples, e.g. `[[6,0,ids]]`, `[[4,id]]`, `[[3,id]]`) |
@@ -174,8 +176,29 @@ as `field_preset`, `fields_resolution`, `returned_fields`, and `omitted_fields`.
 uses offset/limit only. `browse_records` also supports `cursor` / `page.next_cursor` and
 shrinks oversized pages automatically (`safeguard_applied`).
 
-**Drill-down:** ids from compact rows can be fetched in full with existing `batch_read` or
-`get_record` — no separate expand tool is required.
+**Drill-down:** ids from compact rows can be fetched in full with `batch_read` or
+`get_record` for field data. For chatter on a single task use
+`expand_record({ model: "project.task", record_id, include_chatter: true })`; for
+multiple tasks use `projects.list_chatter({ task_ids: [...] })`.
+
+### Project-management chatter
+
+**Triage:** `projects.list_tasks`, `browse_records`, or `search_records_compact` on
+`project.task` to collect task ids.
+
+**Single-task detail + chatter:**
+`expand_record({ model: "project.task", record_id, include_chatter: true, include_attachments: false })`.
+
+**Multi-task chatter:** `projects.list_chatter({ task_ids: [...] })`. Each task id
+triggers one scoped `mail.message` query (never `res_id in [...]` with `body`/`preview`).
+Re-invoke with remaining ids when `metadata.truncated_task_ids` is set (8 Odoo calls max
+per invocation) or when you have more than 8 tasks.
+
+**Do not** bulk-fetch PM chatter via `search_records` on `mail.message` with
+`[["model","=","project.task"],["res_id","in",ids]]` and `body`/`preview` — MCP hosts may
+block finance-keyword message bodies. Accounting chatter on invoices/journals belongs in
+`bookkeeping.*` (e.g. `bookkeeping.plan_safe_write` for writes), not generic `mail.message`
+reads.
 
 ## Resources
 

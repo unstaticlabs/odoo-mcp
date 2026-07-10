@@ -10,6 +10,8 @@ import {
   browseRecords,
   countRecords,
   decodeBrowseCursor,
+  fetchRecordChatter,
+  MAX_ODOO_CALLS_PER_READ_EXPANSION,
   mcpError,
   mcpErrorFromException,
   mcpStructured,
@@ -138,6 +140,83 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
   );
 
   server.registerTool(
+    "projects.list_chatter",
+    {
+      title: "List Project Task Chatter",
+      description:
+        "Read-only: canonical multi-task project-management chatter path for project.task. " +
+        "Fetches mail.message entries per task id with one scoped search_read each (never batches res_id in [...] with body). " +
+        "Do not use search_records or browse_records on mail.message with res_id in [...] and body/preview — MCP hosts may block finance-keyword content. " +
+        "For a single task, expand_record({ model: \"project.task\", record_id, include_chatter: true, include_attachments: false }) is equivalent. " +
+        "Accounting chatter on invoices/journals → bookkeeping.*, not this tool. " +
+        `Caps at ${MAX_ODOO_CALLS_PER_READ_EXPANSION} Odoo calls per invocation; remaining task_ids are returned in metadata.truncated_task_ids.`,
+      annotations: { readOnlyHint: true, openWorldHint: false },
+      inputSchema: {
+        task_ids: z.array(z.number().int().positive()).min(1).max(25),
+        limit_per_task: z.number().int().min(1).max(50).default(20),
+        order: z.string().default("date desc")
+      },
+      outputSchema: {
+        chatter_by_task_id: z.record(z.string(), z.unknown()),
+        metadata: z.object({
+          model: z.literal("project.task"),
+          requested_task_ids: z.array(z.number()),
+          fetched_task_ids: z.array(z.number()),
+          odoo_calls: z.number(),
+          truncated_task_ids: z.array(z.number()).optional()
+        }),
+        warnings: zWarnings
+      }
+    },
+    async ({ task_ids, limit_per_task, order }) => {
+      const conn = requireConnection(getProps());
+      const seen = new Set<number>();
+      const requestedTaskIds: number[] = [];
+      for (const id of task_ids) {
+        if (!seen.has(id)) {
+          seen.add(id);
+          requestedTaskIds.push(id);
+        }
+      }
+
+      const startSnapshot = queue.snapshot();
+      const callsUsed = () => queue.delta(startSnapshot).odoo_calls;
+      const chatterByTaskId: Record<string, unknown> = {};
+      const fetchedTaskIds: number[] = [];
+      const truncatedTaskIds: number[] = [];
+      const warnings: string[] = [];
+
+      for (const taskId of requestedTaskIds) {
+        if (callsUsed() >= MAX_ODOO_CALLS_PER_READ_EXPANSION) {
+          truncatedTaskIds.push(taskId);
+          continue;
+        }
+        chatterByTaskId[String(taskId)] = await fetchRecordChatter(queue, conn, "project.task", taskId, {
+          limit: limit_per_task,
+          order
+        });
+        fetchedTaskIds.push(taskId);
+      }
+
+      if (truncatedTaskIds.length > 0) {
+        warnings.push("call budget exceeded; re-invoke for remaining task_ids");
+      }
+
+      return mcpStructured({
+        chatter_by_task_id: chatterByTaskId,
+        metadata: {
+          model: "project.task" as const,
+          requested_task_ids: requestedTaskIds,
+          fetched_task_ids: fetchedTaskIds,
+          odoo_calls: callsUsed(),
+          ...(truncatedTaskIds.length > 0 ? { truncated_task_ids: truncatedTaskIds } : {})
+        },
+        warnings
+      });
+    }
+  );
+
+  server.registerTool(
     "list_models",
     {
       title: "List Models",
@@ -164,7 +243,9 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
     "search_records",
     {
       title: "Search Records",
-      description: "Read-only: model-agnostic Odoo search_read.",
+      description:
+        "Read-only: model-agnostic Odoo search_read. " +
+        "For project.task chatter, use projects.list_chatter or per-id expand_record — not bulk mail.message reads with body/preview.",
       annotations: { readOnlyHint: true, openWorldHint: false },
       inputSchema: {
         model: z.string(),
@@ -583,7 +664,7 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
       if (!Number.isInteger(record_id) || record_id <= 0) return mcpError("record_id must be a positive integer");
 
       const conn = requireConnection(getProps());
-      const MAX_ODOO_CALLS = 8;
+      const MAX_ODOO_CALLS = MAX_ODOO_CALLS_PER_READ_EXPANSION;
       const startSnapshot = queue.snapshot();
       const callsUsed = () => queue.delta(startSnapshot).odoo_calls;
       const budgetError = () => ({ error: `call budget exceeded (max ${MAX_ODOO_CALLS} Odoo calls per invocation)` });
@@ -654,20 +735,7 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
         if (callsUsed() >= MAX_ODOO_CALLS) {
           chatter = budgetError();
         } else {
-          try {
-            const rows = (await queue.enqueue(conn, "mail.message", "search_read", {
-              domain: [
-                ["model", "=", model],
-                ["res_id", "=", record_id]
-              ],
-              fields: ["date", "author_id", "body", "message_type"],
-              limit: 20,
-              order: "date desc"
-            })) as Record<string, unknown>[];
-            chatter = normalizeRecords(rows);
-          } catch (err) {
-            chatter = { error: err instanceof Error ? err.message : String(err) };
-          }
+          chatter = await fetchRecordChatter(queue, conn, model, record_id);
         }
       }
 

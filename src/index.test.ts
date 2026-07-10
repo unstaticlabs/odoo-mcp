@@ -3665,6 +3665,129 @@ describe("expand_record", () => {
   });
 });
 
+describe("projects.list_chatter", () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  /** Routes by `${model}/${method}` (matches the odoo.ts endpoint shape). Optionally logs {url, body} to `log`. */
+  function mockOdoo(routes: Record<string, unknown>, log?: { url: string; body: any }[]) {
+    return mock(async (url: string, init: any) => {
+      const key = Object.keys(routes).find((k) => url.endsWith(`/json/2/${k}`));
+      if (log) log.push({ url, body: init?.body ? JSON.parse(init.body) : undefined });
+      const outcome = key ? routes[key] : undefined;
+      if (outcome instanceof Error) {
+        return new Response(JSON.stringify({ error: { message: outcome.message } }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+      if (typeof outcome === "function") {
+        const body = init?.body ? JSON.parse(init.body) : undefined;
+        const result = outcome(body);
+        if (result instanceof Error) {
+          return new Response(JSON.stringify({ error: { message: result.message } }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" }
+          });
+        }
+        return new Response(JSON.stringify({ result }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+      return new Response(JSON.stringify({ result: outcome ?? [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    });
+  }
+
+  test("happy path (2 tasks) returns chatter per task and odoo_calls === 2", async () => {
+    const agent = await buildWriteToolAgent();
+    globalThis.fetch = mockOdoo({
+      "mail.message/search_read": [
+        { date: "2024-01-02", author_id: [1, "Bob"], body: "note b", message_type: "comment" }
+      ]
+    });
+
+    const handler = getToolHandler(agent, "projects.list_chatter");
+    const result = await handler({ task_ids: [10, 20], limit_per_task: 20, order: "date desc" });
+    const body = JSON.parse(result.content[0].text);
+
+    expect(Object.keys(body.chatter_by_task_id).sort()).toEqual(["10", "20"]);
+    expect(body.chatter_by_task_id["10"]).toEqual([
+      { date: "2024-01-02", author_id: { id: 1, name: "Bob" }, body: "note b", message_type: "comment" }
+    ]);
+    expect(body.metadata.odoo_calls).toBe(2);
+    expect(body.metadata.fetched_task_ids).toEqual([10, 20]);
+    expect(result.isError).toBeUndefined();
+  });
+
+  test("per-task error isolation does not fail the whole call", async () => {
+    const agent = await buildWriteToolAgent();
+    globalThis.fetch = mockOdoo({
+      "mail.message/search_read": (body: any) => {
+        const resId = body?.domain?.find((clause: unknown[]) => clause[0] === "res_id")?.[2];
+        if (resId === 20) return new Error("Invalid model name 'mail.message'");
+        return [{ date: "2024-01-01", author_id: [7, "Alice"], body: "ok", message_type: "comment" }];
+      }
+    });
+
+    const handler = getToolHandler(agent, "projects.list_chatter");
+    const result = await handler({ task_ids: [10, 20], limit_per_task: 20, order: "date desc" });
+    const body = JSON.parse(result.content[0].text);
+
+    expect(body.chatter_by_task_id["10"]).toEqual([
+      { date: "2024-01-01", author_id: { id: 7, name: "Alice" }, body: "ok", message_type: "comment" }
+    ]);
+    expect(body.chatter_by_task_id["20"].error).toContain("mail.message");
+    expect(result.isError).toBeUndefined();
+  });
+
+  test("call budget truncation fetches first 8 tasks and warns", async () => {
+    const agent = await buildWriteToolAgent();
+    globalThis.fetch = mockOdoo({
+      "mail.message/search_read": []
+    });
+
+    const taskIds = Array.from({ length: 10 }, (_, i) => i + 1);
+    const handler = getToolHandler(agent, "projects.list_chatter");
+    const result = await handler({ task_ids: taskIds, limit_per_task: 20, order: "date desc" });
+    const body = JSON.parse(result.content[0].text);
+
+    expect(body.metadata.fetched_task_ids).toHaveLength(8);
+    expect(body.metadata.truncated_task_ids).toEqual([9, 10]);
+    expect(body.warnings).toContain("call budget exceeded; re-invoke for remaining task_ids");
+    expect(body.metadata.odoo_calls).toBe(8);
+    expect(result.isError).toBeUndefined();
+  });
+
+  test("query shape uses res_id = id and excludes preview", async () => {
+    const agent = await buildWriteToolAgent();
+    const log: { url: string; body: any }[] = [];
+    globalThis.fetch = mockOdoo({ "mail.message/search_read": [] }, log);
+
+    const handler = getToolHandler(agent, "projects.list_chatter");
+    await handler({ task_ids: [42], limit_per_task: 5, order: "date asc" });
+
+    expect(log).toHaveLength(1);
+    expect(log[0].body.domain).toEqual([
+      ["model", "=", "project.task"],
+      ["res_id", "=", 42]
+    ]);
+    expect(log[0].body.fields).toEqual(["date", "author_id", "body", "message_type"]);
+    expect(log[0].body.fields).not.toContain("preview");
+    expect(log[0].body.limit).toBe(5);
+    expect(log[0].body.order).toBe("date asc");
+  });
+
+  test("tool is registered on the server", async () => {
+    const agent = await buildWriteToolAgent();
+    expect(agent.server._registeredTools["projects.list_chatter"]).toBeDefined();
+  });
+});
+
 describe("OAuth shim (ChatGPT path)", () => {
   afterEach(() => {
     globalThis.fetch = originalFetch;
