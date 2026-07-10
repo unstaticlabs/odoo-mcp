@@ -55,7 +55,7 @@ The server never logs, stores, or echoes your key.
 | `bookkeeping.list_source_documents` | read | `model` (string, default `account.move`), `record_id` (positive int) — `ir.attachment` source docs tagged `original_source`/`official_pdf`/`other` |
 | `bookkeeping.fetch_attachment` | read | `attachment_id` (positive int), `max_bytes` (positive int, default `10485760`) — attachment metadata + base64 content unless URL-type or over `max_bytes` |
 | `bookkeeping.preview_returns` | read | `company` (positive int), `from`/`to` (string), `return_type_xmlids` (string[] min 1) — which `account.return` cards should exist; blank periodicity → `configuration_issues` |
-| `bookkeeping.plan_safe_write` | validate-only | `operation` (enum: `create_or_update_report_external_value`, `create_manual_tax_return`, `update_return_type_periodicity`, `create_lock_exception`), `company` (string), `values` (object) — dry-run write plan + HMAC confirmation token; never writes; **accounting/tax-close only** |
+| `bookkeeping.plan_safe_write` | validate-only | `operation` (enum: `create_or_update_report_external_value`, `create_manual_tax_return`, `update_return_type_periodicity`, `create_lock_exception`), `company` (string), `values` (object) — dry-run write plan + HMAC confirmation token; never writes; **accounting/tax-close only** (see [docs/bookkeeping.md §4.7](docs/bookkeeping.md#47-bookkeepingplan_safe_write)) |
 
 **`aggregate_records` validation.** Before calling Odoo `read_group`, the server validates `groupby` and
 `aggregates` against cached `fields_get` metadata:
@@ -70,23 +70,19 @@ The server never logs, stores, or echoes your key.
 Writes are gated by *your* Odoo user's access rights and record rules (BYO-key), so a caller
 can only do what their Odoo account permits.
 
-> **Write lanes (PM vs accounting).** Project-management notes — task descriptions, chatter,
-> `mail.activity` on `project.task` / `project.project`, including text that mentions banking,
-> B2C exports, or operational deadlines — use **`create_record`**, **`update_record`**,
-> **`post_message`**, or **`batch_post_message`**. Do **not** route those through
-> `bookkeeping.plan_safe_write` (it rejects PM-shaped `values`, including nested
-> `res_model` / `model` hints). Accounting, payroll, bank, and tax mutations use
-> **`bookkeeping.plan_safe_write`** only (four supported operations); do **not** use generic
-> `create_record` / `update_record` for `account.*` or other ledger models — the connector
-> **write-safety gate** on generic write tools rejects those models.
->
-> **Bookkeeping safety.** The `bookkeeping.*` tools are **read-only by default**. Writes are
-> **two-phase**: `bookkeeping.plan_safe_write` only *validates* and returns a would-write
-> plan plus an HMAC confirmation token — it **never writes**, and the actual write happens
-> only after explicit human confirmation. These tools **never auto-reconcile** and **never
-> guess tax treatment**; they report facts and leave judgment to the human. See
-> [docs/bookkeeping.md](docs/bookkeeping.md) for the snapshot-first workflow, rate-limit and
-> cache model, full tool reference, and worked CA12 walkthroughs.
+> **Write lanes (PM vs accounting).** Routing is determined by **structured intent** (target model/method/operation), *never* by the wording of the note or chatter.
+> 
+> | Lane | Tools | Scope & Examples |
+> |---|---|---|
+> | **Project management** | `create_record`, `update_record`, `post_message`, `batch_post_message` | `project.task` descriptions/chatter, `mail.activity` with `res_model=project.task`/`project.project`, triage notes (even when text mentions banking, B2C exports, or deadlines; e.g. "Remind Valentin: B2C bank export deadline Friday" on hygiene task #990). |
+> | **Bookkeeping / tax-close** | `bookkeeping.plan_safe_write` only (validate-only → human confirmed apply) | Exactly four operations: `create_or_update_report_external_value`, `create_manual_tax_return`, `update_return_type_periodicity`, `create_lock_exception`. Never handles project-management models or chatter. |
+> 
+> * **Rejection:** PM-shaped payloads (e.g. nested `res_model`/`model` hints targeting PM models) sent to `bookkeeping.plan_safe_write` are structurally rejected before planning.
+> * **Write safety:** Generic `create_record`/`update_record` calls targeting ledger models (`account.*`, payroll, bank, tax) are blocked by the connector write-safety gate. Use `bookkeeping.plan_safe_write` instead.
+> * **Bulk chatter reads (anti-pattern):** Do not run bulk `search_records` on `mail.message` containing finance keywords. Prefer per-task `expand_record({ include_chatter: true })` or `projects.list_chatter({ task_ids })`.
+> * **Bookkeeping safety:** The `bookkeeping.*` tools are **read-only by default**. Writes are **two-phase**: `bookkeeping.plan_safe_write` only *validates* and returns a would-write plan plus an HMAC confirmation token — it **never writes**, and the actual write happens only after explicit human confirmation.
+> 
+> See [docs/bookkeeping.md](docs/bookkeeping.md) for the snapshot-first workflow, rate-limit and cache model, full tool reference, and worked CA12 walkthroughs.
 
 ### Field selection
 

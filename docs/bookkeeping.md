@@ -44,27 +44,21 @@ Why this shape:
 | **Determinism** | The model reasons over one frozen JSON document, not a live, shifting Odoo state fetched call-by-call. |
 | **Safety** | Writes are two-phase (validate → confirm → write); reads are read-only by default; nothing auto-reconciles or guesses tax treatment. |
 
-> **Rule for assistants:** reach for `bookkeeping.*` tools for **bookkeeping/tax-close work
-> only**. Never route project-management notes through bookkeeping — task descriptions,
-> chatter (`message_post`), and `mail.activity` rows on `project.task` / `project.project`
-> (even when they mention banking, B2C exports, or operational deadlines) belong on the
-> generic write tools: `create_record`, `update_record`, `post_message`, or
-> `batch_post_message`. Conversely, never use generic `create_record` / `update_record` for
-> accounting models (`account.*`, payroll, bank, tax) — the connector write-safety gate rejects
-> those models; only the four operations supported by `bookkeeping.plan_safe_write` may
-> mutate the ledger. Use raw Odoo CRUD for read paths and models neither lane covers.
+> **Rule for assistants — Write Lanes split rule:**
+> Assistants must choose the tool lane based on **structured intent** (the Odoo model, method, or operation being performed), **never** by the textual content of a note or message. Even when a project-management note or message contains accounting, banking, or tax keywords, it belongs in the Project Management lane.
+> 
+> * **Project Management Lane:** Handles `project.task` descriptions/chatter, `mail.activity` with `res_model` targeting `project.task` or `project.project`, and general triage notes (even when text mentions banking, B2C exports, or operational deadlines). Always use `create_record`, `update_record`, `post_message`, or `batch_post_message`.
+> * **Bookkeeping / Tax-Close Lane:** Handles bookkeeping and tax-close mutations. Supports **exactly four operations** via `bookkeeping.plan_safe_write` (validate-only → human-confirmed apply): `create_or_update_report_external_value`, `create_manual_tax_return`, `update_return_type_periodicity`, and `create_lock_exception`. It NEVER handles project-management models or activities.
+> * **Anti-Pattern — Ledger CRUD:** Never use generic `create_record` or `update_record` on accounting models (`account.*`, payroll, bank, tax) — the connector's write-safety gate blocks them. Use `bookkeeping.plan_safe_write` instead.
 
 ### Project management vs accounting writes
 
 | Intent | Tool lane | Examples |
 |---|---|---|
-| Task triage, assignee activities, chatter | `create_record`, `update_record`, `post_message`, `batch_post_message` on `project.task`, `mail.activity`, … | "Remind Valentin: B2C bank export deadline Friday" on a hygiene task |
-| Tax close, external report values, return cards, lock exceptions | `bookkeeping.plan_safe_write` (validate-only) → human-confirmed apply | CA12 `box_22` carryover, missing `account.return`, lock-date exception |
+| Task triage, assignee activities, chatter | **Project Management Lane**<br>Use `create_record`, `update_record`, `post_message`, or `batch_post_message` | <ul><li>Updating a task description on `project.task` mentioning "bank reconciliation follow-up".</li><li>Posting chatter via `post_message`: "B2C bank export deadline for Valentin".</li><li>Creating a `mail.activity` on hygiene task #990: `{ res_model: "project.task", res_id: 990, note: "Remind Valentin: B2C bank export deadline Friday" }`.</li></ul> |
+| Tax close, external report values, return cards, lock exceptions | **Bookkeeping Lane**<br>Use `bookkeeping.plan_safe_write` (validate-only) | <ul><li>Creating/updating a French CA12 carryover value on `account.report.external.value`.</li><li>Creating a missing `account.return` card manually.</li><li>Fixing periodicity on `account.return.type` (e.g. `update_return_type_periodicity`).</li><li>Adding a lock-date exception for a locked period.</li></ul> |
 
-`bookkeeping.plan_safe_write` accepts **only** the four enumerated `operation` values and
-rejects PM-shaped `values` at any nesting depth (any `res_model` / `model` hint targeting
-`project.task`, `mail.activity`, etc.). It never creates or updates `project.task`,
-`mail.activity`, or chatter.
+`bookkeeping.plan_safe_write` accepts **only** the four enumerated `operation` values and rejects PM-shaped `values` at any nesting depth (any `res_model` / `model` hint targeting `project.task`, `mail.activity`, etc.). It never creates or updates `project.task`, `mail.activity`, or chatter.
 
 ---
 
@@ -355,18 +349,15 @@ unrecognized, it reports a `configuration_issues` entry instead of guessing peri
 
 ### 4.7 `bookkeeping.plan_safe_write`
 
-**Validate-only — NEVER writes to Odoo.** Accounting/tax-close mutations **only** — not for
-`project.task`, `mail.activity`, or chatter. Project-management notes (including text that
-mentions banking, exports, or deadlines) must use `create_record`, `update_record`,
-`post_message`, or `batch_post_message` instead; generic `create_record` / `update_record` on
-`account.*` or other ledger models are rejected by the connector write-safety gate.
+**Validate-only — NEVER writes to Odoo.** Accounting/tax-close mutations **only** — never handles `project.task`, `mail.activity`, or chatter. Project-management writes (even if their text mentions banking, B2C exports, or operational deadlines) must use `create_record`, `update_record`, `post_message`, or `batch_post_message` instead. Conversely, generic `create_record` / `update_record` on accounting models (e.g., `account.*`, payroll, bank, tax) are blocked by the connector write-safety gate; use this tool instead.
 
-Runs read-only checks (company/field existence, record state, period consistency, duplicates,
-lock dates) for a proposed bookkeeping write and returns a *would-write* plan plus an HMAC
-confirmation token. A `confirmation_token` is issued only when `status` is `safe` (or a
-`duplicate_found` that resolves to an in-place update); never for `blocked` or
-`needs_lock_exception`. PM-shaped `values` (including nested `res_model` / `model` hints) are
-rejected before any Odoo reads.
+Runs read-only validation checks (company/field existence, record state, period consistency, duplicates, lock dates) for a proposed bookkeeping write and returns a *would-write* plan plus an HMAC confirmation token. A `confirmation_token` is issued only when `status` is `safe` (or a `duplicate_found` that resolves to an in-place update); never for `blocked` or `needs_lock_exception`.
+
+#### Structural Rejection of Project Management Models
+To prevent accidental misrouting, `bookkeeping.plan_safe_write` rejects PM-shaped `values` structurally **before planning and before any Odoo reads are made**:
+* **Rejection mechanism:** Scans the `values` object/array tree up to a maximum depth of 8 (`PM_HINT_SCAN_MAX_DEPTH = 8`) for keys `res_model` or `model` whose string value is in `PROJECT_MANAGEMENT_MODELS` (e.g., `project.task`, `mail.activity`, etc.).
+* **No text keyword matching:** Rejection is based entirely on structural model hints, not free-text content. For instance, a note mentioning "banking" is allowed if not targeting a PM model, while any payload containing `res_model: "project.task"` is immediately rejected.
+* **Error response:** Returns a user-facing tool error specifying the detected PM model, stating that `bookkeeping.plan_safe_write` is wrong, and redirecting the user to `create_record`, `update_record`, `post_message`, or `batch_post_message`.
 
 | Field | Type | Required | Default | Notes |
 |---|---|---|---|---|
@@ -547,3 +538,13 @@ signal: either fix the periodicity on the return type, or create the missing car
 
 Each returns a *would-write* plan and (when safe) an HMAC confirmation token; the actual
 write happens only after explicit human confirmation.
+
+---
+
+## 7. Bulk chatter reads (anti-pattern)
+
+Do **not** use `search_records` on `mail.message` with `body` or `preview` and a domain filtering by `res_id in [...]` across multiple tasks. This is an anti-pattern. Instead, prefer reading chatter per-task via:
+- `expand_record` with `{ include_chatter: true }` on a single task, or
+- `projects.list_chatter({ task_ids })` when available.
+
+Note that MCP hosts may block bulk fetches of message bodies containing finance keywords even when single-ID reads pass.
