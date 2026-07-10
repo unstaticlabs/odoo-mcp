@@ -1,5 +1,6 @@
 import { describe, test, expect } from "bun:test";
 import { assessWriteOperation, isMutatingOdooMethod } from "./write-safety";
+import { FINANCE_KEYWORD_PM_TEXT } from "./write-safety.fixtures";
 
 describe("assessWriteOperation — project management text is never keyword-blocked", () => {
   test("project.task description mentioning banking and B2C export deadline is allowed", () => {
@@ -7,10 +8,7 @@ describe("assessWriteOperation — project management text is never keyword-bloc
       model: "project.task",
       method: "write",
       args: {
-        vals: {
-          description:
-            "Follow up with Valentin on banking file reconciliation and the B2C export deadline before month-end close."
-        }
+        vals: { description: FINANCE_KEYWORD_PM_TEXT.taskDescription }
       }
     });
     expect(verdict).toEqual({ allowed: true, intent: "project_management" });
@@ -184,6 +182,25 @@ describe("assessWriteOperation — PM field allowlist", () => {
     });
     expect(verdict.allowed).toBe(false);
     expect(verdict.intent).toBe("disallowed");
+  });
+});
+
+describe("assessWriteOperation — structure over content (negative control)", () => {
+  test("identical finance-keyword text is allowed on project.task but blocked on account.move", () => {
+    const pmVerdict = assessWriteOperation({
+      model: "project.task",
+      method: "write",
+      args: { ids: [990], vals: { description: FINANCE_KEYWORD_PM_TEXT.chatterBody } }
+    });
+    expect(pmVerdict).toEqual({ allowed: true, intent: "project_management" });
+
+    const ledgerVerdict = assessWriteOperation({
+      model: "account.move",
+      method: "write",
+      args: { ids: [1], vals: { narration: FINANCE_KEYWORD_PM_TEXT.chatterBody } }
+    });
+    expect(ledgerVerdict.allowed).toBe(false);
+    expect(ledgerVerdict.intent).toBe("financial_mutation");
   });
 });
 

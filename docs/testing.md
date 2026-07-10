@@ -148,8 +148,19 @@ ODOO_API_KEY=… ODOO_URL=https://your-org.odoo.com ODOO_DB=your-db node smoke.m
 
 **PM chatter workflow:** triage with `projects.list_tasks` / compact browse →
 `projects.list_chatter({ task_ids })` for notes across tasks (paginate across calls when
-needed). Do not use `search_records` on `mail.message` with bulk `res_id in [...]` and
-`body`/`preview`.
+needed).
+
+**Anti-pattern** — do not bulk-query `mail.message` with `search_records` / `browse_records`
+using a domain like `[["model","=","project.task"],["res_id","in",[990,954,991,...]]]` and
+`fields` including `body`, `preview`, or `email_body`. Reasons:
+
+1. Some MCP hosts block bulk message-body fetches as high-risk.
+2. Odoo rate limit (~1 req/s via `OdooQueue`) makes wide scans slow.
+3. Message bodies inflate token usage.
+
+**Single-task fallback** — when you only need one task's chatter, call `expand_record` with
+`include_chatter: true` (a scoped `mail.message` `search_read` for one `res_id`, see
+`src/tools/read.ts` ~L658) — the supported per-record path.
 
 ---
 
