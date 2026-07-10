@@ -2,20 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { OdooQueue } from "../odoo-queue";
 import type { Props } from "../server";
-import { assessWriteOperation, isMutatingOdooMethod } from "../write-safety";
-import { mcpError, mcpErrorFromException, mcpStructured, mcpWriteBlockedError, plaintextToHtml, requireConnection } from "./shared";
-
-const PM_WRITE_ROUTING_NOTE =
-  " Project-management notes (including banking/B2C/deadline operational text) on project.task / project.project / mail.activity→project.* are allowed. For accounting mutations use bookkeeping.plan_safe_write only.";
-
-function gateWrite(model: string, method: string, args: Record<string, unknown>) {
-  if (!isMutatingOdooMethod(method)) return null;
-  const verdict = assessWriteOperation({ model, method, args });
-  if (!verdict.allowed) {
-    return mcpWriteBlockedError({ model, method }, verdict);
-  }
-  return null;
-}
+import { mcpError, mcpErrorFromException, mcpStructured, plaintextToHtml, requireConnection } from "./shared";
 
 export function registerWriteTools(server: McpServer, getProps: () => Props | undefined, queue: OdooQueue) {
   server.registerTool(
@@ -25,8 +12,7 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
       description:
         "Write: create a single Odoo record of the given model. When the model is project.task, the response carries a " +
         "trace_token (src-…) that is also stamped into the task's chatter — you MUST surface that token verbatim in your " +
-        "visible reply to the user so the conversation can be found again from the Odoo task." +
-        PM_WRITE_ROUTING_NOTE,
+        "visible reply to the user so the conversation can be found again from the Odoo task.",
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
       inputSchema: {
         model: z.string().min(1),
@@ -45,9 +31,6 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
       }
     },
     async ({ model, values }) => {
-      const blocked = gateWrite(model, "create", { vals_list: [values] });
-      if (blocked) return blocked;
-
       const props = getProps();
       let conn: ReturnType<typeof requireConnection>;
       let id: number;
@@ -100,7 +83,7 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
     "post_message",
     {
       title: "Post Chatter Message",
-      description: "Write: post a message (chatter log/comment) to a single Odoo record." + PM_WRITE_ROUTING_NOTE,
+      description: "Write: post a message (chatter log/comment) to a single Odoo record.",
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
       inputSchema: {
         model: z.string(),
@@ -116,12 +99,6 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
     async ({ model, record_id, body, subtype, body_is_html }) => {
       if (!model || !model.trim()) return mcpError("model must be a non-empty string");
       if (!Number.isInteger(record_id) || record_id <= 0) return mcpError("record_id must be a positive integer");
-      const blocked = gateWrite(model, "message_post", {
-        ids: [record_id],
-        body,
-        ...(subtype ? { subtype_xmlid: subtype } : {})
-      });
-      if (blocked) return blocked;
       try {
         const result = await queue.enqueue(requireConnection(getProps()), model, "message_post", {
           ids: [record_id],
@@ -144,8 +121,7 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
     {
       title: "Update Record",
       description:
-        "Write: update fields on a single Odoo record by id. x2many fields need Odoo command tuples (e.g. [[6,0,ids]], [[4,id]], [[3,id]])." +
-        PM_WRITE_ROUTING_NOTE,
+        "Write: update fields on a single Odoo record by id. x2many fields need Odoo command tuples (e.g. [[6,0,ids]], [[4,id]], [[3,id]]).",
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
       inputSchema: {
         model: z.string().min(1),
@@ -157,8 +133,6 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
       }
     },
     async ({ model, record_id, values }) => {
-      const blocked = gateWrite(model, "write", { ids: [record_id], vals: values });
-      if (blocked) return blocked;
       try {
         await queue.enqueue(requireConnection(getProps()), model, "write", {
           ids: [record_id],
@@ -203,8 +177,6 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
         const conn = requireConnection(getProps());
         const results: { record_id: number; ok: boolean }[] = [];
         for (const u of updates) {
-          const blocked = gateWrite(model, "write", { ids: [u.record_id], vals: u.values });
-          if (blocked) return blocked;
           await queue.enqueue(conn, model, "write", { ids: [u.record_id], vals: u.values });
           results.push({ record_id: u.record_id, ok: true });
         }
@@ -222,8 +194,7 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
       description:
         "Write: post a chatter message to multiple Odoo records of one model. message_post is per-record. " +
         "Each `messages` entry posts to one record_id. Bodies are HTML-escaped unless body_is_html is true. " +
-        "Fail-fast: a mid-loop error aborts remaining posts; already-posted messages are NOT rolled back." +
-        PM_WRITE_ROUTING_NOTE,
+        "Fail-fast: a mid-loop error aborts remaining posts; already-posted messages are NOT rolled back.",
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
       inputSchema: {
         model: z.string(),
@@ -250,12 +221,6 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
         const conn = requireConnection(getProps());
         const results: unknown[] = [];
         for (const m of messages) {
-          const blocked = gateWrite(model, "message_post", {
-            ids: [m.record_id],
-            body: m.body,
-            ...(m.subtype ? { subtype_xmlid: m.subtype } : {})
-          });
-          if (blocked) return blocked;
           const res = await queue.enqueue(conn, model, "message_post", {
             ids: [m.record_id],
             body: m.body_is_html ? m.body : plaintextToHtml(m.body),
@@ -289,8 +254,6 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
       }
     },
     async ({ model, record_id }) => {
-      const blocked = gateWrite(model, "unlink", { ids: [record_id] });
-      if (blocked) return blocked;
       try {
         await queue.enqueue(requireConnection(getProps()), model, "unlink", { ids: [record_id] });
         return mcpStructured({ ok: true }, JSON.stringify(true, null, 2));
@@ -305,8 +268,7 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
     {
       title: "Call Model Method (advanced)",
       description:
-        "Escape hatch: call an arbitrary Odoo model method. Odoo's JSON-2 API has NO positional args — every body key is bound as a named kwarg (record-bound methods take a top-level `ids`). Pass record ids via `ids` and all other parameters via `kwargs`." +
-        PM_WRITE_ROUTING_NOTE,
+        "Escape hatch: call an arbitrary Odoo model method. Odoo's JSON-2 API has NO positional args — every body key is bound as a named kwarg (record-bound methods take a top-level `ids`). Pass record ids via `ids` and all other parameters via `kwargs`.",
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
       inputSchema: {
         model: z.string(),
@@ -330,8 +292,6 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
       }
       try {
         const body = { ...kwargs, ...(ids !== undefined ? { ids } : {}) };
-        const blocked = gateWrite(model, method, body);
-        if (blocked) return blocked;
         const result = await queue.enqueue(requireConnection(getProps()), model, method, body);
         return mcpStructured({ result }, JSON.stringify(result, null, 2));
       } catch (err) {

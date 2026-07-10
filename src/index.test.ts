@@ -1174,20 +1174,6 @@ describe("create_record provenance stamping", () => {
     expect(text).not.toContain("[agent-source]");
   });
 
-  test("res.partner create is blocked by connector safety before any Odoo call", async () => {
-    const queue = makeStubQueue({ createId: 5 });
-    const agent = await buildAgentWithQueue(queue);
-    const handler = getToolHandler(agent, "create_record");
-
-    const result = await handler({ model: "res.partner", values: { name: "Acme" } });
-
-    expect(result.isError).toBe(true);
-    expect(queue.calls.length).toBe(0);
-    const envelope = JSON.parse(result.content[0].text);
-    expect(envelope.error).toBe("write_blocked");
-    expect(envelope.intent).toBe("financial_mutation");
-  });
-
   test("post failure isolation: still returns id + warning, isError not set", async () => {
     const queue = makeStubQueue({ createId: 88, failMessagePost: true });
     const agent = await buildAgentWithQueue(queue);
@@ -1499,6 +1485,23 @@ describe("write safety gate (connector)", () => {
     const envelope = JSON.parse(result.content[0].text);
     expect(envelope.error).toBe("write_blocked");
     expect(envelope.intent).toBe("disallowed");
+  });
+
+  test("create_record on res.partner is blocked before Odoo", async () => {
+    const queue = makeStubQueue();
+    const agent = await buildAgentWithQueue(queue);
+    const handler = getToolHandler(agent, "create_record");
+
+    const result = await handler({
+      model: "res.partner",
+      values: { name: "Acme Corp" }
+    });
+
+    expect(result.isError).toBe(true);
+    expect(queue.calls.length).toBe(0);
+    const envelope = JSON.parse(result.content[0].text);
+    expect(envelope.error).toBe("write_blocked");
+    expect(envelope.intent).toBe("financial_mutation");
   });
 });
 

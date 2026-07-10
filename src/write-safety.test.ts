@@ -23,8 +23,8 @@ describe("assessWriteOperation — project management text is never keyword-bloc
           {
             res_model: "project.task",
             res_id: 42,
-            summary: "CEO follow-up",
-            note: "Confirm B2C bank export cutoff and payroll handoff timeline with Valentin.",
+            summary: FINANCE_KEYWORD_PM_TEXT.activitySummary,
+            note: FINANCE_KEYWORD_PM_TEXT.activityNote,
             activity_type_id: 4,
             user_id: 7,
             date_deadline: "2026-07-15"
