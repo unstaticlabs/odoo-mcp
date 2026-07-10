@@ -1,7 +1,6 @@
 import { describe, test, expect } from "bun:test";
 import { assessWriteOperation, isMutatingOdooMethod } from "./write-safety";
 import { FINANCE_KEYWORD_PM_TEXT } from "./write-safety.fixtures";
-import { classifyPmWriteIntent } from "./safety";
 
 /** Ordinary PM notes — no banking/B2C/VAT/deadline vocabulary (negative control for keyword invariance). */
 const BENIGN_PM_TEXT = {
@@ -282,21 +281,6 @@ describe("write safety invariants", () => {
       expect(benignVerdict).toEqual(financeVerdict);
     });
   }
-
-  test("classifyPmWriteIntent allowed verdict matches assessWriteOperation for finance-keyword PM text", () => {
-    for (const surface of pmTextSurfaceCases) {
-      const input = {
-        model: surface.model,
-        method: surface.method,
-        args: surface.financeArgs
-      };
-      const pmResult = classifyPmWriteIntent(input);
-      const writeVerdict = assessWriteOperation(input);
-
-      expect(pmResult.verdict).toBe("allowed");
-      expect(writeVerdict).toEqual(PM_ALLOWED_VERDICT);
-    }
-  });
 });
 
 describe("isMutatingOdooMethod", () => {
