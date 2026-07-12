@@ -716,3 +716,330 @@ export function toWritePlan(operation: string, companyId: number, plan: PlanResu
     would_write: plan.would_write
   };
 }
+
+// ---- PM write-intent classifier ----
+// Pure structural gate: model + method + field names + mail.activity res_model — never free-text content.
+
+/** Models eligible for PM-safe writes when method/field/res_model rules pass. Exported for unit testing. */
+export const PM_MODEL_ALLOWLIST = new Set(["project.task", "mail.activity"]);
+
+export type PmWriteIntent = "project_management" | "financial_mutation" | "disallowed";
+export type PmWriteVerdict = "allowed" | "denied";
+
+/** Odoo JSON-2 call shape — matches what write tools pass to the gate. */
+export interface PmWriteIntentInput {
+  model: string;
+  method: string;
+  /** create → { vals_list }, write → { vals }, message_post → { body, ids, … } */
+  args: Record<string, unknown>;
+}
+
+export interface PmWriteIntentResult {
+  verdict: PmWriteVerdict;
+  intent: PmWriteIntent;
+  reason?: string;
+  blocked_fields?: string[];
+}
+
+/** Prose keys are never keyword-scanned; exempt from financial-field pattern matching. Exported for unit testing. */
+export const PM_TEXT_FIELDS = new Set(["description", "note", "summary", "body"]);
+
+/** Writable PM fields on project.task (field-name gate only). Exported for unit testing. */
+export const PROJECT_TASK_PM_FIELDS = new Set([
+  "name",
+  "display_name",
+  "description",
+  "stage_id",
+  "project_id",
+  "priority",
+  "user_ids",
+  "date_deadline",
+  "date_end",
+  "date_start",
+  "tag_ids",
+  "planned_hours",
+  "allocated_hours",
+  "partner_id",
+  "color",
+  "sequence",
+  "parent_id",
+  "child_ids",
+  "depend_on_ids",
+  "milestone_id",
+  "personal_stage_type_ids",
+  "kanban_state",
+  "state",
+  "active",
+  "company_id",
+  "email_from",
+  "is_closed"
+]);
+
+const MAIL_ACTIVITY_PM_FIELDS = new Set([
+  "summary",
+  "note",
+  "date_deadline",
+  "user_id",
+  "activity_type_id",
+  "res_model",
+  "res_id",
+  "res_model_id"
+]);
+
+const SENSITIVE_MODEL_PREFIXES = [
+  "account.",
+  "hr.",
+  "payment.",
+  "l10n_",
+  "stock.valuation",
+  "sign.",
+  "contract."
+] as const;
+
+const PARTNER_FINANCIAL_FIELD_DENYLIST = new Set([
+  "bank_ids",
+  "property_account_receivable_id",
+  "property_account_payable_id",
+  "property_payment_term_id",
+  "vat",
+  "siret",
+  "company_registry",
+  "credit_limit",
+  "debit_limit",
+  "trust",
+  "supplier_rank",
+  "customer_rank"
+]);
+
+const PARTNER_FINANCIAL_FIELD_PATTERNS: readonly RegExp[] = [/^invoice_/, /^l10n_/];
+
+/** Field-name patterns indicating accounting / payroll / bank mutation. Exported for unit testing. */
+export const FINANCIAL_FIELD_PATTERNS: readonly RegExp[] = [
+  /^account_/,
+  /_account_id$/,
+  /^bank_/,
+  /^payment_/,
+  /^tax_/,
+  /^vat_/,
+  /(^|_)vat($|_)/,
+  /debit/,
+  /credit/,
+  /balance/,
+  /^amount_/,
+  /amount_total/,
+  /amount_untaxed/,
+  /amount_tax/,
+  /journal_id/,
+  /move_id/,
+  /invoice_/,
+  /reconcil/,
+  /payroll/,
+  /payslip/,
+  /siret/,
+  /company_registry/,
+  /sale_line_id/,
+  /sale_order_id/,
+  /billable/,
+  /pricing_type/
+];
+
+const PM_LIFECYCLE_METHODS = new Set(["unlink", "action_feedback"]);
+
+const BOOKKEEPING_DENY_REASON =
+  "Use bookkeeping.plan_safe_write for validated accounting/tax operations.";
+
+function pmAllowed(): PmWriteIntentResult {
+  return { verdict: "allowed", intent: "project_management" };
+}
+
+function pmDenied(
+  intent: PmWriteIntent,
+  reason: string,
+  blocked_fields?: string[]
+): PmWriteIntentResult {
+  return { verdict: "denied", intent, reason, blocked_fields };
+}
+
+function sensitiveModelReason(model: string): string {
+  return `Writes to ${model} are blocked by the connector safety layer. ${BOOKKEEPING_DENY_REASON}`;
+}
+
+function defaultDenyReason(model: string): string {
+  return (
+    `Writes to ${model} via generic MCP write tools are not allowlisted. ` +
+    "Project-management work should use project.task / mail.activity (res_model=project.task) or chatter."
+  );
+}
+
+function isSensitiveModelPrefix(model: string): boolean {
+  return SENSITIVE_MODEL_PREFIXES.some((prefix) => model.startsWith(prefix));
+}
+
+function isFinancialFieldName(field: string): boolean {
+  return FINANCIAL_FIELD_PATTERNS.some((re) => re.test(field));
+}
+
+function isPartnerFinancialField(field: string): boolean {
+  if (PARTNER_FINANCIAL_FIELD_DENYLIST.has(field)) return true;
+  return PARTNER_FINANCIAL_FIELD_PATTERNS.some((re) => re.test(field));
+}
+
+/** Exported for unit testing. */
+export function collectPmValueRecords(args: Record<string, unknown>): Record<string, unknown>[] {
+  const valsList = args.vals_list;
+  if (Array.isArray(valsList)) {
+    return valsList.filter((v): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v));
+  }
+  const vals = args.vals;
+  if (vals && typeof vals === "object" && !Array.isArray(vals)) {
+    return [vals as Record<string, unknown>];
+  }
+  return [];
+}
+
+/** Fields present in value records that are not on the model-specific PM allowlist. Exported for unit testing. */
+export function fieldsOutsideAllowlist(
+  records: Record<string, unknown>[],
+  allowed: ReadonlySet<string>
+): string[] {
+  const blocked: string[] = [];
+  for (const rec of records) {
+    for (const key of Object.keys(rec)) {
+      if (!allowed.has(key)) blocked.push(key);
+    }
+  }
+  return [...new Set(blocked)];
+}
+
+function denyNonAllowlistedFields(model: string, blocked: string[]): PmWriteIntentResult {
+  const hasFinancial = blocked.some(isFinancialFieldName);
+  const intent: PmWriteIntent = hasFinancial ? "financial_mutation" : "disallowed";
+  const kind = hasFinancial ? "financial or non-PM" : "non-PM";
+  return pmDenied(intent, `${model} write touches ${kind} fields: ${blocked.join(", ")}.`, blocked);
+}
+
+function partnerFinancialFieldsInRecords(records: Record<string, unknown>[]): string[] {
+  const blocked: string[] = [];
+  for (const rec of records) {
+    for (const key of Object.keys(rec)) {
+      if (isPartnerFinancialField(key)) blocked.push(key);
+    }
+  }
+  return [...new Set(blocked)];
+}
+
+function classifyResPartner(method: string, args: Record<string, unknown>): PmWriteIntentResult {
+  if (method !== "create" && method !== "write") {
+    return pmDenied("disallowed", defaultDenyReason("res.partner"));
+  }
+
+  const records = collectPmValueRecords(args);
+  const blocked = partnerFinancialFieldsInRecords(records);
+  if (blocked.length > 0) {
+    return pmDenied(
+      "financial_mutation",
+      `res.partner write touches financial fields: ${blocked.join(", ")}. ${BOOKKEEPING_DENY_REASON}`,
+      blocked
+    );
+  }
+
+  return pmDenied("financial_mutation", sensitiveModelReason("res.partner"));
+}
+
+function classifyProjectTask(method: string, args: Record<string, unknown>): PmWriteIntentResult {
+  if (method === "message_post") return pmAllowed();
+  if (PM_LIFECYCLE_METHODS.has(method)) return pmAllowed();
+
+  if (method !== "create" && method !== "write") {
+    return pmDenied("disallowed", `project.task method "${method}" is not allowed via generic write tools.`);
+  }
+
+  const blocked = fieldsOutsideAllowlist(collectPmValueRecords(args), PROJECT_TASK_PM_FIELDS);
+  if (blocked.length > 0) {
+    return denyNonAllowlistedFields("project.task", blocked);
+  }
+
+  return pmAllowed();
+}
+
+function classifyMailActivity(method: string, args: Record<string, unknown>): PmWriteIntentResult {
+  if (PM_LIFECYCLE_METHODS.has(method)) return pmAllowed();
+
+  if (method !== "create" && method !== "write") {
+    return pmDenied("disallowed", `mail.activity method "${method}" is not allowed via generic write tools.`);
+  }
+
+  const records = collectPmValueRecords(args);
+
+  if (method === "create") {
+    if (records.length === 0) {
+      return pmDenied("disallowed", "mail.activity create must set res_model to project.task.");
+    }
+    for (const rec of records) {
+      const resModel = rec.res_model;
+      if (typeof resModel !== "string" || !resModel.trim()) {
+        return pmDenied("disallowed", "mail.activity create must set res_model to project.task.");
+      }
+      if (resModel.trim() !== "project.task") {
+        return pmDenied(
+          "financial_mutation",
+          "mail.activity writes must target project.task (res_model); activities on accounting or external-party records are blocked."
+        );
+      }
+    }
+  }
+
+  if (method === "write") {
+    for (const rec of records) {
+      const resModel = rec.res_model;
+      if (typeof resModel === "string" && resModel.trim() && resModel.trim() !== "project.task") {
+        return pmDenied(
+          "financial_mutation",
+          "mail.activity writes must target project.task (res_model); activities on accounting or external-party records are blocked."
+        );
+      }
+    }
+  }
+
+  const blocked = fieldsOutsideAllowlist(records, MAIL_ACTIVITY_PM_FIELDS);
+  if (blocked.length > 0) {
+    return denyNonAllowlistedFields("mail.activity", blocked);
+  }
+
+  return pmAllowed();
+}
+
+/**
+ * Pure classifier — no Odoo I/O. Textual fields (description, note, summary, message_post body) are
+ * never keyword-scanned; only model/method/field structure determines intent.
+ * Exported for unit testing.
+ */
+export function classifyPmWriteIntent(input: PmWriteIntentInput): PmWriteIntentResult {
+  const model = input.model.trim();
+  const method = input.method.trim();
+
+  if (!model) {
+    return pmDenied("disallowed", "model must be a non-empty string.");
+  }
+  if (!method) {
+    return pmDenied("disallowed", "method must be a non-empty string.");
+  }
+
+  if (isSensitiveModelPrefix(model)) {
+    return pmDenied("financial_mutation", sensitiveModelReason(model));
+  }
+
+  if (model === "res.partner") {
+    return classifyResPartner(method, input.args);
+  }
+
+  if (model === "project.task") {
+    return classifyProjectTask(method, input.args);
+  }
+
+  if (model === "mail.activity") {
+    return classifyMailActivity(method, input.args);
+  }
+
+  return pmDenied("disallowed", defaultDenyReason(model));
+}

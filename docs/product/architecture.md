@@ -121,7 +121,7 @@ Odoo's own per-instance limit.
 Tools are grouped by **domain module**, registered on the `McpAgent`:
 
 - **`projects.*`** — v1. e.g. `projects.list_projects`, `projects.list_tasks`,
-  `projects.get_task`, `projects.list_stages` (read); later
+  `projects.list_chatter`, `projects.get_task`, `projects.list_stages` (read); later
   `projects.create_task`, `projects.update_task`, `projects.move_task` (write).
 - **`booking.*`** — later. Read bookings first, then create.
 - **`billing.*`** — later. Read invoices first, then create invoice / link

@@ -34,10 +34,15 @@ AI clients and projects can point at.
 Tools are grouped by **domain module**, and each domain ships **read-only
 first**, with writes following once the reads are proven:
 
-1. **`projects.*`** (v1) — read Odoo projects, tasks, stages, comments; later,
-   create/update tasks.
-2. **`booking.*`** (later) — read and eventually create bookings.
-3. **`billing.*`** (later) — read invoices, and eventually create invoices and
+1. **`projects.*`** (v1) — read Odoo projects, tasks, stages, and chatter (`projects.list_tasks`,
+   `projects.list_chatter`, `expand_record`); PM notes and activities use generic write tools
+   (`create_record`, `update_record`, `post_message`, `batch_post_message`, `call_model_method`).
+   Routing detail: [docs/projects.md](../projects.md).
+2. **`bookkeeping.*`** (v1) — tax-close snapshot reads and validate-only writes via
+   `bookkeeping.plan_safe_write` (four operations only; never PM models). Routing detail:
+   [docs/bookkeeping.md §1.1 Write lanes](../bookkeeping.md#write-lanes).
+3. **`booking.*`** (later) — read and eventually create bookings.
+4. **`billing.*`** (later) — read invoices, and eventually create invoices and
    link records.
 
 Writes are always **bounded by the caller's own Odoo permissions** (see auth,

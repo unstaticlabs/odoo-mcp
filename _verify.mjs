@@ -10,6 +10,7 @@ async function call(name,args){ for(let i=0;i<3;i++){ try{
   return (r.content?.map(x=>x.text).join(" ")??"").replace(/\s+/g," ").slice(0,120);
 }catch(e){ if(i===2) return "ERR:"+e.message; } } }
 console.log("search_records:", await call("search_records",{model:"project.task",domain:[["project_id","=",17]],fields:["id","name"],limit:2}));
+console.log("list_chatter:  ", await call("projects.list_chatter",{task_ids:[1057],limit_per_task:5}));
 console.log("get_record:    ", await call("get_record",{model:"project.task",record_id:1057,fields:["id","name"]}));
 console.log("list_models:   ", (await call("list_models",{}))?.slice(0,80));
 console.log("get_fields:    ", (await call("get_fields",{model:"project.task"}))?.slice(0,80));

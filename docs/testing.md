@@ -26,8 +26,8 @@ npx @modelcontextprotocol/inspector
 ```
 
 In the Inspector UI: transport **Streamable HTTP**, URL `http://localhost:8787/mcp`, and add the
-three headers above. Then **List Tools** and try `search_records`, `search_records_compact`, or
-`browse_records` (compact paginated triage with `field_preset` and offset/limit or cursor paging).
+three headers above. Then **List Tools** and try `search_records`, `search_records_compact`,
+`browse_records`, or `projects.list_chatter` (e.g. `task_ids: [42, 43]` after triaging tasks).
 
 ### b) Claude Code
 
@@ -132,6 +132,35 @@ ODOO_API_KEY=… ODOO_URL=https://your-org.odoo.com ODOO_DB=your-db node smoke.m
   `safeguard_applied`; after one retry, still oversize → `isError`.
 - **`shared.test.ts`** — `resolveNamedFieldPreset`, `buildBrowsePageMeta`, and
   `applyBrowseSafeguard` unit coverage.
+
+### g) `projects.list_chatter` hermetic coverage
+
+`bun test` exercises `projects.list_chatter` without a live Odoo instance:
+
+- **Happy path (2 tasks)** — per-task `chatter_by_task_id` keys, normalized bodies,
+  `metadata.odoo_calls === 2`.
+- **Per-task error isolation** — one task's Odoo error becomes `{ error }` for that key;
+  other tasks still succeed.
+- **Call budget truncation** — 10 `task_ids` with an 8-call cap → `truncated_task_ids`
+  and a budget warning.
+- **Query shape** — domain uses `res_id = <id>` (not `in`); fields exclude `preview`.
+- **Registration** — `projects.list_chatter` is present on the tool surface.
+
+**PM chatter workflow:** triage with `projects.list_tasks` / compact browse →
+`projects.list_chatter({ task_ids })` for notes across tasks (paginate across calls when
+needed).
+
+**Anti-pattern** — do not bulk-query `mail.message` with `search_records` / `browse_records`
+using a domain like `[["model","=","project.task"],["res_id","in",[990,954,991,...]]]` and
+`fields` including `body`, `preview`, or `email_body`. Reasons:
+
+1. Some MCP hosts block bulk message-body fetches as high-risk.
+2. Odoo rate limit (~1 req/s via `OdooQueue`) makes wide scans slow.
+3. Message bodies inflate token usage.
+
+**Single-task fallback** — when you only need one task's chatter, call `expand_record` with
+`include_chatter: true` (a scoped `mail.message` `search_read` for one `res_id`, see
+`src/tools/read.ts` ~L658) — the supported per-record path.
 
 ---
 

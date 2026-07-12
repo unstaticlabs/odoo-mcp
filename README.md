@@ -42,13 +42,17 @@ The server never logs, stores, or echoes your key.
 | `batch_read` | read | `model` (string), `ids` (positive int[], min 1, capped at 100), `fields` (string[] \| null → curated preset) → rows via `search_read` + field reporting |
 | `list_models` | read | — |
 | `get_fields` | read | `model` (string) → field name/type/label schema |
+| `expand_record` | read | `model` (string), `record_id` (positive int), `relations` (string[]), `include_chatter` (bool, default true), `include_attachments` (bool, default true), `relation_limit` (1–50, default 10) — record + optional x2many relations, chatter, attachments; caps at 8 Odoo calls |
 | `projects.list_tasks` | read | `domain` (array), `fields` (string[]) — convenience wrapper over `project.task`; includes field reporting |
+| `projects.list_chatter` | read | `task_ids` (positive int[], 1–25), `limit_per_task` (1–50, default 20), `order` (string, default `"date desc"`) — canonical multi-task PM chatter; one scoped `mail.message` query per task; caps at 8 Odoo calls |
 | [`aggregate_records`](#aggregate_records--grouped-summaries) | read | `model` (string), `domain` (array), `groupby` (string[], Odoo `field:agg` syntax e.g. `invoice_date:month`), `aggregates` (string[], e.g. `amount_total:sum`, `__count`), `lazy` (bool, default true), `orderby` (string, optional), `limit` (1–100, default 100, fallback scan cap), `offset` (int ≥ 0, default 0) — native `read_group` with bounded connector fallback |
 | `create_record` | write | `model` (string), `values` (object) |
 | `update_record` | write | `model` (string), `record_id` (positive int), `values` (object; x2many use Odoo command tuples, e.g. `[[6,0,ids]]`, `[[4,id]]`, `[[3,id]]`) |
 | `delete_record` | write | `model` (string), `record_id` (positive int) |
 | `batch_update` | write | `model` (string), `updates` (array of `{ record_id, values }`; x2many use Odoo command tuples) — one `write` per entry, fail-fast |
+| `post_message` | write | `model` (string), `record_id` (positive int), `body` (string), `subtype` (string, optional), `body_is_html` (bool, default false) — single-record `message_post`; HTML-escaped unless `body_is_html` |
 | `batch_post_message` | write | `model` (string), `messages` (array of `{ record_id, body, subtype?, body_is_html? }`) — one `message_post` per entry, HTML-escaped unless `body_is_html` |
+| `call_model_method` | write | `model` (string), `method` (string), `ids` (int[], optional), `kwargs` (object, default `{}`) — gated escape hatch for Odoo model methods (e.g. `mail.activity` → `action_feedback`); JSON-2 named kwargs only |
 | `bookkeeping.get_snapshot` | read | `company` (string), `date_from`/`date_to` (string), `scopes` (enum[] min 1: `tax_report`, `tax_returns`, `return_types`, `external_values`, `key_accounts`), `key_account_codes` (string[], optional) — batched tax-close snapshot |
 | `bookkeeping.review_key_accounts` | read | `company` (string), `date_to` (string), `account_codes` (string[]) — per-account balance, open items, and a factual closure-blocker severity |
 | `bookkeeping.explain_report_line` | read | `company` (string), `report_name` (string), `line_code` (string), `date_from`/`date_to` (string) — fact-only diagnosis of why a tax-report line reads its value (e.g. CA12 `box_22` carryover) |
@@ -74,15 +78,28 @@ can only do what their Odoo account permits.
 > 
 > | Lane | Tools | Scope & Examples |
 > |---|---|---|
-> | **Project management** | `create_record`, `update_record`, `post_message`, `batch_post_message` | `project.task` descriptions/chatter, `mail.activity` with `res_model=project.task`/`project.project`, triage notes (even when text mentions banking, B2C exports, or deadlines; e.g. "Remind Valentin: B2C bank export deadline Friday" on hygiene task #990). |
+> | **Project management** | `create_record`, `update_record`, `post_message`, `batch_post_message`, `call_model_method` | `project.task` descriptions/chatter, `mail.activity` with `res_model=project.task`/`project.project`, triage notes (even when text mentions banking, B2C exports, or deadlines; e.g. "Remind Valentin: B2C bank export deadline Friday" on hygiene task #990). |
 > | **Bookkeeping / tax-close** | `bookkeeping.plan_safe_write` only (validate-only → human confirmed apply) | Exactly four operations: `create_or_update_report_external_value`, `create_manual_tax_return`, `update_return_type_periodicity`, `create_lock_exception`. Never handles project-management models or chatter. |
 > 
 > * **Rejection:** PM-shaped payloads (e.g. nested `res_model`/`model` hints targeting PM models) sent to `bookkeeping.plan_safe_write` are structurally rejected before planning.
 > * **Write safety:** Generic `create_record`/`update_record` calls targeting ledger models (`account.*`, payroll, bank, tax) are blocked by the connector write-safety gate. Use `bookkeeping.plan_safe_write` instead.
-> * **Bulk chatter reads (anti-pattern):** Do not use `search_records` on `mail.message` with `body`/`preview` and a `res_id in [...]` domain across multiple tasks. Prefer per-task `expand_record({ include_chatter: true })` or `projects.list_chatter({ task_ids })` (see [docs/bookkeeping.md §7](docs/bookkeeping.md#7-bulk-chatter-reads-anti-pattern)).
+> * **Bulk chatter reads (anti-pattern):** Do not use `search_records` on `mail.message` with `body`/`preview` and a `res_id in [...]` domain across multiple tasks. Prefer per-task `expand_record({ include_chatter: true })` or `projects.list_chatter({ task_ids })` (see [docs/bookkeeping.md §7](docs/bookkeeping.md#7-project-management-chatter-reads-anti-pattern) and [docs/projects.md](docs/projects.md)).
 > * **Bookkeeping safety:** The `bookkeeping.*` tools are **read-only by default**. Writes are **two-phase**: `bookkeeping.plan_safe_write` only *validates* and returns a would-write plan plus an HMAC confirmation token — it **never writes**, and the actual write happens only after explicit human confirmation.
 > 
+> Canonical PM routing: [docs/projects.md](docs/projects.md). Bookkeeping lane detail:
+> [docs/bookkeeping.md §1.1 Write lanes](docs/bookkeeping.md#write-lanes).
 > See [docs/bookkeeping.md](docs/bookkeeping.md) for the snapshot-first workflow, rate-limit and cache model, full tool reference, and worked CA12 walkthroughs.
+
+### Project-management writes vs bookkeeping
+
+- **PM task notes, chatter, and activities** — use `create_record`, `update_record`, `post_message`,
+  `batch_post_message`, or `call_model_method` on `project.task`, `project.project`, or `mail.activity`
+  with `res_model` ∈ `{project.task, project.project}`.
+- **Operational text** may reference banking, B2C exports, VAT, payroll handoffs, deadlines — the
+  connector classifies by **model + method + field names**, not free-text keywords.
+- **Accounting / tax / ledger mutations** — **`bookkeeping.plan_safe_write` only** (four operations
+  documented in [docs/bookkeeping.md](docs/bookkeeping.md)). It never handles PM models.
+- **Multi-task chatter** — [docs/projects.md](docs/projects.md) and [docs/testing.md §g](docs/testing.md#g-projectslist_chatter-hermetic-coverage).
 
 ### Field selection
 
@@ -180,8 +197,29 @@ as `field_preset`, `fields_resolution`, `returned_fields`, and `omitted_fields`.
 uses offset/limit only. `browse_records` also supports `cursor` / `page.next_cursor` and
 shrinks oversized pages automatically (`safeguard_applied`).
 
-**Drill-down:** ids from compact rows can be fetched in full with existing `batch_read` or
-`get_record` — no separate expand tool is required.
+**Drill-down:** ids from compact rows can be fetched in full with `batch_read` or
+`get_record` for field data. For chatter on a single task use
+`expand_record({ model: "project.task", record_id, include_chatter: true })`; for
+multiple tasks use `projects.list_chatter({ task_ids: [...] })`.
+
+### Project-management chatter
+
+**Triage:** `projects.list_tasks`, `browse_records`, or `search_records_compact` on
+`project.task` to collect task ids.
+
+**Single-task detail + chatter:**
+`expand_record({ model: "project.task", record_id, include_chatter: true, include_attachments: false })`.
+
+**Multi-task chatter:** `projects.list_chatter({ task_ids: [...] })`. Each task id
+triggers one scoped `mail.message` query (never `res_id in [...]` with `body`/`preview`).
+Re-invoke with remaining ids when `metadata.truncated_task_ids` is set (8 Odoo calls max
+per invocation) or when you have more than 8 tasks.
+
+**Do not** bulk-fetch PM chatter via `search_records` on `mail.message` with
+`[["model","=","project.task"],["res_id","in",ids]]` and `body`/`preview` — MCP hosts may
+block finance-keyword message bodies. Accounting chatter on invoices/journals belongs in
+`bookkeeping.*` (e.g. `bookkeeping.plan_safe_write` for writes), not generic `mail.message`
+reads.
 
 ## Resources
 

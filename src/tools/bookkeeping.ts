@@ -17,8 +17,18 @@ import {
   type PlanResult
 } from "../safety";
 import type { Props } from "../server";
-import { PROJECT_MANAGEMENT_MODELS } from "../write-safety";
 import { mcpError, mcpErrorFromException, mcpStructured, requireConnection, zOdooRecords, zRecordContainer, zWarnings } from "./shared";
+
+/** PM model strings rejected when hinted in plan_safe_write values (res_model / model keys). */
+const PROJECT_MANAGEMENT_MODEL_HINTS = new Set([
+  "project.task",
+  "project.project",
+  "mail.activity",
+  "project.tags",
+  "project.task.type",
+  "project.project.stage",
+  "project.task.stage"
+]);
 
 type FieldsMeta = Record<string, CachedFieldMeta>;
 
@@ -1885,7 +1895,7 @@ function findPmModelHint(value: unknown, depth = 0): string | null {
   const record = value as Record<string, unknown>;
   for (const key of PM_MODEL_HINT_KEYS) {
     const hinted = record[key];
-    if (typeof hinted === "string" && PROJECT_MANAGEMENT_MODELS.has(hinted)) return hinted;
+    if (typeof hinted === "string" && PROJECT_MANAGEMENT_MODEL_HINTS.has(hinted)) return hinted;
   }
   for (const child of Object.values(record)) {
     const found = findPmModelHint(child, depth + 1);
@@ -1922,7 +1932,8 @@ export function registerSafeWritePlannerTools(
       description:
         "Validate-only: NEVER writes to Odoo. Accounting/tax-close mutations only — supports exactly four operations: " +
         "create_or_update_report_external_value, create_manual_tax_return, update_return_type_periodicity, " +
-        "create_lock_exception. Do NOT use for project-management work (project.task descriptions/chatter, " +
+        "create_lock_exception. Never handles project.task, mail.activity, or chatter; PM work uses generic write tools. " +
+        "Do NOT use for project-management work (project.task descriptions/chatter, " +
         "mail.activity on tasks, triage notes mentioning banking or deadlines) — use create_record, update_record, " +
         "post_message, or batch_post_message instead. PM-shaped values (including nested res_model/model hints) are " +
         "rejected before planning. Do NOT use generic create_record for accounting models (account.*, etc.) — the " +
