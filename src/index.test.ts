@@ -1319,7 +1319,8 @@ describe("write safety gate (connector)", () => {
     });
 
     expect(result.isError).toBeUndefined();
-    expect(queue.calls.some((c) => c.method === "message_post")).toBe(true);
+    const messagePosts = queue.calls.filter((c) => c.method === "message_post");
+    expect(messagePosts).toHaveLength(1);
   });
 
   test("update_record allows finance-keyword description on project.task and reaches Odoo", async () => {
@@ -1499,6 +1500,19 @@ describe("write safety gate (connector)", () => {
     const envelope = JSON.parse(result.content[0].text);
     expect(envelope.error).toBe("write_blocked");
     expect(envelope.intent).toBe("disallowed");
+  });
+
+  test("create_record for res.partner is blocked before Odoo", async () => {
+    const queue = makeStubQueue();
+    const agent = await buildAgentWithQueue(queue);
+    const handler = getToolHandler(agent, "create_record");
+
+    const result = await handler({ model: "res.partner", values: { name: "Acme" } });
+
+    expect(result.isError).toBe(true);
+    expect(queue.calls.length).toBe(0);
+    const envelope = JSON.parse(result.content[0].text);
+    expect(envelope.error).toBe("write_blocked");
   });
 });
 
