@@ -2,6 +2,16 @@ import { describe, test, expect } from "bun:test";
 import { assessWriteOperation, isMutatingOdooMethod } from "./write-safety";
 import { FINANCE_KEYWORD_PM_TEXT } from "./write-safety.fixtures";
 
+/** Ordinary PM notes — no banking/B2C/VAT/deadline vocabulary (negative control for keyword invariance). */
+const BENIGN_PM_TEXT = {
+  taskDescription: "Weekly sync notes for the engineering team backlog.",
+  chatterBody: "Reminder: review design doc comments before Thursday standup.",
+  activityNote: "Schedule pairing session to walk through onboarding flow changes.",
+  activitySummary: "Design review follow-up"
+} as const;
+
+const PM_ALLOWED_VERDICT = { allowed: true, intent: "project_management" } as const;
+
 describe("assessWriteOperation — project management text is never keyword-blocked", () => {
   test("project.task description mentioning banking and B2C export deadline is allowed", () => {
     const verdict = assessWriteOperation({
@@ -202,6 +212,75 @@ describe("assessWriteOperation — structure over content (negative control)", (
     expect(ledgerVerdict.allowed).toBe(false);
     expect(ledgerVerdict.intent).toBe("financial_mutation");
   });
+});
+
+describe("write safety invariants", () => {
+  const pmTextSurfaceCases = [
+    {
+      label: "project.task write description",
+      model: "project.task",
+      method: "write",
+      benignArgs: { ids: [990], vals: { description: BENIGN_PM_TEXT.taskDescription } },
+      financeArgs: { ids: [990], vals: { description: FINANCE_KEYWORD_PM_TEXT.taskDescription } }
+    },
+    {
+      label: "project.task message_post body",
+      model: "project.task",
+      method: "message_post",
+      benignArgs: { ids: [42], body: BENIGN_PM_TEXT.chatterBody },
+      financeArgs: { ids: [42], body: FINANCE_KEYWORD_PM_TEXT.chatterBody }
+    },
+    {
+      label: "mail.activity create on project.task",
+      model: "mail.activity",
+      method: "create",
+      benignArgs: {
+        vals_list: [
+          {
+            res_model: "project.task",
+            res_id: 42,
+            summary: BENIGN_PM_TEXT.activitySummary,
+            note: BENIGN_PM_TEXT.activityNote,
+            activity_type_id: 4,
+            user_id: 7,
+            date_deadline: "2026-07-15"
+          }
+        ]
+      },
+      financeArgs: {
+        vals_list: [
+          {
+            res_model: "project.task",
+            res_id: 42,
+            summary: FINANCE_KEYWORD_PM_TEXT.activitySummary,
+            note: FINANCE_KEYWORD_PM_TEXT.activityNote,
+            activity_type_id: 4,
+            user_id: 7,
+            date_deadline: "2026-07-15"
+          }
+        ]
+      }
+    }
+  ] as const;
+
+  for (const surface of pmTextSurfaceCases) {
+    test(`finance-keyword prose must not flip allow/deny on ${surface.label}`, () => {
+      const benignVerdict = assessWriteOperation({
+        model: surface.model,
+        method: surface.method,
+        args: surface.benignArgs
+      });
+      const financeVerdict = assessWriteOperation({
+        model: surface.model,
+        method: surface.method,
+        args: surface.financeArgs
+      });
+
+      expect(benignVerdict).toEqual(PM_ALLOWED_VERDICT);
+      expect(financeVerdict).toEqual(PM_ALLOWED_VERDICT);
+      expect(benignVerdict).toEqual(financeVerdict);
+    });
+  }
 });
 
 describe("isMutatingOdooMethod", () => {
