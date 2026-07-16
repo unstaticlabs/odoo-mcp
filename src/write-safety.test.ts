@@ -1,3 +1,16 @@
+/**
+ * Write-safety TDD contract tests for odoo-mcp (#1517 / #1715).
+ *
+ * These tests encode the PM write-safety classifier contract only. Production
+ * implementation is delivered in sibling subtasks — do not implement here:
+ *   - `assessWriteOperation` → `src/write-safety.ts`
+ *   - `gateWrite` (pre-enqueue gate) → `src/tools/write.ts`
+ *   - `mcpWriteBlockedError` (blocked JSON envelope) → `src/tools/shared.ts`
+ *
+ * Out of scope for this file: production write routing, `bookkeeping.plan_safe_write`,
+ * and read tools. Classification is structural (model + method + field names), never
+ * free-text finance-keyword blocking on allowed PM models.
+ */
 import { describe, test, expect } from "bun:test";
 import { assessWriteOperation, isMutatingOdooMethod } from "./write-safety";
 import { FINANCE_KEYWORD_PM_TEXT } from "./write-safety.fixtures";
