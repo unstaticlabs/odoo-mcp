@@ -7,10 +7,22 @@ for an LLM assistant here: Odoo Online rate-limits hard, accounting reads span m
 related models, and any write to a locked period is dangerous. These tools batch the
 reads, normalize the shapes, and refuse to write until a human confirms.
 
+### Routing
+
+| Intent | Tool surface |
+|---|---|
+| Draft vendor-bill / expense **preparatory** fields (draft-only) | `billing.update_draft_expense`, `billing.configure_draft_vendor_bill` |
+| Tax-close / report external value / return / lock-exception | `bookkeeping.plan_safe_write` (validate-only + human confirm) |
+| Raw CRUD on ledger / `hr.*` / `account.*` models | Still forbidden via `update_record` / `batch_update` |
+
+Draft bill/expense prep is **not** part of `plan_safe_write`. Generic writes remain hard-blocked;
+deny text routes agents to the matching namespace.
+
 Registered on the MCP server in [`src/server.ts`](../src/server.ts) (`registerBookkeepingTools`,
 `registerReturnPreviewTools`, `registerReportLineTools`, `registerSourceDocumentTools`,
 `registerSafeWritePlannerTools`). Implementations live in
-[`src/tools/bookkeeping.ts`](../src/tools/bookkeeping.ts).
+[`src/tools/bookkeeping.ts`](../src/tools/bookkeeping.ts). Billing draft writes live in
+[`src/tools/billing.ts`](../src/tools/billing.ts).
 
 ---
 

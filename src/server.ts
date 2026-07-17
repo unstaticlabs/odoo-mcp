@@ -4,6 +4,7 @@ import type { OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 import { callOdoo } from "./odoo";
 import { OdooQueue } from "./odoo-queue";
 import { TtlCache } from "./cache";
+import { registerBillingWriteTools } from "./tools/billing";
 import {
   registerBookkeepingTools,
   registerReportLineTools,
@@ -34,7 +35,7 @@ export interface Props extends Record<string, unknown> {
 
 export class McpAgent extends McpAgentBase<Env, unknown, Props> {
   // Bump this on every future tool-surface change: it's the cache-busting key clients use to refetch the tool list.
-  server = new McpServer({ name: "odoo-mcp", version: "0.7.2" });
+  server = new McpServer({ name: "odoo-mcp", version: "0.7.3" });
   odooQueue = new OdooQueue(callOdoo);
   // In-memory only — resets on DO eviction, same as odooQueue above.
   cache = new TtlCache();
@@ -44,6 +45,7 @@ export class McpAgent extends McpAgentBase<Env, unknown, Props> {
     registerReadTools(this.server, getProps, this.odooQueue, this.cache);
     registerResourceTemplates(this.server, getProps, this.odooQueue);
     registerWriteTools(this.server, getProps, this.odooQueue);
+    registerBillingWriteTools(this.server, getProps, this.odooQueue);
     registerBookkeepingTools(this.server, getProps, this.odooQueue, this.cache);
     registerReturnPreviewTools(this.server, getProps, this.odooQueue, this.cache);
     registerReportLineTools(this.server, getProps, this.odooQueue, this.cache);

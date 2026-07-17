@@ -6,7 +6,9 @@ import { assessWriteOperation, isMutatingOdooMethod } from "../write-safety";
 import { mcpError, mcpErrorFromException, mcpStructured, mcpWriteBlockedError, plaintextToHtml, requireConnection } from "./shared";
 
 const PM_WRITE_ROUTING_NOTE =
-  " Project-management notes (including banking/B2C/deadline operational text) on project.task / project.project / mail.activity→project.* are allowed. For accounting mutations use bookkeeping.plan_safe_write only.";
+  " Project-management notes (including banking/B2C/deadline operational text) on project.task / project.project / mail.activity→project.* are allowed. " +
+  "For draft vendor-bill / expense prep use billing.update_draft_expense / billing.configure_draft_vendor_bill. " +
+  "For tax-close / report / return / lock-exception mutations use bookkeeping.plan_safe_write.";
 
 function gateWrite(model: string, method: string, args: Record<string, unknown>) {
   if (!isMutatingOdooMethod(method)) return null;
