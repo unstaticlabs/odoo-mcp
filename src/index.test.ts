@@ -2577,7 +2577,15 @@ describe("tool metadata (title/annotations)", () => {
       expect(tool.annotations.openWorldHint).toBe(false);
     }
 
-    const writeToolNames = ["create_record", "post_message", "update_record", "delete_record", "call_model_method"];
+    const writeToolNames = [
+      "create_record",
+      "post_message",
+      "update_record",
+      "delete_record",
+      "call_model_method",
+      "billing.update_draft_expense",
+      "billing.configure_draft_vendor_bill"
+    ];
     for (const name of writeToolNames) {
       expect(agent.server._registeredTools[name].annotations.readOnlyHint).not.toBe(true);
     }

@@ -846,7 +846,11 @@ export const FINANCIAL_FIELD_PATTERNS: readonly RegExp[] = [
 const PM_LIFECYCLE_METHODS = new Set(["unlink", "action_feedback"]);
 
 const BOOKKEEPING_DENY_REASON =
-  "Use bookkeeping.plan_safe_write for validated accounting/tax operations.";
+  "Use bookkeeping.plan_safe_write for validated accounting/tax operations (tax/report/return/lock-exception).";
+
+const BILLING_DRAFT_PREP_DENY_REASON =
+  "For draft vendor-bill / expense preparatory fields use billing.configure_draft_vendor_bill or billing.update_draft_expense. " +
+  BOOKKEEPING_DENY_REASON;
 
 function pmAllowed(): PmWriteIntentResult {
   return { verdict: "allowed", intent: "project_management" };
@@ -861,6 +865,9 @@ function pmDenied(
 }
 
 function sensitiveModelReason(model: string): string {
+  if (model === "account.move" || model === "hr.expense") {
+    return `Writes to ${model} via generic MCP write tools are blocked. ${BILLING_DRAFT_PREP_DENY_REASON}`;
+  }
   return `Writes to ${model} are blocked by the connector safety layer. ${BOOKKEEPING_DENY_REASON}`;
 }
 

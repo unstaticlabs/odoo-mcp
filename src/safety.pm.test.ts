@@ -80,7 +80,7 @@ describe("classifyPmWriteIntent — finance-keyword prose must not affect verdic
 });
 
 describe("classifyPmWriteIntent — structural deny paths", () => {
-  test("account.move write is financial_mutation with bookkeeping guidance", () => {
+  test("account.move write is financial_mutation with billing + bookkeeping guidance", () => {
     const result = classifyPmWriteIntent({
       model: "account.move",
       method: "write",
@@ -88,7 +88,19 @@ describe("classifyPmWriteIntent — structural deny paths", () => {
     });
     expect(result.verdict).toBe("denied");
     expect(result.intent).toBe("financial_mutation");
+    expect(result.reason).toContain("billing.");
     expect(result.reason).toContain("bookkeeping.plan_safe_write");
+  });
+
+  test("hr.expense write is financial_mutation with billing guidance", () => {
+    const result = classifyPmWriteIntent({
+      model: "hr.expense",
+      method: "write",
+      args: { ids: [394], vals: { date: "2026-07-04" } }
+    });
+    expect(result.verdict).toBe("denied");
+    expect(result.intent).toBe("financial_mutation");
+    expect(result.reason).toContain("billing.update_draft_expense");
   });
 
   test("hr.employee write is financial_mutation (any hr.* prefix)", () => {

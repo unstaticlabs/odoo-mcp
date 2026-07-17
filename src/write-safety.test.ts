@@ -89,7 +89,19 @@ describe("assessWriteOperation — financial mutations are blocked", () => {
     });
     expect(verdict.allowed).toBe(false);
     expect(verdict.intent).toBe("financial_mutation");
+    expect(verdict.reason).toContain("billing.");
     expect(verdict.reason).toContain("bookkeeping.plan_safe_write");
+  });
+
+  test("hr.expense write is blocked with billing routing", () => {
+    const verdict = assessWriteOperation({
+      model: "hr.expense",
+      method: "write",
+      args: { ids: [394], vals: { date: "2026-07-04" } }
+    });
+    expect(verdict.allowed).toBe(false);
+    expect(verdict.intent).toBe("financial_mutation");
+    expect(verdict.reason).toContain("billing.update_draft_expense");
   });
 
   test("res.partner write is blocked as external-party mutation", () => {

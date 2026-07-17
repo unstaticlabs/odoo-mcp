@@ -58,6 +58,8 @@ The server never logs, stores, or echoes your key.
 | `bookkeeping.fetch_attachment` | read | `attachment_id` (positive int), `max_bytes` (positive int, default `10485760`) — attachment metadata + base64 content unless URL-type or over `max_bytes` |
 | `bookkeeping.preview_returns` | read | `company` (positive int), `from`/`to` (string), `return_type_xmlids` (string[] min 1) — which `account.return` cards should exist; blank periodicity → `configuration_issues` |
 | `bookkeeping.plan_safe_write` | validate-only | `operation` (enum: `create_or_update_report_external_value`, `create_manual_tax_return`, `update_return_type_periodicity`, `create_lock_exception`), `company` (string), `values` (object) — dry-run write plan + HMAC confirmation token; never writes |
+| `billing.update_draft_expense` | write | `record_id` (positive int), `values` (allowlisted draft `hr.expense` prep fields: date/name/description/product/account/analytics/qty/price/tax/reference) — draft-only; no validate/post |
+| `billing.configure_draft_vendor_bill` | write | `record_id` (positive int), `values` (allowlisted draft `account.move` `in_invoice` header + `invoice_line_ids`) — draft vendor bills only; no validate/post/reconcile |
 
 **`aggregate_records` validation.** Before calling Odoo `read_group`, the server validates `groupby` and
 `aggregates` against cached `fields_get` metadata:
@@ -80,15 +82,18 @@ can only do what their Odoo account permits.
 > [docs/bookkeeping.md](docs/bookkeeping.md) for the snapshot-first workflow, rate-limit and
 > cache model, full tool reference, and worked CA12 walkthroughs.
 
-### Project-management writes vs bookkeeping
+### Project-management writes vs bookkeeping vs billing
 
 - **PM task notes, chatter, and activities** — use `create_record`, `update_record`, `post_message`,
   `batch_post_message`, or `call_model_method` on `project.task`, `project.project`, or `mail.activity`
   with `res_model` ∈ `{project.task, project.project}`.
 - **Operational text** may reference banking, B2C exports, VAT, payroll handoffs, deadlines — the
   connector classifies by **model + method + field names**, not free-text keywords.
-- **Accounting / tax / ledger mutations** — **`bookkeeping.plan_safe_write` only** (four operations
-  documented in [docs/bookkeeping.md](docs/bookkeeping.md)). It never handles PM models.
+- **Draft vendor-bill / expense prep** — use `billing.update_draft_expense` /
+  `billing.configure_draft_vendor_bill` (draft-only allowlisted fields; no validate/post).
+- **Tax-close / report / return / lock-exception mutations** — **`bookkeeping.plan_safe_write` only**
+  (four operations documented in [docs/bookkeeping.md](docs/bookkeeping.md)). It never handles PM
+  models or draft bill/expense prep.
 - **Multi-task chatter** — see [docs/testing.md](docs/testing.md) § bulk chatter reads.
 
 ### Field selection
@@ -207,9 +212,9 @@ per invocation) or when you have more than 8 tasks.
 
 **Do not** bulk-fetch PM chatter via `search_records` on `mail.message` with
 `[["model","=","project.task"],["res_id","in",ids]]` and `body`/`preview` — MCP hosts may
-block finance-keyword message bodies. Accounting chatter on invoices/journals belongs in
-`bookkeeping.*` (e.g. `bookkeeping.plan_safe_write` for writes), not generic `mail.message`
-reads.
+block finance-keyword message bodies. Accounting chatter on invoices/journals is still
+blocked on `account.move` / `hr.expense`; draft bill/expense prep uses `billing.*`, and
+tax-close mutations use `bookkeeping.plan_safe_write` — not generic `mail.message` reads.
 
 ## Resources
 
