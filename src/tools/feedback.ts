@@ -15,6 +15,8 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import type { TtlCache } from "../cache";
+import type { OdooConnection } from "../odoo";
 import type { OdooQueue } from "../odoo-queue";
 import { SERVER_VERSION, type Props } from "../server";
 import { assessWriteOperation } from "../write-safety";
@@ -29,8 +31,15 @@ import {
 
 /** Target project for feedback cards (odoo-mcp tracker). */
 export const FEEDBACK_PROJECT_ID = 17;
-/** Inbox stage of the feedback project — where the triage automation fires. */
-export const FEEDBACK_INBOX_STAGE_ID = 119;
+/**
+ * Name of the intake stage in the feedback project — where the triage automation fires.
+ * Resolved to an id at call time, never hardcoded: stage ids are not stable (project 17's
+ * stages have been deleted and recreated, which broke a previous hardcoded id 119).
+ */
+export const FEEDBACK_INBOX_STAGE_NAME = "Inbox";
+/** How long a resolved Inbox stage id stays cached. */
+export const FEEDBACK_STAGE_CACHE_TTL_MS = 10 * 60 * 1000;
+const FEEDBACK_STAGE_CACHE_KEY = `feedback:inbox-stage:${FEEDBACK_PROJECT_ID}`;
 /** Task-name prefix marking agent-filed feedback (filter/dedup handle, not a trust token). */
 export const FEEDBACK_TITLE_PREFIX = "[agent-feedback]";
 
@@ -70,7 +79,45 @@ export function buildFeedbackDescriptionHtml(input: {
   return `<p>${meta}</p><p>${plaintextToHtml(input.message)}</p>`;
 }
 
-export function registerFeedbackTools(server: McpServer, getProps: () => Props | undefined, queue: OdooQueue) {
+/**
+ * Resolve the feedback project's Inbox stage id by name (TTL-cached). Returns null when the
+ * lookup fails or no such stage exists — callers then omit stage_id and Odoo places the task
+ * in the project's default (first) stage, which keeps feedback flowing even mid-rename.
+ * Exported for unit testing.
+ */
+export async function resolveFeedbackStageId(
+  queue: OdooQueue,
+  conn: OdooConnection,
+  cache?: TtlCache
+): Promise<number | null> {
+  const cached = cache?.get<number>(FEEDBACK_STAGE_CACHE_KEY);
+  if (cached != null) return cached;
+  try {
+    const rows = (await queue.enqueue(conn, "project.task.type", "search_read", {
+      domain: [
+        ["project_ids", "in", [FEEDBACK_PROJECT_ID]],
+        ["name", "=", FEEDBACK_INBOX_STAGE_NAME]
+      ],
+      fields: ["id"],
+      limit: 1
+    })) as { id?: unknown }[];
+    const id = rows?.[0]?.id;
+    if (typeof id === "number") {
+      cache?.set(FEEDBACK_STAGE_CACHE_KEY, id, FEEDBACK_STAGE_CACHE_TTL_MS);
+      return id;
+    }
+  } catch {
+    // Fall through — a stage-lookup failure must never block a feedback report.
+  }
+  return null;
+}
+
+export function registerFeedbackTools(
+  server: McpServer,
+  getProps: () => Props | undefined,
+  queue: OdooQueue,
+  cache?: TtlCache
+) {
   server.registerTool(
     "feedback.submit",
     {
@@ -109,11 +156,22 @@ export function registerFeedbackTools(server: McpServer, getProps: () => Props |
       const props = getProps();
       const client = (props?.clientName ?? server.server.getClientVersion()?.name ?? "unknown").replace(/\s+/g, "-");
 
+      let conn: ReturnType<typeof requireConnection>;
+      try {
+        conn = requireConnection(props);
+      } catch (err) {
+        return mcpErrorFromException(err, { model: "project.task", method: "create" });
+      }
+
+      // Stage ids are unstable across stage re-creations — resolve by name, omit on failure
+      // (Odoo then defaults to the project's first stage).
+      const stageId = await resolveFeedbackStageId(queue, conn, cache);
+
       const values = {
         name: `${FEEDBACK_TITLE_PREFIX} ${title}`,
         description: buildFeedbackDescriptionHtml({ category, message, toolName: tool_name, client }),
         project_id: FEEDBACK_PROJECT_ID,
-        stage_id: FEEDBACK_INBOX_STAGE_ID,
+        ...(stageId != null ? { stage_id: stageId } : {}),
         tag_ids: [[6, 0, feedbackTagIds(category)]]
       };
 
@@ -123,10 +181,8 @@ export function registerFeedbackTools(server: McpServer, getProps: () => Props |
         return mcpWriteBlockedError({ model: "project.task", method: "create" }, verdict);
       }
 
-      let conn: ReturnType<typeof requireConnection>;
       let taskId: number;
       try {
-        conn = requireConnection(props);
         const ids = (await queue.enqueue(conn, "project.task", "create", { vals_list: [values] })) as number[];
         taskId = ids[0];
       } catch (err) {
