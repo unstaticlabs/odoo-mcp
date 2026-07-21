@@ -5,4 +5,5 @@ declare module "bun:test" {
   export const beforeEach: any;
   export const afterEach: any;
   export const mock: any;
+  export const spyOn: any;
 }

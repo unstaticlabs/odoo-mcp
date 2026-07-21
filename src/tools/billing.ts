@@ -4,10 +4,12 @@ import { deriveWorkflowStatus } from "../normalizer";
 import type { OdooQueue } from "../odoo-queue";
 import type { Props } from "../server";
 import {
+  logWriteContext,
   mcpErrorFromException,
   mcpStructured,
   mcpWriteBlockedError,
   requireConnection,
+  zWriteContext,
   type WriteBlockedIntent
 } from "./shared";
 
@@ -177,7 +179,8 @@ export function registerBillingWriteTools(
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
       inputSchema: {
         record_id: z.number().int().positive(),
-        values: z.record(z.string(), z.unknown())
+        values: z.record(z.string(), z.unknown()),
+        context: zWriteContext
       },
       outputSchema: {
         ok: z.boolean(),
@@ -186,8 +189,9 @@ export function registerBillingWriteTools(
         warnings: z.array(z.string()).optional()
       }
     },
-    async ({ record_id, values }) => {
+    async ({ record_id, values, context }) => {
       const model = "hr.expense";
+      logWriteContext("billing.update_draft_expense", model, context);
       try {
         const conn = requireConnection(getProps());
         const rows = await queue.enqueue(conn, model, "read", {
@@ -258,7 +262,8 @@ export function registerBillingWriteTools(
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
       inputSchema: {
         record_id: z.number().int().positive(),
-        values: z.record(z.string(), z.unknown())
+        values: z.record(z.string(), z.unknown()),
+        context: zWriteContext
       },
       outputSchema: {
         ok: z.boolean(),
@@ -268,8 +273,9 @@ export function registerBillingWriteTools(
         warnings: z.array(z.string()).optional()
       }
     },
-    async ({ record_id, values }) => {
+    async ({ record_id, values, context }) => {
       const model = "account.move";
+      logWriteContext("billing.configure_draft_vendor_bill", model, context);
       try {
         const conn = requireConnection(getProps());
         const rows = await queue.enqueue(conn, model, "read", {
