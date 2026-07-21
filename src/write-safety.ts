@@ -57,7 +57,7 @@ export function isMutatingOdooMethod(method: string): boolean {
  * Backward-compat generic write-tool behavior for PM models beyond the canonical classifier
  * minimum (project.task + mail.activity→project.task). Mirrors the pre-refactor allowlist so
  * generic writes to project.project, project metadata (tags/types/stages), and project-scoped
- * activities keep working until dedicated projects.* tools land. Reached only after the
+ * activities keep working alongside dedicated projects.* tools. Reached only after the
  * canonical classifier denies; sensitive models (account.*, hr.*, …) are blocked upstream.
  */
 const COMPAT_PROJECT_PROJECT_FIELDS = new Set([

@@ -13,6 +13,7 @@ import {
   registerSafeWritePlannerTools,
   registerSourceDocumentTools
 } from "./tools/bookkeeping";
+import { registerProjectsTools } from "./tools/projects";
 import { registerReadTools } from "./tools/read";
 import { registerResourceTemplates } from "./tools/resources";
 import { registerWriteTools } from "./tools/write";
@@ -36,7 +37,7 @@ export interface Props extends Record<string, unknown> {
 
 // Bump this on every future tool-surface change: it's the cache-busting key clients use to
 // refetch the tool list (also stamped into feedback.submit cards to identify the surface seen).
-export const SERVER_VERSION = "0.8.1";
+export const SERVER_VERSION = "0.9.0";
 
 export class McpAgent extends McpAgentBase<Env, unknown, Props> {
   server = new McpServer({ name: "odoo-mcp", version: SERVER_VERSION });
@@ -46,6 +47,7 @@ export class McpAgent extends McpAgentBase<Env, unknown, Props> {
 
   async init() {
     const getProps = () => this.props;
+    registerProjectsTools(this.server, getProps, this.odooQueue, this.cache);
     registerReadTools(this.server, getProps, this.odooQueue, this.cache);
     registerResourceTemplates(this.server, getProps, this.odooQueue);
     registerWriteTools(this.server, getProps, this.odooQueue);

@@ -5,7 +5,6 @@ import type { Props } from "../server";
 import { CURATED_MODEL_ACTIONS, type CuratedAction } from "./actions-map";
 import {
   CORE_MODEL_ALLOWLIST,
-  DEFAULT_TASK_FIELDS,
   NAMED_FIELD_PRESET_VALUES,
   browseRecords,
   countRecords,
@@ -94,128 +93,6 @@ export function mergeModelActions(curated: CuratedAction[], viewActions: ModelAc
 }
 
 export function registerReadTools(server: McpServer, getProps: () => Props | undefined, queue: OdooQueue, cache: TtlCache) {
-  server.registerTool(
-    "projects.list_tasks",
-    {
-      title: "List Project Tasks",
-      description: "Read-only: list Odoo project.task records matching a domain.",
-      annotations: { readOnlyHint: true, openWorldHint: false },
-      inputSchema: {
-        domain: z.array(z.any()).default([]),
-        fields: z.array(z.string()).default(DEFAULT_TASK_FIELDS)
-      },
-      outputSchema: {
-        records: zOdooRecords.describe("Matching project.task records"),
-        ...zFieldsReport
-      }
-    },
-    async ({ domain, fields }) => {
-      try {
-        const warnings: string[] = [];
-        const { rows: tasks, fieldsReport } = await searchRecords(
-          queue,
-          requireConnection(getProps()),
-          "project.task",
-          domain,
-          fields,
-          100,
-          undefined,
-          undefined,
-          cache,
-          warnings
-        );
-        return mcpStructured(
-          {
-            records: tasks as Record<string, unknown>[],
-            returned_fields: fieldsReport.returned_fields,
-            omitted_fields: fieldsReport.omitted_fields,
-            warnings
-          },
-          JSON.stringify(tasks, null, 2)
-        );
-      } catch (err) {
-        return mcpErrorFromException(err, { model: "project.task", method: "search_read" });
-      }
-    }
-  );
-
-  server.registerTool(
-    "projects.list_chatter",
-    {
-      title: "List Project Task Chatter",
-      description:
-        "Read-only: canonical multi-task project-management chatter path for project.task. " +
-        "Fetches mail.message entries per task id with one scoped search_read each (never batches res_id in [...] with body). " +
-        "Do not use search_records or browse_records on mail.message with res_id in [...] and body/preview — MCP hosts may block finance-keyword content. " +
-        "For a single task, expand_record({ model: \"project.task\", record_id, include_chatter: true, include_attachments: false }) is equivalent. " +
-        "Accounting chatter on invoices/journals → bookkeeping.*, not this tool. " +
-        `Caps at ${MAX_ODOO_CALLS_PER_READ_EXPANSION} Odoo calls per invocation; remaining task_ids are returned in metadata.truncated_task_ids.`,
-      annotations: { readOnlyHint: true, openWorldHint: false },
-      inputSchema: {
-        task_ids: z.array(z.number().int().positive()).min(1).max(25),
-        limit_per_task: z.number().int().min(1).max(50).default(20),
-        order: z.string().default("date desc")
-      },
-      outputSchema: {
-        chatter_by_task_id: z.record(z.string(), z.unknown()),
-        metadata: z.object({
-          model: z.literal("project.task"),
-          requested_task_ids: z.array(z.number()),
-          fetched_task_ids: z.array(z.number()),
-          odoo_calls: z.number(),
-          truncated_task_ids: z.array(z.number()).optional()
-        }),
-        warnings: zWarnings
-      }
-    },
-    async ({ task_ids, limit_per_task, order }) => {
-      const conn = requireConnection(getProps());
-      const seen = new Set<number>();
-      const requestedTaskIds: number[] = [];
-      for (const id of task_ids) {
-        if (!seen.has(id)) {
-          seen.add(id);
-          requestedTaskIds.push(id);
-        }
-      }
-
-      const startSnapshot = queue.snapshot();
-      const callsUsed = () => queue.delta(startSnapshot).odoo_calls;
-      const chatterByTaskId: Record<string, unknown> = {};
-      const fetchedTaskIds: number[] = [];
-      const truncatedTaskIds: number[] = [];
-      const warnings: string[] = [];
-
-      for (const taskId of requestedTaskIds) {
-        if (callsUsed() >= MAX_ODOO_CALLS_PER_READ_EXPANSION) {
-          truncatedTaskIds.push(taskId);
-          continue;
-        }
-        chatterByTaskId[String(taskId)] = await fetchRecordChatter(queue, conn, "project.task", taskId, {
-          limit: limit_per_task,
-          order
-        });
-        fetchedTaskIds.push(taskId);
-      }
-
-      if (truncatedTaskIds.length > 0) {
-        warnings.push("call budget exceeded; re-invoke for remaining task_ids");
-      }
-
-      return mcpStructured({
-        chatter_by_task_id: chatterByTaskId,
-        metadata: {
-          model: "project.task" as const,
-          requested_task_ids: requestedTaskIds,
-          fetched_task_ids: fetchedTaskIds,
-          odoo_calls: callsUsed(),
-          ...(truncatedTaskIds.length > 0 ? { truncated_task_ids: truncatedTaskIds } : {})
-        },
-        warnings
-      });
-    }
-  );
-
   server.registerTool(
     "list_models",
     {

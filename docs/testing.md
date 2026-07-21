@@ -26,8 +26,10 @@ npx @modelcontextprotocol/inspector
 ```
 
 In the Inspector UI: transport **Streamable HTTP**, URL `http://localhost:8787/mcp`, and add the
-three headers above. Then **List Tools** and try `search_records`, `search_records_compact`,
-`browse_records`, or `projects.list_chatter` (e.g. `task_ids: [42, 43]` after triaging tasks).
+three headers above. Then **List Tools** — confirm `projects.list_projects`, `projects.list_tasks`,
+`projects.get_task`, `projects.create_task` (and the generic `search_records` / `create_record`)
+appear, not solely `feedback.submit`. Try `projects.list_tasks` with
+`domain: [["project_id","=",4]]`, or `projects.create_task` with `name` + `project_id: 4`.
 
 ### b) Claude Code
 
@@ -36,7 +38,10 @@ claude mcp add --transport http odoo http://localhost:8787/mcp \
   --header "Authorization: Bearer $ODOO_API_KEY" \
   --header "X-Odoo-Url: https://your-org.odoo.com" \
   --header "X-Odoo-Db: your-db"
-# then, in a claude session:  "list the odoo tools"  /  "search project.task where project_id = 17"
+# then, in a claude session:
+#   "list the odoo tools"
+#   "create a task named Smoke test in project 4 via projects.create_task"
+#   "search project.task where project_id = 4"
 ```
 
 ### c) Raw HTTP (auth check)
@@ -67,9 +72,15 @@ const client = new Client({ name: "smoke", version: "0.0.1" }, { capabilities: {
 await client.connect(transport);
 
 console.log("tools:", (await client.listTools()).tools.map(t => t.name));
+// Expect projects.list_projects / list_tasks / get_task / create_task among the names.
+const created = await client.callTool({
+  name: "projects.create_task",
+  arguments: { name: "MCP smoke task", project_id: 4, description: "lodged via projects.create_task" },
+});
+console.log("create:", created.content.map(c => c.text).join("\n"));
 const res = await client.callTool({
-  name: "search_records",
-  arguments: { model: "project.task", domain: [], fields: ["id", "name"], limit: 3 },
+  name: "projects.list_tasks",
+  arguments: { domain: [["project_id", "=", 4]], fields: ["id", "name"], limit: 5 },
 });
 console.log(res.content.map(c => c.text).join("\n"));
 // Schema-aware clients also get structuredContent with field reporting:
