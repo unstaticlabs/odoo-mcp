@@ -3,7 +3,16 @@ import { z } from "zod";
 import type { OdooQueue } from "../odoo-queue";
 import type { Props } from "../server";
 import { assessWriteOperation, isMutatingOdooMethod } from "../write-safety";
-import { mcpError, mcpErrorFromException, mcpStructured, mcpWriteBlockedError, plaintextToHtml, requireConnection } from "./shared";
+import {
+  logWriteContext,
+  mcpError,
+  mcpErrorFromException,
+  mcpStructured,
+  mcpWriteBlockedError,
+  plaintextToHtml,
+  requireConnection,
+  zWriteContext
+} from "./shared";
 
 const PM_WRITE_ROUTING_NOTE =
   " Project-management notes (including banking/B2C/deadline operational text) on project.task / project.project / mail.activity→project.* are allowed. " +
@@ -32,7 +41,8 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
       inputSchema: {
         model: z.string().min(1),
-        values: z.record(z.string(), z.any())
+        values: z.record(z.string(), z.any()),
+        context: zWriteContext
       },
       outputSchema: {
         id: z.number().int().describe("Database id of the created record"),
@@ -46,7 +56,8 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
           .describe("project.task only: the create succeeded but posting the provenance stamp to the chatter failed")
       }
     },
-    async ({ model, values }) => {
+    async ({ model, values, context }) => {
+      logWriteContext("create_record", model, context);
       const blocked = gateWrite(model, "create", { vals_list: [values] });
       if (blocked) return blocked;
 
@@ -109,13 +120,15 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
         record_id: z.number().int(),
         body: z.string(),
         subtype: z.string().optional(),
-        body_is_html: z.boolean().default(false)
+        body_is_html: z.boolean().default(false),
+        context: zWriteContext
       },
       outputSchema: {
         result: z.unknown().describe("Raw message_post return value (shape varies by Odoo version; typically the created mail.message id)")
       }
     },
-    async ({ model, record_id, body, subtype, body_is_html }) => {
+    async ({ model, record_id, body, subtype, body_is_html, context }) => {
+      logWriteContext("post_message", model, context);
       if (!model || !model.trim()) return mcpError("model must be a non-empty string");
       if (!Number.isInteger(record_id) || record_id <= 0) return mcpError("record_id must be a positive integer");
       const blocked = gateWrite(model, "message_post", {
@@ -152,13 +165,15 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
       inputSchema: {
         model: z.string().min(1),
         record_id: z.number().int().positive(),
-        values: z.record(z.string(), z.any())
+        values: z.record(z.string(), z.any()),
+        context: zWriteContext
       },
       outputSchema: {
         ok: z.boolean().describe("True when the write succeeded")
       }
     },
-    async ({ model, record_id, values }) => {
+    async ({ model, record_id, values, context }) => {
+      logWriteContext("update_record", model, context);
       const blocked = gateWrite(model, "write", { ids: [record_id], vals: values });
       if (blocked) return blocked;
       try {
@@ -191,7 +206,8 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
               values: z.record(z.string(), z.any())
             })
           )
-          .min(1)
+          .min(1),
+        context: zWriteContext
       },
       outputSchema: {
         results: z
@@ -199,7 +215,8 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
           .describe("One entry per applied update, in input order (fail-fast: absent entries were not attempted)")
       }
     },
-    async ({ model, updates }) => {
+    async ({ model, updates, context }) => {
+      logWriteContext("batch_update", model, context);
       if (!model || !model.trim()) return mcpError("model must be a non-empty string");
       try {
         const conn = requireConnection(getProps());
@@ -238,7 +255,8 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
               body_is_html: z.boolean().default(false)
             })
           )
-          .min(1)
+          .min(1),
+        context: zWriteContext
       },
       outputSchema: {
         results: z
@@ -246,7 +264,8 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
           .describe("One entry per posted message, in input order (fail-fast: absent entries were not attempted)")
       }
     },
-    async ({ model, messages }) => {
+    async ({ model, messages, context }) => {
+      logWriteContext("batch_post_message", model, context);
       if (!model || !model.trim()) return mcpError("model must be a non-empty string");
       try {
         const conn = requireConnection(getProps());
@@ -284,13 +303,15 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
       inputSchema: {
         model: z.string().min(1),
-        record_id: z.number().int().positive()
+        record_id: z.number().int().positive(),
+        context: zWriteContext
       },
       outputSchema: {
         ok: z.boolean().describe("True when the delete succeeded")
       }
     },
-    async ({ model, record_id }) => {
+    async ({ model, record_id, context }) => {
+      logWriteContext("delete_record", model, context);
       const blocked = gateWrite(model, "unlink", { ids: [record_id] });
       if (blocked) return blocked;
       try {
@@ -316,13 +337,15 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
         ids: z.array(z.number().int()).optional(),
         kwargs: z.record(z.string(), z.any()).default({}),
         // Deprecated: JSON-2 cannot bind positional args; kept so old callers fail loudly instead of silently.
-        args: z.array(z.any()).default([])
+        args: z.array(z.any()).default([]),
+        context: zWriteContext
       },
       outputSchema: {
         result: z.unknown().describe("Raw return value of the invoked model method")
       }
     },
-    async ({ model, method, ids, kwargs, args }) => {
+    async ({ model, method, ids, kwargs, args, context }) => {
+      logWriteContext("call_model_method", model, context);
       if (!model || !model.trim()) return mcpError("model must be a non-empty string");
       if (!method || !method.trim()) return mcpError("method must be a non-empty string");
       if (args.length > 0) {

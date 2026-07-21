@@ -46,11 +46,11 @@ The server never logs, stores, or echoes your key.
 | `projects.list_tasks` | read | `domain` (array), `fields` (string[]) — convenience wrapper over `project.task`; includes field reporting |
 | `projects.list_chatter` | read | `task_ids` (positive int[], 1–25), `limit_per_task` (1–50, default 20), `order` (string, default `"date desc"`) — canonical multi-task PM chatter; one scoped `mail.message` query per task; caps at 8 Odoo calls |
 | [`aggregate_records`](#aggregate_records--grouped-summaries) | read | `model` (string), `domain` (array), `groupby` (string[], Odoo `field:agg` syntax e.g. `invoice_date:month`), `aggregates` (string[], e.g. `amount_total:sum`, `__count`), `lazy` (bool, default true), `orderby` (string, optional), `limit` (1–100, default 100, fallback scan cap), `offset` (int ≥ 0, default 0) — native `read_group` with bounded connector fallback |
-| `create_record` | write | `model` (string), `values` (object) |
-| `update_record` | write | `model` (string), `record_id` (positive int), `values` (object; x2many use Odoo command tuples, e.g. `[[6,0,ids]]`, `[[4,id]]`, `[[3,id]]`) |
-| `delete_record` | write | `model` (string), `record_id` (positive int) |
-| `batch_update` | write | `model` (string), `updates` (array of `{ record_id, values }`; x2many use Odoo command tuples) — one `write` per entry, fail-fast |
-| `batch_post_message` | write | `model` (string), `messages` (array of `{ record_id, body, subtype?, body_is_html? }`) — one `message_post` per entry, HTML-escaped unless `body_is_html` |
+| `create_record` | write | `model` (string), `values` (object), `context` (string ≤ 500, optional — see [Write context](#write-context-audit-only)) |
+| `update_record` | write | `model` (string), `record_id` (positive int), `values` (object; x2many use Odoo command tuples, e.g. `[[6,0,ids]]`, `[[4,id]]`, `[[3,id]]`), `context` (optional) |
+| `delete_record` | write | `model` (string), `record_id` (positive int), `context` (optional) |
+| `batch_update` | write | `model` (string), `updates` (array of `{ record_id, values }`; x2many use Odoo command tuples), `context` (optional) — one `write` per entry, fail-fast |
+| `batch_post_message` | write | `model` (string), `messages` (array of `{ record_id, body, subtype?, body_is_html? }`), `context` (optional) — one `message_post` per entry, HTML-escaped unless `body_is_html` |
 | `bookkeeping.get_snapshot` | read | `company` (string), `date_from`/`date_to` (string), `scopes` (enum[] min 1: `tax_report`, `tax_returns`, `return_types`, `external_values`, `key_accounts`), `key_account_codes` (string[], optional) — batched tax-close snapshot |
 | `bookkeeping.review_key_accounts` | read | `company` (string), `date_to` (string), `account_codes` (string[]) — per-account balance, open items, and a factual closure-blocker severity |
 | `bookkeeping.explain_report_line` | read | `company` (string), `report_name` (string), `line_code` (string), `date_from`/`date_to` (string) — fact-only diagnosis of why a tax-report line reads its value (e.g. CA12 `box_22` carryover) |
@@ -58,8 +58,9 @@ The server never logs, stores, or echoes your key.
 | `bookkeeping.fetch_attachment` | read | `attachment_id` (positive int), `max_bytes` (positive int, default `10485760`) — attachment metadata + base64 content unless URL-type or over `max_bytes` |
 | `bookkeeping.preview_returns` | read | `company` (positive int), `from`/`to` (string), `return_type_xmlids` (string[] min 1) — which `account.return` cards should exist; blank periodicity → `configuration_issues` |
 | `bookkeeping.plan_safe_write` | validate-only | `operation` (enum: `create_or_update_report_external_value`, `create_manual_tax_return`, `update_return_type_periodicity`, `create_lock_exception`), `company` (string), `values` (object) — dry-run write plan + HMAC confirmation token; never writes |
-| `billing.update_draft_expense` | write | `record_id` (positive int), `values` (allowlisted draft `hr.expense` prep fields: date/name/description/product/account/analytics/qty/price/tax/reference) — draft-only; no validate/post |
-| `billing.configure_draft_vendor_bill` | write | `record_id` (positive int), `values` (allowlisted draft `account.move` `in_invoice` header + `invoice_line_ids`) — draft vendor bills only; no validate/post/reconcile |
+| `billing.update_draft_expense` | write | `record_id` (positive int), `values` (allowlisted draft `hr.expense` prep fields: date/name/description/product/account/analytics/qty/price/tax/reference), `context` (optional) — draft-only; no validate/post |
+| `billing.configure_draft_vendor_bill` | write | `record_id` (positive int), `values` (allowlisted draft `account.move` `in_invoice` header + `invoice_line_ids`), `context` (optional) — draft vendor bills only; no validate/post/reconcile |
+| `feedback.submit` | write | `title` (5–120 chars), `message` (20–4000 chars; concrete details, no secrets), `category` (`bug` \| `documentation_gap` \| `missing_feature` \| `dx_friction`), `tool_name` (string, optional) — files an `[agent-feedback]` card in the maintainers' tracker; see [Agent feedback](#agent-feedback) |
 
 **`aggregate_records` validation.** Before calling Odoo `read_group`, the server validates `groupby` and
 `aggregates` against cached `fields_get` metadata:
@@ -95,6 +96,27 @@ can only do what their Odoo account permits.
   (four operations documented in [docs/bookkeeping.md](docs/bookkeeping.md)). It never handles PM
   models or draft bill/expense prep.
 - **Multi-task chatter** — see [docs/testing.md](docs/testing.md) § bulk chatter reads.
+
+### Write context (audit only)
+
+Every write tool accepts an optional `context` string (≤ 500 chars): one sentence of
+agent-declared intent, e.g. `"user asked to move task 42 to Review"`. It is **audit-only** —
+logged server-side as a structured `write_context` line (visible in Workers Logs /
+`wrangler tail`), **never sent to Odoo**, and **never consulted by the write-safety gate**,
+which continues to classify purely by model + method + field structure. Do not put
+credentials or sensitive personal data in it.
+
+### Agent feedback
+
+`feedback.submit` lets agents report connector problems — bugs, documentation gaps, missing
+features, DX friction — instead of silently working around them. Reports are filed as
+`[agent-feedback]`-prefixed `project.task` cards in the maintainers' tracker Inbox, tagged by
+category, with the server version and client name stamped into the description.
+
+Feedback cards are **deliberately low-trust**: the chatter marker uses the distinct
+`[agent-feedback]` prefix (never a trusted `[agent-source]` provenance token), so
+downstream triage treats them as untrusted input from arbitrary conversations. Submitting
+feedback never changes server behavior — humans triage the cards.
 
 ### Field selection
 

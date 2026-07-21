@@ -4,6 +4,11 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-07-01",
   "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    // Persist console.log in Workers Logs — carries the write_context audit lines
+    // (agent-declared intent on write tools) and general request telemetry.
+    "enabled": true
+  },
   "vars": {
     // Dev default for the safe-write confirmation-token HMAC. Override with a real
     // secret in production via `wrangler secret put CONFIRMATION_SECRET`.

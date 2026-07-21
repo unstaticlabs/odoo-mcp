@@ -388,6 +388,28 @@ export function mcpWriteBlockedError(
   return { content: [{ type: "text" as const, text: JSON.stringify(envelope) }], isError: true as const };
 }
 
+/**
+ * Optional agent-declared intent on write tools ("why is this write happening").
+ * Audit-only: logged server-side via {@link logWriteContext}, never forwarded to Odoo and never
+ * consulted by the write-safety gate (which classifies by model/method/field structure only).
+ */
+export const zWriteContext = z
+  .string()
+  .min(1)
+  .max(500)
+  .optional()
+  .describe(
+    "Why this write is happening — one short sentence of intent distilled from the conversation " +
+      "(e.g. 'user asked to move task 42 to Review'). Audit-logged server-side; never sent to Odoo. " +
+      "Do not include credentials, API keys, or sensitive personal data."
+  );
+
+/** Emit an audit log line for a contextualized write. No-op when the caller omitted context. */
+export function logWriteContext(tool: string, model: string, context: string | undefined): void {
+  if (!context) return;
+  console.log(JSON.stringify({ event: "write_context", tool, model, context }));
+}
+
 /** Redact Odoo API keys and bearer tokens from error detail text. */
 export function redactDetails(text: string): string {
   return text
