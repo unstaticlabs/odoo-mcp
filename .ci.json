@@ -10,7 +10,7 @@
     },
     {
       "name": "typecheck",
-      "cmd": "npx tsc --noEmit",
+      "cmd": "npm run typecheck",
       "cwd": ".",
       "timeout": 300,
       "gate": true
