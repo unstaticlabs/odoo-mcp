@@ -43,8 +43,12 @@ The server never logs, stores, or echoes your key.
 | `list_models` | read | — |
 | `get_fields` | read | `model` (string) → field name/type/label schema |
 | `expand_record` | read | `model` (string), `record_id` (positive int), `relations` (string[]), `include_chatter` (bool, default true), `include_attachments` (bool, default true), `relation_limit` (1–50, default 10) — record + optional x2many relations, chatter, attachments; caps at 8 Odoo calls |
-| `projects.list_tasks` | read | `domain` (array), `fields` (string[]) — convenience wrapper over `project.task`; includes field reporting |
+| `projects.list_projects` | read | `domain` (array), `fields` (string[]), `limit` (1–100, default 100) — list `project.project` records with field reporting |
+| `projects.list_tasks` | read | `domain` (array), `fields` (string[]), `limit` (1–100, default 100) — convenience wrapper over `project.task`; includes field reporting |
+| `projects.get_task` | read | `task_id` (positive int), `fields` (string[] \| null → curated preset) — single task + optional `_workflow_status` |
+| `projects.list_stages` | read | `project_id` (positive int, optional), `domain` (array), `fields` (string[]), `limit` (1–100) — `project.task.type` stages for a project |
 | `projects.list_chatter` | read | `task_ids` (positive int[], 1–25), `limit_per_task` (1–50, default 20), `order` (string, default `"date desc"`) — canonical multi-task PM chatter; one scoped `mail.message` query per task; caps at 8 Odoo calls |
+| `projects.create_task` | write | `name` (string), `project_id` (positive int), `description` / `stage_id` / `tag_ids` (optional), `values` (optional extra vals), `context` (optional) — Odoo 19 `vals_list` create + provenance `trace_token` |
 | [`aggregate_records`](#aggregate_records--grouped-summaries) | read | `model` (string), `domain` (array), `groupby` (string[], Odoo `field:agg` syntax e.g. `invoice_date:month`), `aggregates` (string[], e.g. `amount_total:sum`, `__count`), `lazy` (bool, default true), `orderby` (string, optional), `limit` (1–100, default 100, fallback scan cap), `offset` (int ≥ 0, default 0) — native `read_group` with bounded connector fallback |
 | `create_record` | write | `model` (string), `values` (object), `context` (string ≤ 500, optional — see [Write context](#write-context-audit-only)) |
 | `update_record` | write | `model` (string), `record_id` (positive int), `values` (object; x2many use Odoo command tuples, e.g. `[[6,0,ids]]`, `[[4,id]]`, `[[3,id]]`), `context` (optional) |
@@ -85,7 +89,8 @@ can only do what their Odoo account permits.
 
 ### Project-management writes vs bookkeeping vs billing
 
-- **PM task notes, chatter, and activities** — use `create_record`, `update_record`, `post_message`,
+- **PM task notes, chatter, and activities** — prefer `projects.create_task` to lodge a card in a
+  known project; otherwise use `create_record`, `update_record`, `post_message`,
   `batch_post_message`, or `call_model_method` on `project.task`, `project.project`, or `mail.activity`
   with `res_model` ∈ `{project.task, project.project}`.
 - **Operational text** may reference banking, B2C exports, VAT, payroll handoffs, deadlines — the
@@ -120,7 +125,7 @@ feedback never changes server behavior — humans triage the cards.
 
 ### Field selection
 
-For `search_records`, `get_record`, `batch_read`, and `projects.list_tasks`:
+For `search_records`, `get_record`, `batch_read`, `projects.list_tasks`, and `projects.get_task`:
 
 - **`fields` omitted / `null`** → a **curated per-model preset** from `MODEL_FIELD_PRESETS` (no extra Odoo call):
   - `project.task` → `id`, `name`, `stage_id`, `project_id`

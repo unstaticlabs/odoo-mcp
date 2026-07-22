@@ -2584,10 +2584,22 @@ describe("tool metadata (title/annotations)", () => {
       "delete_record",
       "call_model_method",
       "billing.update_draft_expense",
-      "billing.configure_draft_vendor_bill"
+      "billing.configure_draft_vendor_bill",
+      "projects.create_task",
+      "feedback.submit"
     ];
     for (const name of writeToolNames) {
       expect(agent.server._registeredTools[name].annotations.readOnlyHint).not.toBe(true);
+    }
+
+    for (const name of [
+      "projects.list_projects",
+      "projects.list_tasks",
+      "projects.get_task",
+      "projects.list_stages",
+      "projects.create_task"
+    ]) {
+      expect(agent.server._registeredTools[name], `missing ${name}`).toBeDefined();
     }
   });
 
