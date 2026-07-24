@@ -24,6 +24,7 @@ mock.module("cloudflare:workers", () => {
   return { WorkerEntrypoint: class WorkerEntrypoint {} };
 });
 
+const { default: handler } = await import("./index");
 const {
   callOdoo,
   OdooError,
@@ -44,8 +45,9 @@ const {
   matchInvalidGroupby,
   matchUnsupportedAggregate,
   McpAgent,
-  default: handler
-} = await import("./index");
+  AccountingAgent,
+  ProjectsAgent
+} = await import("./test-exports");
 
 const originalFetch = globalThis.fetch;
 
@@ -541,6 +543,74 @@ describe("default fetch handler", () => {
     expect(json.props.odooBaseUrl).toBe(validHeaders["X-Odoo-Url"]);
     expect(json.props.odooDb).toBe(validHeaders["X-Odoo-Db"]);
     expect(json.props.odooApiKey).toBe("my-secret-token-abc123");
+  });
+
+  test.each(["/accounting/mcp", "/projects/mcp"])(
+    "header path routes %s with correctly threaded props",
+    async (path: string) => {
+      const res = await handler.fetch(makeRequest(validHeaders, path), {} as any, {} as any);
+      expect(res.status).toBe(200);
+
+      const json = (await res.json()) as any;
+      expect(json.props.odooBaseUrl).toBe(validHeaders["X-Odoo-Url"]);
+      expect(json.props.odooApiKey).toBe("my-secret-token-abc123");
+    }
+  );
+
+  test.each(["/mcp", "/accounting/mcp", "/projects/mcp"])("GET %s returns 405 (no push stream)", async (path: string) => {
+    const res = await handler.fetch(new Request(`http://worker.example.com${path}`, { method: "GET" }), {} as any, {} as any);
+    expect(res.status).toBe(405);
+    expect(res.headers.get("Allow")).toBe("POST, DELETE");
+  });
+
+  test("sibling prefix without /mcp suffix is not treated as an MCP endpoint", async () => {
+    const res = await handler.fetch(makeRequest(validHeaders, "/accounting"), {} as any, {} as any);
+    expect(res.status).toBe(404);
+  });
+});
+
+describe("endpoint tool surfaces", () => {
+  async function toolNames(Ctor: any): Promise<Set<string>> {
+    const agent = new Ctor();
+    agent.odooQueue = makeQueue();
+    agent.props = { odooBaseUrl: "http://example.com", odooDb: "test-db", odooApiKey: "secret-key" };
+    await agent.init();
+    return new Set(Object.keys((agent.server as any)._registeredTools));
+  }
+
+  test("accounting endpoint registers accounting tools and nothing else", async () => {
+    const names = await toolNames(AccountingAgent);
+
+    expect(names.has("bookkeeping.get_snapshot")).toBe(true);
+    expect(names.has("bookkeeping.plan_safe_write")).toBe(true);
+    expect(names.has("billing.configure_draft_vendor_bill")).toBe(true);
+    expect(names.has("feedback.submit")).toBe(true);
+    // Purity: no raw CRUD, no other domains — the point of the split.
+    expect(names.has("search_records")).toBe(false);
+    expect(names.has("create_record")).toBe(false);
+    expect(names.has("call_model_method")).toBe(false);
+    expect(names.has("projects.list_tasks")).toBe(false);
+  });
+
+  test("projects endpoint registers projects tools and nothing else", async () => {
+    const names = await toolNames(ProjectsAgent);
+
+    expect(names.has("projects.list_tasks")).toBe(true);
+    expect(names.has("projects.create_task")).toBe(true);
+    expect(names.has("feedback.submit")).toBe(true);
+    expect(names.has("bookkeeping.get_snapshot")).toBe(false);
+    expect(names.has("search_records")).toBe(false);
+    expect(names.has("create_record")).toBe(false);
+  });
+
+  test("generic /mcp surface is a superset of both domain surfaces", async () => {
+    const generic = await toolNames(McpAgent);
+    const accounting = await toolNames(AccountingAgent);
+    const projects = await toolNames(ProjectsAgent);
+
+    for (const name of [...accounting, ...projects]) {
+      expect(generic.has(name)).toBe(true);
+    }
   });
 });
 

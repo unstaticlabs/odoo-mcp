@@ -4,7 +4,14 @@ A [Model Context Protocol](https://modelcontextprotocol.io) server for **Odoo**,
 Cloudflare Workers. It lets AI clients (Claude Code, Claude Desktop, ChatGPT, and any other
 MCP client) read and write Odoo data over a single remote endpoint.
 
-- **Transport:** Streamable HTTP at `/mcp` (via the Cloudflare Agents `McpAgent`).
+- **Transport:** Streamable HTTP (via the Cloudflare Agents `McpAgent`), on three sibling
+  endpoints sharing one auth front door:
+  - `/mcp` — the **full tool surface** (back-compat: existing connectors keep working);
+  - `/accounting/mcp` — bookkeeping + billing tools only;
+  - `/projects/mcp` — projects tools only.
+
+  The domain endpoints exist for clients with small tool budgets (ChatGPT): connect the one
+  you need and the model sees a focused tool list instead of everything.
 - **Auth:** **bring-your-own-key (BYO-key)** — each caller supplies their *own* Odoo URL +
   API key, so Odoo's own per-user permissions are the authorization. Clients that can set
   static headers (Claude Code, Claude Desktop) send them per request; ChatGPT connects via a
@@ -18,9 +25,10 @@ MCP client) read and write Odoo data over a single remote endpoint.
 
 ## Connection: BYO-key headers
 
-For clients that can set static headers, every request to `/mcp` carries three headers
-(missing/malformed → `401`). Requests without any `X-Odoo-*` header are treated as OAuth
-(see [Connect ChatGPT](#connect-chatgpt-oauth) below).
+For clients that can set static headers, every request to an MCP endpoint (`/mcp`,
+`/accounting/mcp`, or `/projects/mcp`) carries three headers (missing/malformed → `401`).
+Requests without any `X-Odoo-*` header are treated as OAuth (see
+[Connect ChatGPT](#connect-chatgpt-oauth) below).
 
 | Header | Value |
 |---|---|
@@ -277,12 +285,14 @@ claude mcp add --transport http odoo http://localhost:8787/mcp \
 ## Connect ChatGPT (OAuth)
 
 ChatGPT's connector UI can't set custom headers, so the Worker ships an OAuth 2.1 shim
-(authorization code + PKCE + dynamic client registration) on the same `/mcp` endpoint:
+(authorization code + PKCE + dynamic client registration) shared by all three MCP endpoints:
 
 1. Deploy the Worker (see below — the `OAUTH_KV` namespace must exist).
 2. In ChatGPT: **Settings → Apps & Connectors → Advanced settings → enable Developer Mode**,
-   then **Create connector**: give it a name and the server URL
-   `https://<worker>.workers.dev/mcp`, auth **OAuth**.
+   then **Create connector**: give it a name and the server URL — usually a focused domain
+   endpoint like `https://<worker>.workers.dev/accounting/mcp` or `…/projects/mcp`
+   (`…/mcp` serves the full surface) — auth **OAuth**. Each endpoint is a separate
+   connector with its own authorize flow.
 3. ChatGPT redirects you to the Worker's hosted `/authorize` page. Paste your Odoo URL,
    database, and API key — the shim verifies them against your Odoo before accepting.
 4. Back in ChatGPT, the connector shows the tool list; try a read tool (e.g. ask it to
@@ -295,6 +305,11 @@ lifetime is 1 h (refresh 30 days). Revocation: delete the `grant:*` key via
 [docs/product/auth.md](docs/product/auth.md)).
 
 ## Deploy
+
+**Pushes to `main` deploy automatically** via GitHub Actions
+([.github/workflows/deploy.yml](.github/workflows/deploy.yml)) using the
+`CLOUDFLARE_ACCOUNT_ID` repo variable and `CLOUDFLARE_API_TOKEN` secret. Durable Object
+migrations in `wrangler.jsonc` apply as part of the deploy. Manual deploys still work:
 
 ```bash
 npm ci                # required — node_modules must actually be installed before bundling
@@ -314,10 +329,10 @@ npx wrangler deploy
   CLOUDFLARE_ACCOUNT_ID=<account-id> npx wrangler deploy
   ```
   Run `npx wrangler whoami` to list the account IDs your login can reach.
-- `wrangler.jsonc` declares the `McpAgent` Durable Object; the first deploy provisions it
-  automatically — no manual setup needed.
+- `wrangler.jsonc` declares the `McpAgent`, `AccountingAgent`, and `ProjectsAgent` Durable
+  Objects; the first deploy provisions them automatically — no manual setup needed.
 - On success, wrangler prints the public URL: `https://<worker-name>.<subdomain>.workers.dev`.
-  The MCP endpoint is that URL + `/mcp`.
+  The MCP endpoints are that URL + `/mcp`, `/accounting/mcp`, and `/projects/mcp`.
 
 ## Development
 

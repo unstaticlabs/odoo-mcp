@@ -1,89 +1,52 @@
 import OAuthProvider from "@cloudflare/workers-oauth-provider";
-import { McpAgent, type Env, type Props } from "./server";
+import { AccountingAgent, McpAgent, ProjectsAgent, type Env, type Props } from "./server";
 import { oauthDefaultHandler } from "./oauth";
 
-export {
-  callOdoo,
-  OdooError,
-  classifyOdooError,
-  classifyAggregationDiagnosis,
-  aggregationDiagnosisFromOdooError,
-  normalizeOdooDetails,
-  matchInvalidGroupby,
-  matchUnsupportedAggregate,
-  isRecoverable
-} from "./odoo";
-export type { OdooErrorCode, AggregationDiagnosisCode, AggregationErrorContext } from "./odoo";
-export { mcpAggregationErrorFromException, redactDetails } from "./tools/shared";
-export type { AggregationErrorEnvelope } from "./tools/shared";
-export { OdooQueue } from "./odoo-queue";
-export {
-  pickSmartFields,
-  searchRecords,
-  escapeHtml,
-  countRecords,
-  resolveFields,
-  MODEL_FIELD_PRESETS,
-  browseRecords,
-  searchRecordsCompact,
-  resolveNamedFieldPreset,
-  resolveBatchReadFields,
-  buildBrowsePageMeta,
-  applyBrowseSafeguard,
-  NAMED_MODEL_FIELD_PRESETS,
-  BROWSE_MAX_PAYLOAD_BYTES,
-  BROWSE_MIN_LIMIT,
-  resolveCompactFields,
-  buildPageMetadata,
-  buildCompactReadEnvelope,
-  FIELD_PRESET_NAMES,
-  FIELD_PRESET_FALLBACKS,
-  FIELD_PRESET_MODEL_OVERRIDES,
-  zPageMetadata,
-  zCompactFieldsBlock,
-  zCompactReadEnvelope
-} from "./tools/shared";
-export type {
-  FieldResolution,
-  NamedFieldPreset,
-  NamedPresetResolution,
-  BatchReadFieldsResolution,
-  BrowseResult,
-  BrowsePageMeta,
-  BrowseSafeguardPlan,
-  FieldPresetName,
-  PageMetadata,
-  CompactReadEnvelope,
-  CompactFieldResolution,
-  CompactFieldsBlock
-} from "./tools/shared";
-export { parseButtonsFromArch, mergeModelActions } from "./tools/read";
-export { CURATED_MODEL_ACTIONS } from "./tools/actions-map";
-export { normalizeRecord, normalizeRecords, deriveWorkflowStatus } from "./normalizer";
-export type { OdooFieldMeta, FieldsMeta, NormalizeOptions } from "./normalizer";
-export { TtlCache, getFieldsCached, resolveXmlIdCached, cachedSearchRead, TTL_METADATA_MS, TTL_STRUCTURE_MS, TTL_BALANCE_MS } from "./cache";
-export type { CachedFieldMeta, XmlIdResolution } from "./cache";
-export { validateOdooCredentials } from "./oauth";
-export { McpAgent };
+// Entry-module exports are restricted to handlers and Durable Object classes:
+// the Workers runtime rejects anything else ("Incorrect type for map entry").
+// Test-support re-exports live in ./test-exports instead.
+export { McpAgent, AccountingAgent, ProjectsAgent };
 
 const ACCESS_TOKEN_TTL_SECONDS = 60 * 60; // 1 hour
 const REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60; // 30 days
 
 /**
+ * One endpoint per tool surface, all sharing the same OAuth front door and the
+ * same Props contract. Paths are siblings (never nested under /mcp): both our
+ * header-path routing and OAuthProvider's apiHandlers match by prefix, so a
+ * nested /mcp/accounting would be swallowed by /mcp.
+ */
+const MCP_ENDPOINTS = [
+  { path: "/mcp", serve: () => McpAgent.serve("/mcp", { binding: "McpAgent" }) },
+  { path: "/accounting/mcp", serve: () => AccountingAgent.serve("/accounting/mcp", { binding: "AccountingAgent" }) },
+  { path: "/projects/mcp", serve: () => ProjectsAgent.serve("/projects/mcp", { binding: "ProjectsAgent" }) }
+] as const;
+
+function matchMcpEndpoint(pathname: string): (typeof MCP_ENDPOINTS)[number] | undefined {
+  return MCP_ENDPOINTS.find((e) => pathname === e.path || pathname.startsWith(`${e.path}/`));
+}
+
+/**
  * Token-authenticated MCP requests land here after OAuthProvider has resolved
  * the bearer token: ctx.props already holds the decrypted Odoo credentials in
- * the exact same Props shape the header path builds, so McpAgent and every
- * tool below it cannot tell the two auth paths apart.
+ * the exact same Props shape the header path builds, so the agents and every
+ * tool below them cannot tell the two auth paths apart. Tokens are not scoped
+ * to an endpoint — any grant works on any path, which is fine because every
+ * path resolves to the same user-supplied Odoo credentials.
  */
-const mcpApiHandler = {
-  fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    return McpAgent.serve("/mcp", { binding: "McpAgent" }).fetch(request, env, ctx);
-  }
-};
+const apiHandlers = Object.fromEntries(
+  MCP_ENDPOINTS.map((endpoint) => [
+    endpoint.path,
+    {
+      fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+        return endpoint.serve().fetch(request, env, ctx);
+      }
+    }
+  ])
+);
 
 export const oauthProvider = new OAuthProvider<Env>({
-  apiRoute: "/mcp",
-  apiHandler: mcpApiHandler,
+  apiHandlers,
   defaultHandler: oauthDefaultHandler,
   authorizeEndpoint: "/authorize",
   tokenEndpoint: "/token",
@@ -97,22 +60,21 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
+    const mcpEndpoint = matchMcpEndpoint(url.pathname);
+
     // Decline the optional standalone SSE stream (server→client push). This
     // server never sends server-initiated messages, and agents@0.17.3 has a
     // production-only bug where an open standalone stream stalls every
     // subsequent POST on the same session. 405 is the spec-sanctioned way to
     // say "no push stream"; clients fall back to plain request/response.
-    if (url.pathname.startsWith("/mcp") && request.method === "GET") {
+    if (mcpEndpoint && request.method === "GET") {
       return new Response(null, { status: 405, headers: { Allow: "POST, DELETE" } });
     }
 
     // BYO-key header path (Claude Code, Claude Desktop, …) — unchanged. Any
     // X-Odoo-* header marks the request as header-authenticated; requests
     // without them (ChatGPT) fall through to the OAuth shim below.
-    if (
-      url.pathname.startsWith("/mcp") &&
-      (request.headers.has("X-Odoo-Url") || request.headers.has("X-Odoo-Db"))
-    ) {
+    if (mcpEndpoint && (request.headers.has("X-Odoo-Url") || request.headers.has("X-Odoo-Db"))) {
       const authHeader = request.headers.get("Authorization");
       const odooBaseUrl = request.headers.get("X-Odoo-Url");
       const odooDb = request.headers.get("X-Odoo-Db");
@@ -126,7 +88,7 @@ export default {
       }
 
       const props: Props = { odooBaseUrl, odooDb, odooApiKey };
-      return McpAgent.serve("/mcp", { binding: "McpAgent" }).fetch(request, env, { ...ctx, props });
+      return mcpEndpoint.serve().fetch(request, env, { ...ctx, props });
     }
 
     // OAuth shim path: /authorize, /token, /register, /.well-known/*, and

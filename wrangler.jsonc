@@ -28,6 +28,14 @@
       {
         "name": "McpAgent",
         "class_name": "McpAgent"
+      },
+      {
+        "name": "AccountingAgent",
+        "class_name": "AccountingAgent"
+      },
+      {
+        "name": "ProjectsAgent",
+        "class_name": "ProjectsAgent"
       }
     ]
   },
@@ -35,6 +43,10 @@
     {
       "tag": "v1",
       "new_sqlite_classes": ["McpAgent"]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["AccountingAgent", "ProjectsAgent"]
     }
   ]
 }

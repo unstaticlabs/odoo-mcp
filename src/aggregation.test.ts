@@ -25,7 +25,7 @@ import {
   aggregateRecords
 } from "./aggregation";
 import { OdooError } from "./odoo";
-import { OdooQueue, callOdoo } from "./index";
+import { OdooQueue, callOdoo } from "./test-exports";
 import { TtlCache } from "./cache";
 import type { CachedFieldMeta } from "./cache";
 
@@ -632,7 +632,7 @@ describe("aggregateRecords integration", () => {
 
   test("API key not leaked in error envelope", async () => {
     const { validatedToolHandler } = await import("./tools/structured-test-util");
-    const { McpAgent } = await import("./index");
+    const { McpAgent } = await import("./test-exports");
 
     const fetchMock = mock(async (url: string) => {
       if (url.includes("/fields_get")) return fieldsGetResponse(taskFieldsMeta);
