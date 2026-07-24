@@ -116,6 +116,24 @@ The limiter's job is spacing and single-flight, not fairness across users; if tw
 users share one Odoo instance they share its ~1 req/s budget, which matches
 Odoo's own per-instance limit.
 
+## Endpoints: one Worker, three tool surfaces
+
+The Worker serves three sibling MCP endpoints, each backed by its own
+`McpAgent` subclass (and Durable Object binding) registering a subset of the
+shared tool modules:
+
+- **`/mcp`** — `McpAgent`: the full surface (everything below). Kept intact so
+  existing connectors never break.
+- **`/accounting/mcp`** — `AccountingAgent`: bookkeeping + billing + safe-write
+  planner + feedback. No raw CRUD.
+- **`/projects/mcp`** — `ProjectsAgent`: projects + feedback. No raw CRUD.
+
+The domain endpoints exist for clients with small tool budgets (ChatGPT):
+fewer tools means a tighter decision space and less context spent on
+descriptions. Paths are siblings (not nested under `/mcp`) because routing —
+ours and `workers-oauth-provider`'s `apiHandlers` — matches by prefix. Auth is
+shared across all endpoints; see [`auth.md`](./auth.md).
+
 ## Tool-module structure
 
 Tools are grouped by **domain module**, registered on the `McpAgent`:

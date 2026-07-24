@@ -20,6 +20,44 @@ per-user config in `odoo-mcp`. The server is **stateless and configless**.
 This makes authorization Odoo's problem, which is exactly where the source of
 truth already lives.
 
+## The two auth paths at a glance
+
+```mermaid
+flowchart TB
+    claude["Claude clients<br/>(Claude Code, Desktop, web)"]
+    chatgpt["ChatGPT connector"]
+
+    subgraph worker["Cloudflare Worker — public MCP endpoints"]
+        header["BYO-key header path<br/>credentials on every request,<br/>nothing stored"]
+        oauth["OAuth token path<br/>bearer token resolves to<br/>encrypted grant in KV"]
+        props["Same Props object<br/>odooBaseUrl + odooDb + odooApiKey"]
+        agent["Endpoint agents (Durable Objects)<br/>/mcp — full surface<br/>/accounting/mcp — bookkeeping + billing<br/>/projects/mcp — projects"]
+    end
+
+    odoo["User's Odoo instance<br/>called as that user —<br/>Odoo permissions are the entire authz layer"]
+
+    claude -->|"Authorization: Bearer odoo-key<br/>X-Odoo-Url / X-Odoo-Db"| header
+    chatgpt -->|"Authorization: Bearer access-token"| oauth
+    header --> props
+    oauth --> props
+    props --> agent
+    agent -->|"POST /json/2/model/method"| odoo
+```
+
+Routing is per request: any `X-Odoo-*` header selects the BYO-key path; no
+headers means OAuth (see `src/index.ts`). Both paths build the identical `Props`
+shape, so the endpoint agents and every tool cannot tell them apart.
+
+The Worker serves three sibling MCP endpoints — `/mcp` (full tool surface),
+`/accounting/mcp`, and `/projects/mcp` (focused domain surfaces for clients with
+small tool budgets) — behind the **same** OAuth front door: one `/authorize`,
+one `/register`, one KV vault. Auth is identical everywhere; only the registered
+toolset differs. Tokens are not scoped to an endpoint (any grant works on any
+path), which is fine because every path resolves to the same user-supplied Odoo
+credentials and Odoo remains the authorization layer. The one per-endpoint cost:
+ChatGPT treats each path as a separate connector, so each connector runs its own
+authorize flow and stores its own grant.
+
 ## How the key reaches the server
 
 ### Hosted HTTP (the Cloudflare Worker)
@@ -110,6 +148,28 @@ How it works:
 Requests to `/mcp` that carry any `X-Odoo-*` header take the raw BYO-key path
 exactly as before; requests without them are treated as OAuth. Both paths
 coexist on the same endpoint.
+
+The one-time connect flow in full:
+
+```mermaid
+sequenceDiagram
+    participant G as ChatGPT
+    participant B as User's browser
+    participant W as Worker (OAuth shim)
+    participant O as User's Odoo
+    G->>W: /.well-known discovery, POST /register (DCR)
+    G->>B: open /authorize (code + PKCE)
+    B->>W: GET /authorize
+    W-->>B: hosted form (Odoo URL, db, API key)
+    B->>W: POST form
+    W->>O: res.users fields_get (validate credentials)
+    O-->>W: OK — on 401 the form re-renders, key never re-filled
+    W->>W: encrypt props into OAUTH_KV grant
+    W-->>B: redirect with authorization code
+    B-->>G: code returns to ChatGPT
+    G->>W: POST /token (code exchange)
+    W-->>G: access token (1 h) + refresh token (30 d)
+```
 
 ### Stored-credential security
 
