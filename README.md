@@ -298,6 +298,10 @@ ChatGPT's connector UI can't set custom headers, so the Worker ships an OAuth 2.
 4. Back in ChatGPT, the connector shows the tool list; try a read tool (e.g. ask it to
    search `project.task`).
 
+After any tool-surface change (`SERVER_VERSION` bump), ChatGPT keeps serving its cached
+tool list — open the connector's settings and refresh it so the new/removed tools appear;
+new connectors are unaffected.
+
 Your credentials are stored end-to-end encrypted in Workers KV and resolved per request —
 tools behave exactly as on the header path, limited by your own Odoo permissions. Token
 lifetime is 1 h (refresh 30 days). Revocation: delete the `grant:*` key via

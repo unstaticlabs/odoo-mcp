@@ -134,6 +134,21 @@ descriptions. Paths are siblings (not nested under `/mcp`) because routing —
 ours and `workers-oauth-provider`'s `apiHandlers` — matches by prefix. Auth is
 shared across all endpoints; see [`auth.md`](./auth.md).
 
+**Adding a new endpoint** (e.g. `/booking/mcp`):
+
+1. Subclass `OdooAgentBase` in `src/server.ts` with its own `McpServer` name
+   (`odoo-mcp-booking`) and an `init()` registering only that domain's modules;
+   add the class to the `Env` interface and export it from `src/index.ts`.
+2. Add one row to `MCP_ENDPOINTS` in `src/index.ts` — that wires the 405 guard,
+   the header path, and the OAuth `apiHandlers` in one place.
+3. Add the Durable Object binding + a new migration tag in `wrangler.jsonc`.
+4. Extend the "endpoint tool surfaces" tests in `src/index.test.ts` (routing +
+   composition) and bump `SERVER_VERSION`.
+5. Merging to `main` deploys (GitHub Actions); then add the connector in each
+   client. Keep the path a sibling ending in `/mcp`, and keep constants out of
+   `src/index.ts` — the runtime rejects non-handler entry-module exports (put
+   test-support exports in `src/test-exports.ts`).
+
 ## Tool-module structure
 
 Tools are grouped by **domain module**, registered on the `McpAgent`:
