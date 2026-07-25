@@ -170,7 +170,12 @@ not exist on a given Odoo version degrade into `warnings[]` rather than aborting
 Review key balance-sheet accounts (e.g. suspense `471000`, internal transfers `580000`,
 compte courant d'associé `455100`, VAT credit `445670`) and flag closure blockers. Returns
 per-account balance, open-item count, top open lines, and a **factual** severity heuristic
-(`attention` / `ok` / `info`). Unknown codes surface in `warnings[]`.
+(`attention` / `ok` / `info` / `unknown`). Unknown codes surface in `warnings[]`.
+
+`balance` / `debit` / `credit` are nullable: when the balances `read_group` fails they are
+`null` and `severity` is `"unknown"` (plus a balances-unavailable warning). A successful
+query with no grouped rows still defaults missing accounts to `0` and runs `computeSeverity`
+(empty aggregate → `"ok"`). Do not treat `null` as zero.
 
 | Field | Type | Required | Default |
 |---|---|---|---|
@@ -202,8 +207,9 @@ per-account balance, open-item count, top open lines, and a **factual** severity
 ```
 
 > Severity is factual only: a suspense/clearing account carrying any balance or open item
-> is `attention`; a fully-empty account is `ok`; anything else is `info`. The tool never
-> judges whether a line *should* be reconciled.
+> is `attention`; a fully-empty account is `ok`; anything else is `info`; balances (or
+> open-lines needed for a clean `ok`) that could not be fetched yield `unknown`. The tool
+> never judges whether a line *should* be reconciled.
 
 ### 4.3 `bookkeeping.explain_report_line`
 
