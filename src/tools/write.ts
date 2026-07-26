@@ -1,11 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import {
-  getReversibleLifecycleRule,
-  isCompatibleLifecycleState,
-  isCompatibleMoveType,
-  isReversibleLifecycleMethod
-} from "../lifecycle-allowlist";
+import { isReversibleLifecycleMethod } from "../lifecycle-allowlist";
+import { preflightLifecycleCall } from "../lifecycle-gate";
 import type { OdooQueue } from "../odoo-queue";
 import type { Props } from "../server";
 import { assessWriteOperation, isMutatingOdooMethod } from "../write-safety";
@@ -32,154 +28,6 @@ function gateWrite(model: string, method: string, args: Record<string, unknown>)
   if (!verdict.allowed) {
     return mcpWriteBlockedError({ model, method }, verdict);
   }
-  return null;
-}
-
-function positiveIdsFromBody(ids: unknown): number[] {
-  if (!Array.isArray(ids)) return [];
-  return ids.filter((id): id is number => typeof id === "number" && Number.isInteger(id) && id > 0);
-}
-
-/**
- * Stateful preflight for allowlisted reversible lifecycle on call_model_method.
- * Requires write context; pre-reads state (+ move_type for account.move); never forwards context to Odoo.
- */
-async function gateLifecycleCall(opts: {
-  model: string;
-  method: string;
-  body: Record<string, unknown>;
-  context: string | undefined;
-  queue: OdooQueue;
-  getProps: () => Props | undefined;
-}) {
-  const { model, method, body, context, queue, getProps } = opts;
-  const rule = getReversibleLifecycleRule(model, method);
-  if (!rule) return null;
-
-  if (!context || !context.trim()) {
-    return mcpWriteBlockedError(
-      { model, method },
-      {
-        intent: "financial_mutation",
-        reason:
-          `Allowlisted reversible lifecycle method "${method}" on ${model} requires a non-empty write context (audit-only).`,
-        policy_rule: "lifecycle_context_required",
-        risk_class: "reversible_lifecycle",
-        next_step: "Retry call_model_method with a short write context describing why this lifecycle action is being taken.",
-        recoverable: true
-      }
-    );
-  }
-
-  const ids = positiveIdsFromBody(body.ids);
-  if (ids.length === 0) {
-    return mcpWriteBlockedError(
-      { model, method },
-      {
-        intent: "financial_mutation",
-        reason: `Allowlisted lifecycle method "${method}" on ${model} requires at least one positive record id in ids.`,
-        policy_rule: "lifecycle_ids_invalid",
-        risk_class: "reversible_lifecycle",
-        next_step: "Pass ids: [<positive int>, ...] for the target record(s).",
-        recoverable: true
-      }
-    );
-  }
-
-  const fields = rule.require_move_types?.length ? ["id", "state", "move_type"] : ["id", "state"];
-  let rows: unknown;
-  try {
-    rows = await queue.enqueue(requireConnection(getProps()), model, "read", { ids, fields });
-  } catch (err) {
-    return mcpErrorFromException(err, { model, method: "read" });
-  }
-
-  if (!Array.isArray(rows)) {
-    return mcpWriteBlockedError(
-      { model, method },
-      {
-        intent: "financial_mutation",
-        reason: `Pre-read for ${model} lifecycle gate returned a non-array result.`,
-        policy_rule: "lifecycle_ids_invalid",
-        risk_class: "reversible_lifecycle",
-        next_step: "Verify the record ids exist, then retry.",
-        recoverable: true
-      }
-    );
-  }
-
-  const byId = new Map<number, Record<string, unknown>>();
-  for (const row of rows) {
-    if (!row || typeof row !== "object" || Array.isArray(row)) continue;
-    const rec = row as Record<string, unknown>;
-    const id = typeof rec.id === "number" && Number.isInteger(rec.id) ? rec.id : null;
-    if (id == null || id <= 0) continue;
-    byId.set(id, rec);
-  }
-
-  const missing = ids.filter((id) => !byId.has(id));
-  if (missing.length > 0) {
-    return mcpWriteBlockedError(
-      { model, method },
-      {
-        intent: "financial_mutation",
-        reason:
-          `Lifecycle pre-read did not return every requested id for ${model}. Missing: ${missing.join(", ")}. ` +
-          `Refusing to mutate unvalidated ids.`,
-        policy_rule: "lifecycle_ids_invalid",
-        risk_class: "reversible_lifecycle",
-        next_step: "Verify all record ids exist and are readable, then retry with the full ids list.",
-        recoverable: true
-      }
-    );
-  }
-
-  for (const id of ids) {
-    const rec = byId.get(id)!;
-    const state = typeof rec.state === "string" ? rec.state : null;
-    if (!isCompatibleLifecycleState(rule, state)) {
-      const draftHint =
-        model === "hr.expense" && state === "draft"
-          ? " Record is already draft — use billing.update_draft_expense for preparatory fields."
-          : model === "account.move" && state === "draft"
-            ? " Record is already draft — use billing.configure_draft_vendor_bill for preparatory fields."
-            : "";
-      return mcpWriteBlockedError(
-        { model, method },
-        {
-          intent: "financial_mutation",
-          reason:
-            `${model} id ${id} is in state "${state ?? "unknown"}"; "${method}" requires one of: ${rule.from_states.join(", ")}.${draftHint}`,
-          policy_rule: "lifecycle_state_incompatible",
-          risk_class: "reversible_lifecycle",
-          next_step:
-            rule.next_step_hint ??
-            `Bring the record to a compatible state (${rule.from_states.join(", ")}) or use billing.* / Odoo UI.`,
-          recoverable: true
-        }
-      );
-    }
-
-    if (rule.require_move_types?.length) {
-      const moveType = typeof rec.move_type === "string" ? rec.move_type : null;
-      if (!isCompatibleMoveType(rule, moveType)) {
-        return mcpWriteBlockedError(
-          { model, method },
-          {
-            intent: "financial_mutation",
-            reason:
-              `${model} id ${id} has move_type "${moveType ?? "unknown"}"; "${method}" is only allowlisted for vendor bills (${rule.require_move_types.join(", ")}).`,
-            policy_rule: "lifecycle_move_type_incompatible",
-            risk_class: "reversible_lifecycle",
-            next_step:
-              "Use button_draft only on vendor bills (in_invoice / in_refund). Other move types: use the Odoo UI / a human.",
-            recoverable: true
-          }
-        );
-      }
-    }
-  }
-
   return null;
 }
 
@@ -519,19 +367,12 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
           return blocked;
         }
 
-        // Stateful preflight for allowlisted reversible lifecycle (context + state + move_type).
+        // Stateful preflight for allowlisted reversible lifecycle (context + ids + state + guards).
         if (isMutatingOdooMethod(method) && isReversibleLifecycleMethod(model, method)) {
-          const lifecycleBlocked = await gateLifecycleCall({
-            model,
-            method,
-            body,
-            context,
-            queue,
-            getProps
-          });
-          if (lifecycleBlocked) {
+          const preflight = await preflightLifecycleCall({ model, method, ids, context, queue, getProps });
+          if (!preflight.ok) {
             logWriteContext("call_model_method", model, context);
-            return lifecycleBlocked;
+            return preflight.response;
           }
         }
 

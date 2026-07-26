@@ -408,18 +408,31 @@ export function mcpWriteBlockedError(
  * Audit-only: logged server-side via {@link logWriteContext}, never forwarded to Odoo and never
  * consulted by the write-safety gate (which classifies by model/method/field structure only).
  */
+const WRITE_CONTEXT_DESCRIPTION =
+  "Why this write is happening — one short sentence of intent distilled from the conversation " +
+  "(e.g. 'user asked to move task 42 to Review'). Audit-logged server-side; never sent to Odoo; " +
+  "never a keyword authz bypass (the write-safety gate still classifies by model/method/fields). " +
+  "Do not include credentials, API keys, or sensitive personal data.";
+
 export const zWriteContext = z
   .string()
   .min(1)
   .max(500)
   .optional()
   .describe(
-    "Why this write is happening — one short sentence of intent distilled from the conversation " +
-      "(e.g. 'user asked to move task 42 to Review'). Audit-logged server-side; never sent to Odoo; " +
-      "never a keyword authz bypass (the write-safety gate still classifies by model/method/fields). " +
-      "Optional on most write tools; **required** (non-empty) for allowlisted reversible lifecycle via " +
-      "call_model_method. Do not include credentials, API keys, or sensitive personal data."
+    `${WRITE_CONTEXT_DESCRIPTION} Optional on most write tools; **required** (non-empty) for ` +
+      "allowlisted reversible lifecycle calls."
   );
+
+/**
+ * Same audit-only context, mandatory. Used by the dedicated lifecycle tools, where a state
+ * transition is never taken without a recorded reason.
+ */
+export const zRequiredWriteContext = z
+  .string()
+  .min(1)
+  .max(500)
+  .describe(`${WRITE_CONTEXT_DESCRIPTION} Required for lifecycle transitions.`);
 
 /** Emit an audit log line for a contextualized write. No-op when the caller omitted context. */
 export function logWriteContext(tool: string, model: string, context: string | undefined): void {
