@@ -60,7 +60,7 @@ export type {
   CompactFieldResolution,
   CompactFieldsBlock
 } from "./tools/shared";
-export { parseButtonsFromArch, mergeModelActions } from "./tools/read";
+export { parseButtonsFromArch, mergeModelActions, annotateModelActions } from "./tools/read";
 export { CURATED_MODEL_ACTIONS } from "./tools/actions-map";
 export { normalizeRecord, normalizeRecords, deriveWorkflowStatus } from "./normalizer";
 export type { OdooFieldMeta, FieldsMeta, NormalizeOptions } from "./normalizer";

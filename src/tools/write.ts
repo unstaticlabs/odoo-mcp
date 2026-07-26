@@ -1,5 +1,11 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import {
+  getReversibleLifecycleRule,
+  isCompatibleLifecycleState,
+  isCompatibleMoveType,
+  isReversibleLifecycleMethod
+} from "../lifecycle-allowlist";
 import type { OdooQueue } from "../odoo-queue";
 import type { Props } from "../server";
 import { assessWriteOperation, isMutatingOdooMethod } from "../write-safety";
@@ -17,6 +23,7 @@ import {
 const PM_WRITE_ROUTING_NOTE =
   " Project-management notes (including banking/B2C/deadline operational text) on project.task / project.project / mail.activity→project.* are allowed. " +
   "For draft vendor-bill / expense prep use billing.update_draft_expense / billing.configure_draft_vendor_bill. " +
+  "For reversible expense/bill lifecycle (reset→edit→resubmit/reapprove) use call_model_method on allowlisted methods with required write context (see list_model_actions executable:true). " +
   "For tax-close / report / return / lock-exception mutations use bookkeeping.plan_safe_write.";
 
 function gateWrite(model: string, method: string, args: Record<string, unknown>) {
@@ -25,6 +32,154 @@ function gateWrite(model: string, method: string, args: Record<string, unknown>)
   if (!verdict.allowed) {
     return mcpWriteBlockedError({ model, method }, verdict);
   }
+  return null;
+}
+
+function positiveIdsFromBody(ids: unknown): number[] {
+  if (!Array.isArray(ids)) return [];
+  return ids.filter((id): id is number => typeof id === "number" && Number.isInteger(id) && id > 0);
+}
+
+/**
+ * Stateful preflight for allowlisted reversible lifecycle on call_model_method.
+ * Requires write context; pre-reads state (+ move_type for account.move); never forwards context to Odoo.
+ */
+async function gateLifecycleCall(opts: {
+  model: string;
+  method: string;
+  body: Record<string, unknown>;
+  context: string | undefined;
+  queue: OdooQueue;
+  getProps: () => Props | undefined;
+}) {
+  const { model, method, body, context, queue, getProps } = opts;
+  const rule = getReversibleLifecycleRule(model, method);
+  if (!rule) return null;
+
+  if (!context || !context.trim()) {
+    return mcpWriteBlockedError(
+      { model, method },
+      {
+        intent: "financial_mutation",
+        reason:
+          `Allowlisted reversible lifecycle method "${method}" on ${model} requires a non-empty write context (audit-only).`,
+        policy_rule: "lifecycle_context_required",
+        risk_class: "reversible_lifecycle",
+        next_step: "Retry call_model_method with a short write context describing why this lifecycle action is being taken.",
+        recoverable: true
+      }
+    );
+  }
+
+  const ids = positiveIdsFromBody(body.ids);
+  if (ids.length === 0) {
+    return mcpWriteBlockedError(
+      { model, method },
+      {
+        intent: "financial_mutation",
+        reason: `Allowlisted lifecycle method "${method}" on ${model} requires at least one positive record id in ids.`,
+        policy_rule: "lifecycle_ids_invalid",
+        risk_class: "reversible_lifecycle",
+        next_step: "Pass ids: [<positive int>, ...] for the target record(s).",
+        recoverable: true
+      }
+    );
+  }
+
+  const fields = rule.require_move_types?.length ? ["id", "state", "move_type"] : ["id", "state"];
+  let rows: unknown;
+  try {
+    rows = await queue.enqueue(requireConnection(getProps()), model, "read", { ids, fields });
+  } catch (err) {
+    return mcpErrorFromException(err, { model, method: "read" });
+  }
+
+  if (!Array.isArray(rows)) {
+    return mcpWriteBlockedError(
+      { model, method },
+      {
+        intent: "financial_mutation",
+        reason: `Pre-read for ${model} lifecycle gate returned a non-array result.`,
+        policy_rule: "lifecycle_ids_invalid",
+        risk_class: "reversible_lifecycle",
+        next_step: "Verify the record ids exist, then retry.",
+        recoverable: true
+      }
+    );
+  }
+
+  const byId = new Map<number, Record<string, unknown>>();
+  for (const row of rows) {
+    if (!row || typeof row !== "object" || Array.isArray(row)) continue;
+    const rec = row as Record<string, unknown>;
+    const id = typeof rec.id === "number" && Number.isInteger(rec.id) ? rec.id : null;
+    if (id == null || id <= 0) continue;
+    byId.set(id, rec);
+  }
+
+  const missing = ids.filter((id) => !byId.has(id));
+  if (missing.length > 0) {
+    return mcpWriteBlockedError(
+      { model, method },
+      {
+        intent: "financial_mutation",
+        reason:
+          `Lifecycle pre-read did not return every requested id for ${model}. Missing: ${missing.join(", ")}. ` +
+          `Refusing to mutate unvalidated ids.`,
+        policy_rule: "lifecycle_ids_invalid",
+        risk_class: "reversible_lifecycle",
+        next_step: "Verify all record ids exist and are readable, then retry with the full ids list.",
+        recoverable: true
+      }
+    );
+  }
+
+  for (const id of ids) {
+    const rec = byId.get(id)!;
+    const state = typeof rec.state === "string" ? rec.state : null;
+    if (!isCompatibleLifecycleState(rule, state)) {
+      const draftHint =
+        model === "hr.expense" && state === "draft"
+          ? " Record is already draft — use billing.update_draft_expense for preparatory fields."
+          : model === "account.move" && state === "draft"
+            ? " Record is already draft — use billing.configure_draft_vendor_bill for preparatory fields."
+            : "";
+      return mcpWriteBlockedError(
+        { model, method },
+        {
+          intent: "financial_mutation",
+          reason:
+            `${model} id ${id} is in state "${state ?? "unknown"}"; "${method}" requires one of: ${rule.from_states.join(", ")}.${draftHint}`,
+          policy_rule: "lifecycle_state_incompatible",
+          risk_class: "reversible_lifecycle",
+          next_step:
+            rule.next_step_hint ??
+            `Bring the record to a compatible state (${rule.from_states.join(", ")}) or use billing.* / Odoo UI.`,
+          recoverable: true
+        }
+      );
+    }
+
+    if (rule.require_move_types?.length) {
+      const moveType = typeof rec.move_type === "string" ? rec.move_type : null;
+      if (!isCompatibleMoveType(rule, moveType)) {
+        return mcpWriteBlockedError(
+          { model, method },
+          {
+            intent: "financial_mutation",
+            reason:
+              `${model} id ${id} has move_type "${moveType ?? "unknown"}"; "${method}" is only allowlisted for vendor bills (${rule.require_move_types.join(", ")}).`,
+            policy_rule: "lifecycle_move_type_incompatible",
+            risk_class: "reversible_lifecycle",
+            next_step:
+              "Use button_draft only on vendor bills (in_invoice / in_refund). Other move types: use the Odoo UI / a human.",
+            recoverable: true
+          }
+        );
+      }
+    }
+  }
+
   return null;
 }
 
@@ -328,7 +483,8 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
     {
       title: "Call Model Method (advanced)",
       description:
-        "Escape hatch: call an arbitrary Odoo model method. Odoo's JSON-2 API has NO positional args — every body key is bound as a named kwarg (record-bound methods take a top-level `ids`). Pass record ids via `ids` and all other parameters via `kwargs`." +
+        "Escape hatch: call an arbitrary Odoo model method. Odoo's JSON-2 API has NO positional args — every body key is bound as a named kwarg (record-bound methods take a top-level `ids`). Pass record ids via `ids` and all other parameters via `kwargs`. " +
+        "On sensitive models (account.* / hr.*), only allowlisted reversible lifecycle methods are executable (see list_model_actions executable:true); they require write context and a compatible record state. High-risk methods (post/pay/reconcile) stay blocked." +
         PM_WRITE_ROUTING_NOTE,
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
       inputSchema: {
@@ -345,18 +501,41 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
       }
     },
     async ({ model, method, ids, kwargs, args, context }) => {
-      logWriteContext("call_model_method", model, context);
       if (!model || !model.trim()) return mcpError("model must be a non-empty string");
       if (!method || !method.trim()) return mcpError("method must be a non-empty string");
-      if (args.length > 0) {
+      const positionalArgs = args ?? [];
+      const namedKwargs = kwargs ?? {};
+      if (positionalArgs.length > 0) {
         return mcpError(
           "Odoo JSON-2 has no positional args: every body key is bound as a named kwarg, so an 'args' key fails with 422 unless the method literally has an 'args' parameter. Move these values into 'kwargs' (and record ids into 'ids')."
         );
       }
       try {
-        const body = { ...kwargs, ...(ids !== undefined ? { ids } : {}) };
+        const body = { ...namedKwargs, ...(ids !== undefined ? { ids } : {}) };
+        // Pure classifier first — CRUD / high-risk stay denied; allowlisted lifecycle passes.
         const blocked = gateWrite(model, method, body);
-        if (blocked) return blocked;
+        if (blocked) {
+          logWriteContext("call_model_method", model, context);
+          return blocked;
+        }
+
+        // Stateful preflight for allowlisted reversible lifecycle (context + state + move_type).
+        if (isMutatingOdooMethod(method) && isReversibleLifecycleMethod(model, method)) {
+          const lifecycleBlocked = await gateLifecycleCall({
+            model,
+            method,
+            body,
+            context,
+            queue,
+            getProps
+          });
+          if (lifecycleBlocked) {
+            logWriteContext("call_model_method", model, context);
+            return lifecycleBlocked;
+          }
+        }
+
+        logWriteContext("call_model_method", model, context);
         const result = await queue.enqueue(requireConnection(getProps()), model, method, body);
         return mcpStructured({ result }, JSON.stringify(result, null, 2));
       } catch (err) {

@@ -146,6 +146,32 @@ describe("assessWriteOperation — financial mutations are blocked", () => {
     });
     expect(verdict.allowed).toBe(false);
     expect(verdict.intent).toBe("financial_mutation");
+    expect(verdict.policy_rule).toBe("sensitive_model_crud");
+  });
+
+  test("hr.expense action_reset is allowed at classifier (state checked later)", () => {
+    const verdict = assessWriteOperation({
+      model: "hr.expense",
+      method: "action_reset",
+      args: { ids: [394] }
+    });
+    expect(verdict.allowed).toBe(true);
+    expect(verdict.intent).toBe("financial_mutation");
+    expect(verdict.policy_rule).toBe("lifecycle_allowlist");
+    expect(verdict.risk_class).toBe("reversible_lifecycle");
+  });
+
+  test("account.move action_post is blocked as high_risk_method with human/UI next_step", () => {
+    const verdict = assessWriteOperation({
+      model: "account.move",
+      method: "action_post",
+      args: { ids: [1] }
+    });
+    expect(verdict.allowed).toBe(false);
+    expect(verdict.policy_rule).toBe("high_risk_method");
+    expect(verdict.risk_class).toBe("irreversible_posting");
+    expect(verdict.next_step).toMatch(/Odoo UI/i);
+    expect(verdict.next_step).not.toMatch(/Use bookkeeping\.plan_safe_write for validated accounting writes/);
   });
 });
 

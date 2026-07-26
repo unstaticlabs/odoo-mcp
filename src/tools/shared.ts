@@ -368,12 +368,24 @@ export type WriteBlockedErrorEnvelope = ErrorEnvelope & {
   error: "write_blocked";
   intent: WriteBlockedIntent;
   blocked_fields?: string[];
+  policy_rule?: string;
+  risk_class?: string;
+  next_step?: string;
 };
 
 /** Connector safety rejection — returned before any Odoo call when a write fails the allowlist. */
 export function mcpWriteBlockedError(
   context: { model: string; method: string },
-  verdict: { intent: WriteBlockedIntent; reason?: string; blocked_fields?: string[] }
+  verdict: {
+    intent: WriteBlockedIntent;
+    reason?: string;
+    blocked_fields?: string[];
+    policy_rule?: string;
+    risk_class?: string;
+    next_step?: string;
+    /** When true, the agent can retry after fixing inputs (e.g. missing write context). */
+    recoverable?: boolean;
+  }
 ) {
   const envelope: WriteBlockedErrorEnvelope = {
     error: "write_blocked",
@@ -382,8 +394,11 @@ export function mcpWriteBlockedError(
     method: context.method,
     http_status: null,
     details: verdict.reason ?? "Write blocked by connector safety layer.",
-    recoverable: false,
-    ...(verdict.blocked_fields?.length ? { blocked_fields: verdict.blocked_fields } : {})
+    recoverable: verdict.recoverable ?? false,
+    ...(verdict.blocked_fields?.length ? { blocked_fields: verdict.blocked_fields } : {}),
+    ...(verdict.policy_rule ? { policy_rule: verdict.policy_rule } : {}),
+    ...(verdict.risk_class ? { risk_class: verdict.risk_class } : {}),
+    ...(verdict.next_step ? { next_step: verdict.next_step } : {})
   };
   return { content: [{ type: "text" as const, text: JSON.stringify(envelope) }], isError: true as const };
 }
@@ -400,8 +415,10 @@ export const zWriteContext = z
   .optional()
   .describe(
     "Why this write is happening — one short sentence of intent distilled from the conversation " +
-      "(e.g. 'user asked to move task 42 to Review'). Audit-logged server-side; never sent to Odoo. " +
-      "Do not include credentials, API keys, or sensitive personal data."
+      "(e.g. 'user asked to move task 42 to Review'). Audit-logged server-side; never sent to Odoo; " +
+      "never a keyword authz bypass (the write-safety gate still classifies by model/method/fields). " +
+      "Optional on most write tools; **required** (non-empty) for allowlisted reversible lifecycle via " +
+      "call_model_method. Do not include credentials, API keys, or sensitive personal data."
   );
 
 /** Emit an audit log line for a contextualized write. No-op when the caller omitted context. */

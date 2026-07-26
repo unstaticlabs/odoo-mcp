@@ -90,6 +90,7 @@ describe("classifyPmWriteIntent — structural deny paths", () => {
     expect(result.intent).toBe("financial_mutation");
     expect(result.reason).toContain("billing.");
     expect(result.reason).toContain("bookkeeping.plan_safe_write");
+    expect(result.policy_rule).toBe("sensitive_model_crud");
   });
 
   test("hr.expense write is financial_mutation with billing guidance", () => {
@@ -101,6 +102,7 @@ describe("classifyPmWriteIntent — structural deny paths", () => {
     expect(result.verdict).toBe("denied");
     expect(result.intent).toBe("financial_mutation");
     expect(result.reason).toContain("billing.update_draft_expense");
+    expect(result.policy_rule).toBe("sensitive_model_crud");
   });
 
   test("hr.employee write is financial_mutation (any hr.* prefix)", () => {
@@ -206,6 +208,54 @@ describe("classifyPmWriteIntent — structural deny paths", () => {
     expect(result.intent).toBe("disallowed");
     expect(result.blocked_fields).toContain("x_custom_priority_flag");
     expect(result.reason).toContain("non-PM");
+  });
+});
+
+describe("classifyPmWriteIntent — reversible lifecycle allowlist", () => {
+  test("hr.expense action_reset is allowed as financial_mutation lifecycle", () => {
+    const result = classifyPmWriteIntent({
+      model: "hr.expense",
+      method: "action_reset",
+      args: { ids: [394] }
+    });
+    expect(result.verdict).toBe("allowed");
+    expect(result.intent).toBe("financial_mutation");
+    expect(result.policy_rule).toBe("lifecycle_allowlist");
+    expect(result.risk_class).toBe("reversible_lifecycle");
+  });
+
+  test("account.move action_post stays high-risk denied", () => {
+    const result = classifyPmWriteIntent({
+      model: "account.move",
+      method: "action_post",
+      args: { ids: [1] }
+    });
+    expect(result.verdict).toBe("denied");
+    expect(result.policy_rule).toBe("high_risk_method");
+    expect(result.risk_class).toBe("irreversible_posting");
+    expect(result.next_step).toBeTruthy();
+  });
+
+  test("hr.expense write CRUD stays denied with sensitive_model_crud", () => {
+    const result = classifyPmWriteIntent({
+      model: "hr.expense",
+      method: "write",
+      args: { ids: [394], vals: { date: "2026-07-04" } }
+    });
+    expect(result.verdict).toBe("denied");
+    expect(result.policy_rule).toBe("sensitive_model_crud");
+    expect(result.next_step).toContain("billing.update_draft_expense");
+  });
+
+  test("unknown sensitive method is denied with allowlist hint", () => {
+    const result = classifyPmWriteIntent({
+      model: "hr.expense",
+      method: "action_something_custom",
+      args: { ids: [1] }
+    });
+    expect(result.verdict).toBe("denied");
+    expect(result.policy_rule).toBe("sensitive_model_method_denied");
+    expect(result.reason).toContain("action_reset");
   });
 });
 
