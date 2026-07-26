@@ -583,6 +583,7 @@ describe("endpoint tool surfaces", () => {
 
     expect(names.has("bookkeeping.get_snapshot")).toBe(true);
     expect(names.has("bookkeeping.plan_safe_write")).toBe(true);
+    expect(names.has("billing.audit_expenses")).toBe(true);
     expect(names.has("billing.configure_draft_vendor_bill")).toBe(true);
     expect(names.has("feedback.submit")).toBe(true);
     // Purity: no raw CRUD, no other domains — the point of the split.
@@ -2661,6 +2662,9 @@ describe("tool metadata (title/annotations)", () => {
     for (const name of writeToolNames) {
       expect(agent.server._registeredTools[name].annotations.readOnlyHint).not.toBe(true);
     }
+
+    expect(agent.server._registeredTools["billing.audit_expenses"].annotations.readOnlyHint).toBe(true);
+    expect(writeToolNames).not.toContain("billing.audit_expenses");
 
     for (const name of [
       "projects.list_projects",

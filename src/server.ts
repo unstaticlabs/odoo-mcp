@@ -4,7 +4,7 @@ import type { OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 import { callOdoo } from "./odoo";
 import { OdooQueue } from "./odoo-queue";
 import { TtlCache } from "./cache";
-import { registerBillingWriteTools } from "./tools/billing";
+import { registerBillingReadTools, registerBillingWriteTools } from "./tools/billing";
 import { registerFeedbackTools } from "./tools/feedback";
 import {
   registerBookkeepingTools,
@@ -39,7 +39,7 @@ export interface Props extends Record<string, unknown> {
 
 // Bump this on every future tool-surface change: it's the cache-busting key clients use to
 // refetch the tool list (also stamped into feedback.submit cards to identify the surface seen).
-export const SERVER_VERSION = "0.10.0";
+export const SERVER_VERSION = "0.11.0";
 
 /**
  * Shared plumbing for every endpoint-specific agent. Subclasses differ only in
@@ -62,6 +62,7 @@ export class McpAgent extends OdooAgentBase {
     registerReadTools(this.server, getProps, this.odooQueue, this.cache);
     registerResourceTemplates(this.server, getProps, this.odooQueue);
     registerWriteTools(this.server, getProps, this.odooQueue);
+    registerBillingReadTools(this.server, getProps, this.odooQueue);
     registerBillingWriteTools(this.server, getProps, this.odooQueue);
     registerFeedbackTools(this.server, getProps, this.odooQueue, this.cache);
     registerBookkeepingTools(this.server, getProps, this.odooQueue, this.cache);
@@ -83,6 +84,7 @@ export class AccountingAgent extends OdooAgentBase {
 
   async init() {
     const getProps = () => this.props;
+    registerBillingReadTools(this.server, getProps, this.odooQueue);
     registerBillingWriteTools(this.server, getProps, this.odooQueue);
     registerFeedbackTools(this.server, getProps, this.odooQueue, this.cache);
     registerBookkeepingTools(this.server, getProps, this.odooQueue, this.cache);

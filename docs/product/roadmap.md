@@ -50,7 +50,9 @@ Odoo, and a read-only Odoo key is correctly refused the write by Odoo itself.
 - **First write slice (shipped):** draft expense + draft vendor-bill (`in_invoice`)
   pre-configuration via `billing.update_draft_expense` /
   `billing.configure_draft_vendor_bill` (draft-only allowlists; no validate/post).
-- `billing.*` **read** tools still future (list/get invoices).
+- **First read slice (shipped):** expense population audit via `billing.audit_expenses`
+  (normalized rows + attachments + in-page duplicate candidates + totals; no writes).
+- Invoice list/get `billing.*` **reads** still future.
 - Later `billing.*` **write**: create invoice, link records (e.g. invoice ↔ task/
   project/booking).
 - Same infra; billing is just more Odoo models behind the same gateway.
