@@ -3,6 +3,8 @@ import { z } from "zod";
 import { deriveWorkflowStatus } from "../normalizer";
 import type { OdooQueue } from "../odoo-queue";
 import type { Props } from "../server";
+import { getReversibleLifecycleRule } from "../lifecycle-allowlist";
+import { runLifecycleAction } from "../lifecycle-gate";
 import {
   logWriteContext,
   mcpError,
@@ -10,6 +12,7 @@ import {
   mcpStructured,
   mcpWriteBlockedError,
   requireConnection,
+  zRequiredWriteContext,
   zWarnings,
   zWriteContext,
   type WriteBlockedIntent
@@ -841,4 +844,95 @@ export function registerBillingWriteTools(
       }
     }
   );
+}
+
+// ---- Expense lifecycle (dedicated tools over the shared lifecycle gate) ----
+
+/**
+ * The reversible expense transitions, exposed as named tools so the accounting-only surface
+ * (`/accounting/mcp`) can drive reset -> edit -> submit -> approve without shipping the generic
+ * `call_model_method` escape hatch. Policy, state checks and audit all come from the shared gate —
+ * these are thin, self-describing front doors onto the same rules.
+ */
+const EXPENSE_LIFECYCLE_TOOLS = [
+  {
+    name: "billing.reset_expense",
+    title: "Reset Expense To Draft",
+    method: "action_reset",
+    summary: "Reset submitted/approved/refused expenses back to draft so preparatory fields can be corrected.",
+    follow_up: "Then use billing.update_draft_expense to fix fields, and billing.submit_expense to send them back."
+  },
+  {
+    name: "billing.submit_expense",
+    title: "Submit Expense",
+    method: "action_submit",
+    summary: "Submit draft expenses for approval.",
+    follow_up: "Then use billing.approve_expense if you hold approval rights in Odoo."
+  },
+  {
+    name: "billing.approve_expense",
+    title: "Approve Expense",
+    method: "action_approve",
+    summary: "Approve submitted expenses.",
+    follow_up: "Posting the journal entry and paying stay human-only — do those in the Odoo UI."
+  }
+] as const;
+
+const zLifecycleRecord = z.object({
+  id: z.number().int(),
+  state_before: z.string().nullable().describe("Live state read during the preflight, before the transition"),
+  state_after: z.string().nullable().describe("State re-read after the transition; null when the follow-up read failed")
+});
+
+export function registerExpenseLifecycleTools(
+  server: McpServer,
+  getProps: () => Props | undefined,
+  queue: OdooQueue
+) {
+  const model = "hr.expense";
+
+  for (const spec of EXPENSE_LIFECYCLE_TOOLS) {
+    const rule = getReversibleLifecycleRule(model, spec.method);
+    // A tool without a backing allowlist rule would be refused by the gate on every call.
+    if (!rule) throw new Error(`${spec.name}: no lifecycle rule for ${model}.${spec.method}`);
+
+    server.registerTool(
+      spec.name,
+      {
+        title: spec.title,
+        description:
+          `Write: ${spec.summary} Requires state in (${rule.from_states.join(", ")}) on every requested record; ` +
+          `the whole call is refused if any record is in another state, is missing, or Odoo withholds the action. ` +
+          `${spec.follow_up} Never posts, pays, reconciles or deletes.`,
+        annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+        inputSchema: {
+          record_ids: z
+            .array(z.number().int().positive())
+            .min(1)
+            .max(50)
+            .describe("hr.expense ids to transition; all-or-nothing, validated against live state first"),
+          context: zRequiredWriteContext
+        },
+        outputSchema: {
+          ok: z.boolean(),
+          model: z.string(),
+          method: z.string(),
+          records: z.array(zLifecycleRecord)
+        }
+      },
+      async ({ record_ids, context }) => {
+        logWriteContext(spec.name, model, context);
+        const outcome = await runLifecycleAction({
+          model,
+          method: spec.method,
+          ids: record_ids,
+          context,
+          queue,
+          getProps
+        });
+        if (!outcome.ok) return outcome.response;
+        return mcpStructured({ ok: true, model, method: spec.method, records: outcome.records });
+      }
+    );
+  }
 }

@@ -71,7 +71,10 @@ The server never logs, stores, or echoes your key.
 | `bookkeeping.preview_returns` | read | `company` (positive int), `from`/`to` (string), `return_type_xmlids` (string[] min 1) — which `account.return` cards should exist; blank periodicity → `configuration_issues` |
 | `bookkeeping.plan_safe_write` | validate-only | `operation` (enum: `create_or_update_report_external_value`, `create_manual_tax_return`, `update_return_type_periodicity`, `create_lock_exception`), `company` (string), `values` (object) — dry-run write plan + HMAC confirmation token; never writes |
 | `billing.audit_expenses` | read | `state` / `product_id` / `analytic_account_id` (optional; analytic post-filters `analytic_distribution` keys), `date_from`/`date_to`, `company_id`, `limit` (1–100, default 50), `offset`, `order` — population audit with account/taxes/payment_mode/attachments, in-page duplicate candidates, and totals |
-| `billing.update_draft_expense` | write | `record_id` (positive int), `values` (allowlisted draft `hr.expense` prep fields: date/name/description/product/account/analytics/qty/price/tax/reference), `context` (optional) — draft-only; lifecycle via `call_model_method` |
+| `billing.update_draft_expense` | write | `record_id` (positive int), `values` (allowlisted draft `hr.expense` prep fields: date/name/description/product/account/analytics/qty/price/tax/reference), `context` (optional) — draft-only; lifecycle via `billing.reset_expense` / `billing.submit_expense` / `billing.approve_expense` |
+| `billing.reset_expense` | write | `record_ids` (1–50 positive ints), `context` (**required**) — `hr.expense` submitted/approved/refused → draft. All-or-nothing; validated against live state and `can_reset` first |
+| `billing.submit_expense` | write | `record_ids` (1–50 positive ints), `context` (**required**) — `hr.expense` draft → submitted |
+| `billing.approve_expense` | write | `record_ids` (1–50 positive ints), `context` (**required**) — `hr.expense` submitted → approved; refuses when Odoo's `can_approve` is false. Never posts or pays |
 | `billing.configure_draft_vendor_bill` | write | `record_id` (positive int), `values` (allowlisted draft `account.move` `in_invoice` header + `invoice_line_ids`), `context` (optional) — draft vendor bills only; reset via `call_model_method` `button_draft` |
 | `feedback.submit` | write | `title` (5–120 chars), `message` (20–4000 chars; concrete details, no secrets), `category` (`bug` \| `documentation_gap` \| `missing_feature` \| `dx_friction`), `tool_name` (string, optional) — files an `[agent-feedback]` card in the maintainers' tracker; see [Agent feedback](#agent-feedback) |
 
@@ -106,12 +109,21 @@ can only do what their Odoo account permits.
   connector classifies by **model + method + field names**, not free-text keywords.
 - **Draft vendor-bill / expense prep** — use `billing.update_draft_expense` /
   `billing.configure_draft_vendor_bill` (draft-only allowlisted fields; no validate/post).
-- **Reversible expense / vendor-bill lifecycle** — use `call_model_method` on allowlisted
-  methods only (`list_model_actions` marks `executable:true`: expense reset/submit/approve,
-  sheet equivalents on Odoo 17–18 only, vendor-bill `button_draft`). Requires write `context` +
-  compatible record state. Compose reset → billing draft edit → submit/approve; there is no
-  single orchestrator tool. High-risk post/pay/reconcile stay blocked — use the Odoo UI / a
-  human (`bookkeeping.plan_safe_write` is tax/lock ops only, never posting).
+- **Reversible expense lifecycle** — prefer the dedicated tools `billing.reset_expense` /
+  `billing.submit_expense` / `billing.approve_expense`. They are the **only** lifecycle path on
+  `/accounting/mcp`, which ships no generic write tools. On the full `/mcp` surface the same
+  transitions are also reachable through `call_model_method` on allowlisted methods
+  (`list_model_actions` marks `executable:true`), including the Odoo 17–18 `hr.expense.sheet`
+  equivalents and vendor-bill `button_draft`. Every path runs the same gate: required write
+  `context`, all ids validated against a live read, compatible state, and Odoo's own
+  `can_reset` / `can_approve` flags. Compose reset → draft edit → submit → approve; there is no
+  single orchestrator tool.
+- **The fence: nothing at or past the journal entry.** Posting, paying, reconciling, deleting and
+  lock-exception writes stay blocked on every generic tool, and no lifecycle rule transitions *out*
+  of `posted` / `in_payment` / `paid`. That includes un-posting: `button_draft` is allowlisted only
+  for **cancelled** vendor bills, never posted ones, because resetting a posted move to draft
+  removes its journal entry. Those are Odoo-UI / human operations
+  (`bookkeeping.plan_safe_write` is tax/lock ops only, never posting).
 - **Tax-close / report / return / lock-exception mutations** — **`bookkeeping.plan_safe_write` only**
   (four operations documented in [docs/bookkeeping.md](docs/bookkeeping.md)). It never handles PM
   models, draft bill/expense prep, or journal posting.

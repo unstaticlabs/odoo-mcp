@@ -21,21 +21,48 @@ reads, normalize the shapes, and refuse to write until a human confirms.
 
 Generic CRUD on `hr.expense` / `hr.expense.sheet` / `account.move` stays blocked. Operators compose:
 
-1. `call_model_method` — allowlisted reset-to-draft (`action_reset` / `action_reset_expense_sheets` / `button_draft`) when state-compatible + non-empty write `context` (audit-only; never sent to Odoo).
+1. **Reset to draft** — `billing.reset_expense` (dedicated tool, available on `/accounting/mcp`), or
+   `call_model_method` on an allowlisted reset method (`action_reset` /
+   `action_reset_expense_sheets` / vendor-bill `button_draft`) on the full `/mcp` surface.
 2. `billing.update_draft_expense` / `billing.configure_draft_vendor_bill` — draft preparatory fields only.
-3. `call_model_method` — allowlisted submit/approve (`action_submit` / `action_approve` / sheet equivalents) when state-compatible + `context`.
+3. **Submit / approve** — `billing.submit_expense` / `billing.approve_expense`, or the equivalent
+   allowlisted `call_model_method` call on `/mcp`.
 
-High-risk methods (`action_post`, payment post/register, reconcile, delete) stay denied on generic
-MCP writes — route to **human / Odoo UI**. `bookkeeping.plan_safe_write` is only for its four
-tax/lock operations (never post/pay). There is **no** end-to-end billing orchestrator tool in v1.
+Both entry points run the same gate ([`src/lifecycle-gate.ts`](../src/lifecycle-gate.ts)) over the
+same policy table ([`src/lifecycle-allowlist.ts`](../src/lifecycle-allowlist.ts)):
 
-Chosen method names (aligned with curated `actions-map` + upstream Odoo 17–19 `hr_expense`):
+- non-empty write `context` (audit-only; never sent to Odoo),
+- every requested id returned by a live pre-read — a partial read refuses the whole call,
+- ids must be positive integers; anything else refuses the call rather than being skipped,
+- current `state` compatible with the rule (and `move_type` for vendor bills),
+- Odoo's own record-level flags (`can_reset`, `can_approve`) truthy where the version exposes them;
+  a flag absent on the running version is skipped, never treated as a refusal.
+
+**The fence — nothing at or past the journal entry.** High-risk methods (`action_post`, payment
+post/register, reconcile, delete) stay denied on generic MCP writes, and **no lifecycle rule
+transitions out of `posted` / `in_payment` / `paid`**. Un-posting counts: `button_draft` is
+allowlisted for **cancelled** vendor bills only, because resetting a posted move to draft removes
+its journal entry. Route those to **human / Odoo UI**. `bookkeeping.plan_safe_write` is only for its
+four tax/lock operations (never post/pay). There is **no** end-to-end billing orchestrator tool.
+
+Dedicated expense lifecycle tools (also the only lifecycle path on `/accounting/mcp`):
+
+| Tool | Transition | Guard |
+|---|---|---|
+| `billing.reset_expense` | submitted / approved / refused → draft | `can_reset` |
+| `billing.submit_expense` | draft → submitted | — |
+| `billing.approve_expense` | submitted → approved | `can_approve` |
+
+Each takes `record_ids` (1–50) plus a **required** `context`, is all-or-nothing across the batch, and
+returns `state_before` / `state_after` per record as evidence the transition landed.
+
+Method names for the generic path (aligned with curated `actions-map` + upstream Odoo 17–19 `hr_expense`):
 
 | Model | Allowlisted methods | Compatible `from_states` | Version note |
 |---|---|---|---|
 | `hr.expense` | `action_reset`, `action_submit`, `action_approve` | reset: submitted/approved/refused (+ legacy `reported`); submit: draft; approve: submitted | Primary on Odoo 19+ (sheet removed). `reported` is 17–18 line vocab only. |
 | `hr.expense.sheet` | `action_reset_expense_sheets`, `action_submit_sheet`, `action_approve_expense_sheets` | reset: submit/approve/cancel; submit: draft; approve: submit | **Pre-19 only** — model removed in Odoo 19. |
-| `account.move` | `button_draft` only | posted/cancel; **and** `move_type` ∈ {in_invoice, in_refund} | Cross-version |
+| `account.move` | `button_draft` only | `cancel` only; **and** `move_type` ∈ {in_invoice, in_refund} | Cross-version. `posted` deliberately excluded — un-posting is a ledger change. |
 
 Draft bill/expense prep is **not** part of `plan_safe_write`. Generic writes remain hard-blocked;
 deny envelopes carry `policy_rule` / `risk_class` / `next_step` and route agents to the matching namespace.

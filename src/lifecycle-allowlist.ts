@@ -20,6 +20,7 @@ export type PolicyRule =
   | "lifecycle_state_incompatible"
   | "lifecycle_context_required"
   | "lifecycle_ids_invalid"
+  | "lifecycle_guard_failed"
   | "lifecycle_move_type_incompatible"
   | "sensitive_model_method_denied";
 
@@ -41,9 +42,21 @@ export type LifecycleRule = {
   policy_rule: "lifecycle_allowlist";
   /** For account.move: only these move_type values are allowed. */
   require_move_types?: readonly string[];
+  /**
+   * Odoo computed boolean fields that must all be truthy on the record (e.g. `can_reset`,
+   * `can_approve`). Odoo raises on the method itself when these are false; checking them in the
+   * preflight turns that raw exception into a `write_blocked` envelope. Version-tolerant: a field
+   * absent on the running Odoo version is skipped, never treated as false.
+   */
+  guard_fields?: readonly string[];
   next_step_hint?: string;
   /** Human note for docs/discovery (not sent to clients unless copied into deny text). */
   version_note?: string;
+  /**
+   * Extra guidance keyed by the record's *current* state, merged into the deny envelope when the
+   * state is not allowlisted. Explains states that are deliberately excluded.
+   */
+  excluded_state_hints?: Readonly<Record<string, string>>;
 };
 
 export type HighRiskRule = {
@@ -82,9 +95,17 @@ export const REVERSIBLE_LIFECYCLE_ALLOWLIST: readonly LifecycleRule[] = [
     from_states: ["submitted", "approved", "refused", "reported"],
     risk_class: "reversible_lifecycle",
     policy_rule: "lifecycle_allowlist",
+    // Odoo 19 hides the Reset button unless `can_reset`; the method raises otherwise.
+    guard_fields: ["can_reset"],
     next_step_hint:
       "After reset to draft, use billing.update_draft_expense for preparatory fields, then action_submit / action_approve.",
-    version_note: "Primary path on Odoo 19+; reported is legacy 17–18 vocabulary only."
+    version_note: "Primary path on Odoo 19+; reported is legacy 17–18 vocabulary only.",
+    excluded_state_hints: {
+      posted:
+        "This expense is already posted — its journal entry exists. Un-posting is a ledger change: do it in the Odoo UI / with a human.",
+      in_payment: "Payment is in progress — resolve it in the Odoo UI / with a human.",
+      paid: "This expense is paid — resetting it is a ledger change: use the Odoo UI / a human."
+    }
   },
   {
     model: "hr.expense",
@@ -100,6 +121,8 @@ export const REVERSIBLE_LIFECYCLE_ALLOWLIST: readonly LifecycleRule[] = [
     from_states: ["submitted"],
     risk_class: "reversible_lifecycle",
     policy_rule: "lifecycle_allowlist",
+    // Approval rights are Odoo's (expense approver / manager); `can_approve` is the record-level flag.
+    guard_fields: ["can_approve"],
     next_step_hint: "Expense approved. Posting/payment remains blocked on generic MCP tools."
   },
   {
@@ -134,12 +157,20 @@ export const REVERSIBLE_LIFECYCLE_ALLOWLIST: readonly LifecycleRule[] = [
   {
     model: "account.move",
     method: "button_draft",
-    from_states: ["posted", "cancel"],
+    // `posted` is deliberately EXCLUDED: resetting a posted move to draft un-posts its journal
+    // entry, which is a ledger mutation on the human side of the connector fence (same reason
+    // hr.expense reset stops before `posted`). Only already-cancelled bills — which carry no live
+    // entry — may be returned to draft by an agent.
+    from_states: ["cancel"],
     risk_class: "reversible_lifecycle",
     policy_rule: "lifecycle_allowlist",
     require_move_types: VENDOR_BILL_MOVE_TYPES,
     next_step_hint:
-      "After draft reset on a vendor bill, use billing.configure_draft_vendor_bill for preparatory fields."
+      "After draft reset on a cancelled vendor bill, use billing.configure_draft_vendor_bill for preparatory fields.",
+    excluded_state_hints: {
+      posted:
+        "This bill is posted — resetting it to draft un-posts its journal entry, which the connector never does. Un-post in the Odoo UI / with a human, then retry."
+    }
   }
 ];
 
@@ -291,6 +322,34 @@ export function isCompatibleMoveType(rule: LifecycleRule, moveType: string | nul
   if (!rule.require_move_types || rule.require_move_types.length === 0) return true;
   if (moveType == null || typeof moveType !== "string") return false;
   return rule.require_move_types.includes(moveType.trim());
+}
+
+/**
+ * Fields the stateful preflight must read to evaluate this rule. Single source of truth for the
+ * pre-read projection so the gate and its tests can never drift apart.
+ */
+export function lifecycleReadFields(rule: LifecycleRule): string[] {
+  return [
+    "id",
+    "state",
+    ...(rule.require_move_types?.length ? ["move_type"] : []),
+    ...(rule.guard_fields ?? [])
+  ];
+}
+
+/**
+ * Guard fields that are present on the record and falsy. A field missing from the record is
+ * treated as "not applicable on this Odoo version" and skipped — never as a refusal.
+ */
+export function failedGuardFields(rule: LifecycleRule, record: Record<string, unknown>): string[] {
+  if (!rule.guard_fields?.length) return [];
+  return rule.guard_fields.filter((field) => field in record && !record[field]);
+}
+
+/** Extra guidance for a deliberately-excluded current state, when the rule documents one. */
+export function excludedStateHint(rule: LifecycleRule, state: string | null | undefined): string | undefined {
+  if (typeof state !== "string") return undefined;
+  return rule.excluded_state_hints?.[state.trim()];
 }
 
 /** Allowlisted method names for a model (for deny-reason hints). */

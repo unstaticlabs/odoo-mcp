@@ -318,7 +318,7 @@ describe("call_model_method — reversible lifecycle preflight", () => {
     const calls: { method: string; args: Record<string, unknown> }[] = [];
     const queue = dispatchQueue((_model, method, args) => {
       calls.push({ method, args });
-      if (method === "read") return [{ id: 9, state: "posted", move_type: "in_invoice" }];
+      if (method === "read") return [{ id: 9, state: "cancel", move_type: "in_invoice" }];
       return true;
     });
     const { callModelMethod } = buildWriteHandlers(queue);
@@ -326,7 +326,7 @@ describe("call_model_method — reversible lifecycle preflight", () => {
       model: "account.move",
       method: "button_draft",
       ids: [9],
-      context: "user asked to reset vendor bill 9 to draft"
+      context: "user asked to reset cancelled vendor bill 9 to draft"
     });
     expect(result.isError).toBeUndefined();
     expect(calls.map((c) => c.method)).toEqual(["read", "button_draft"]);
@@ -459,7 +459,7 @@ describe("call_model_method — reversible lifecycle preflight", () => {
     const calls: string[] = [];
     const queue = dispatchQueue((_model, method) => {
       calls.push(method);
-      if (method === "read") return [{ id: 9, state: "posted", move_type: "out_invoice" }];
+      if (method === "read") return [{ id: 9, state: "cancel", move_type: "out_invoice" }];
       return true;
     });
     const { callModelMethod } = buildWriteHandlers(queue);

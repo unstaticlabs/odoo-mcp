@@ -10,8 +10,11 @@
 import { describe, expect, test } from "bun:test";
 import {
   annotateSensitiveModelActionExecutability,
+  excludedStateHint,
+  failedGuardFields,
   getHighRiskMethodRule,
   getReversibleLifecycleRule,
+  lifecycleReadFields,
   isCompatibleLifecycleState,
   isCompatibleMoveType,
   isHighRiskMethod,
@@ -72,9 +75,45 @@ describe("REVERSIBLE_LIFECYCLE_ALLOWLIST matrix", () => {
     expect(isCompatibleLifecycleState(submit, "submitted")).toBe(false);
 
     const draft = getReversibleLifecycleRule("account.move", "button_draft")!;
-    expect(isCompatibleLifecycleState(draft, "posted")).toBe(true);
+    // `posted` is excluded on purpose: un-posting a move is a ledger change, not paperwork.
+    expect(isCompatibleLifecycleState(draft, "posted")).toBe(false);
+    expect(isCompatibleLifecycleState(draft, "cancel")).toBe(true);
     expect(isCompatibleMoveType(draft, "in_invoice")).toBe(true);
     expect(isCompatibleMoveType(draft, "out_invoice")).toBe(false);
+  });
+
+  test("no lifecycle rule may transition out of a posted/paid state", () => {
+    // The connector fence: everything at or past the journal entry stays human-only.
+    const LEDGER_STATES = ["posted", "in_payment", "paid", "done"];
+    for (const rule of REVERSIBLE_LIFECYCLE_ALLOWLIST) {
+      for (const state of LEDGER_STATES) {
+        expect(isCompatibleLifecycleState(rule, state)).toBe(false);
+      }
+    }
+  });
+
+  test("read projection carries state, move_type and guard fields for the rule that needs them", () => {
+    const reset = getReversibleLifecycleRule("hr.expense", "action_reset")!;
+    const draft = getReversibleLifecycleRule("account.move", "button_draft")!;
+    const submit = getReversibleLifecycleRule("hr.expense", "action_submit")!;
+    expect(lifecycleReadFields(reset)).toEqual(["id", "state", "can_reset"]);
+    expect(lifecycleReadFields(draft)).toEqual(["id", "state", "move_type"]);
+    expect(lifecycleReadFields(submit)).toEqual(["id", "state"]);
+  });
+
+  test("guard fields fail only when present and falsy — absent means not applicable", () => {
+    const reset = getReversibleLifecycleRule("hr.expense", "action_reset")!;
+    expect(failedGuardFields(reset, { id: 1, state: "approved", can_reset: true })).toEqual([]);
+    expect(failedGuardFields(reset, { id: 1, state: "approved", can_reset: false })).toEqual(["can_reset"]);
+    // Older Odoo without the field: skipped, never treated as a refusal.
+    expect(failedGuardFields(reset, { id: 1, state: "approved" })).toEqual([]);
+  });
+
+  test("posted records get an explicit human-only hint instead of a bare state list", () => {
+    for (const model of ["hr.expense", "account.move"] as const) {
+      const rule = REVERSIBLE_LIFECYCLE_ALLOWLIST.find((r) => r.model === model && /reset|draft/.test(r.method))!;
+      expect(excludedStateHint(rule, "posted")).toContain("Odoo UI");
+    }
   });
 
   test("every allowlist entry has reversible_lifecycle risk_class", () => {
