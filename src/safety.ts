@@ -1,4 +1,12 @@
 import { type CachedFieldMeta, type TtlCache, getFieldsCached } from "./cache";
+import {
+  allowlistedMethodsForModel,
+  getHighRiskMethodRule,
+  getReversibleLifecycleRule,
+  isSensitiveModelCrudMethod,
+  type PolicyRule,
+  type RiskClass
+} from "./lifecycle-allowlist";
 import { OdooError, type OdooConnection } from "./odoo";
 import type { OdooQueue } from "./odoo-queue";
 import { pickExistingFields } from "./tools/bookkeeping";
@@ -739,6 +747,11 @@ export interface PmWriteIntentResult {
   intent: PmWriteIntent;
   reason?: string;
   blocked_fields?: string[];
+  /** Machine-readable connector policy id (write_blocked envelopes). */
+  policy_rule?: PolicyRule;
+  risk_class?: RiskClass;
+  /** Short concrete next action for operators/agents. */
+  next_step?: string;
 }
 
 /** Prose keys are never keyword-scanned; exempt from financial-field pattern matching. Exported for unit testing. */
@@ -859,16 +872,102 @@ function pmAllowed(): PmWriteIntentResult {
 function pmDenied(
   intent: PmWriteIntent,
   reason: string,
-  blocked_fields?: string[]
+  blocked_fields?: string[],
+  meta?: { policy_rule?: PolicyRule; risk_class?: RiskClass; next_step?: string }
 ): PmWriteIntentResult {
-  return { verdict: "denied", intent, reason, blocked_fields };
+  return {
+    verdict: "denied",
+    intent,
+    reason,
+    blocked_fields,
+    ...(meta?.policy_rule ? { policy_rule: meta.policy_rule } : {}),
+    ...(meta?.risk_class ? { risk_class: meta.risk_class } : {}),
+    ...(meta?.next_step ? { next_step: meta.next_step } : {})
+  };
 }
 
-function sensitiveModelReason(model: string): string {
+function sensitiveModelCrudReason(model: string): { reason: string; next_step: string } {
   if (model === "account.move" || model === "hr.expense") {
-    return `Writes to ${model} via generic MCP write tools are blocked. ${BILLING_DRAFT_PREP_DENY_REASON}`;
+    return {
+      reason: `Writes to ${model} via generic MCP write tools are blocked. ${BILLING_DRAFT_PREP_DENY_REASON}`,
+      next_step:
+        model === "hr.expense"
+          ? "Use billing.update_draft_expense for draft preparatory fields; use call_model_method for allowlisted reversible lifecycle (action_reset / action_submit / action_approve) with write context."
+          : "Use billing.configure_draft_vendor_bill for draft vendor-bill prep; use call_model_method button_draft (vendor bills only) with write context to reset posted/cancel → draft."
+    };
   }
-  return `Writes to ${model} are blocked by the connector safety layer. ${BOOKKEEPING_DENY_REASON}`;
+  if (model === "hr.expense.sheet") {
+    return {
+      reason: `Writes to ${model} via generic MCP write tools are blocked. Use call_model_method for allowlisted sheet lifecycle, or billing.update_draft_expense for draft expense lines. ${BOOKKEEPING_DENY_REASON}`,
+      next_step:
+        "Use call_model_method for allowlisted sheet lifecycle (action_reset_expense_sheets / action_submit_sheet / action_approve_expense_sheets) with write context."
+    };
+  }
+  return {
+    reason: `Writes to ${model} are blocked by the connector safety layer. ${BOOKKEEPING_DENY_REASON}`,
+    next_step: "Use bookkeeping.plan_safe_write for validated accounting/tax operations, or the Odoo UI."
+  };
+}
+
+function sensitiveModelMethodDeniedReason(model: string, method: string): { reason: string; next_step: string } {
+  const allowed = allowlistedMethodsForModel(model);
+  const allowHint =
+    allowed.length > 0
+      ? ` Allowlisted reversible lifecycle via call_model_method: ${allowed.join(", ")} (state-compatible + required write context).`
+      : "";
+  if (model === "account.move" || model === "hr.expense" || model === "hr.expense.sheet") {
+    return {
+      reason: `Method "${method}" on ${model} is not allowlisted for generic MCP writes.${allowHint} ${BILLING_DRAFT_PREP_DENY_REASON}`,
+      next_step:
+        allowed.length > 0
+          ? `Retry with an allowlisted method (${allowed.join(", ")}) plus write context, or use billing.* / bookkeeping.plan_safe_write.`
+          : "Use billing.* / bookkeeping.plan_safe_write or the Odoo UI."
+    };
+  }
+  return {
+    reason: `Method "${method}" on ${model} is blocked by the connector safety layer. ${BOOKKEEPING_DENY_REASON}`,
+    next_step: "Use bookkeeping.plan_safe_write for validated accounting/tax operations, or the Odoo UI."
+  };
+}
+
+/** Sensitive-prefix path: CRUD + high-risk denied; reversible lifecycle allowlisted (pure; no Odoo I/O). */
+function classifySensitiveModelWrite(model: string, method: string): PmWriteIntentResult {
+  if (isSensitiveModelCrudMethod(method)) {
+    const { reason, next_step } = sensitiveModelCrudReason(model);
+    return pmDenied("financial_mutation", reason, undefined, {
+      policy_rule: "sensitive_model_crud",
+      risk_class: method === "unlink" ? "destructive" : "preparatory",
+      next_step
+    });
+  }
+
+  const highRisk = getHighRiskMethodRule(model, method);
+  if (highRisk) {
+    return pmDenied("financial_mutation", highRisk.reason, undefined, {
+      policy_rule: highRisk.policy_rule,
+      risk_class: highRisk.risk_class,
+      next_step: highRisk.next_step
+    });
+  }
+
+  const lifecycle = getReversibleLifecycleRule(model, method);
+  if (lifecycle) {
+    return {
+      verdict: "allowed",
+      intent: "financial_mutation",
+      policy_rule: lifecycle.policy_rule,
+      risk_class: lifecycle.risk_class,
+      next_step: lifecycle.next_step_hint,
+      reason: `Allowlisted reversible lifecycle method "${method}" on ${model} (state + write context enforced by call_model_method).`
+    };
+  }
+
+  const { reason, next_step } = sensitiveModelMethodDeniedReason(model, method);
+  return pmDenied("financial_mutation", reason, undefined, {
+    policy_rule: "sensitive_model_method_denied",
+    risk_class: "preparatory",
+    next_step
+  });
 }
 
 function defaultDenyReason(model: string): string {
@@ -950,7 +1049,16 @@ function classifyResPartner(method: string, args: Record<string, unknown>): PmWr
     );
   }
 
-  return pmDenied("financial_mutation", sensitiveModelReason("res.partner"));
+  return pmDenied(
+    "financial_mutation",
+    `Writes to res.partner are blocked by the connector safety layer. ${BOOKKEEPING_DENY_REASON}`,
+    undefined,
+    {
+      policy_rule: "sensitive_model_method_denied",
+      risk_class: "preparatory",
+      next_step: "Use bookkeeping.plan_safe_write for validated accounting/tax operations, or update partners in the Odoo UI."
+    }
+  );
 }
 
 function classifyProjectTask(method: string, args: Record<string, unknown>): PmWriteIntentResult {
@@ -1033,7 +1141,7 @@ export function classifyPmWriteIntent(input: PmWriteIntentInput): PmWriteIntentR
   }
 
   if (isSensitiveModelPrefix(model)) {
-    return pmDenied("financial_mutation", sensitiveModelReason(model));
+    return classifySensitiveModelWrite(model, method);
   }
 
   if (model === "res.partner") {

@@ -12,6 +12,7 @@ import {
   PM_TEXT_FIELDS,
   type PmWriteIntent
 } from "./safety";
+import type { PolicyRule, RiskClass } from "./lifecycle-allowlist";
 
 export type WriteIntent = PmWriteIntent;
 
@@ -29,6 +30,9 @@ export interface WriteSafetyVerdict {
   reason?: string;
   /** Field names that triggered a financial-mutation block. */
   blocked_fields?: string[];
+  policy_rule?: PolicyRule;
+  risk_class?: RiskClass;
+  next_step?: string;
 }
 
 /** Odoo methods that do not mutate data — skipped by the write-safety gate. */
@@ -170,7 +174,10 @@ export function assessWriteOperation(input: WriteOperationInput): WriteSafetyVer
       allowed: true,
       intent: result.intent,
       reason: result.reason,
-      blocked_fields: result.blocked_fields
+      blocked_fields: result.blocked_fields,
+      ...(result.policy_rule ? { policy_rule: result.policy_rule } : {}),
+      ...(result.risk_class ? { risk_class: result.risk_class } : {}),
+      ...(result.next_step ? { next_step: result.next_step } : {})
     };
   }
 
@@ -181,7 +188,10 @@ export function assessWriteOperation(input: WriteOperationInput): WriteSafetyVer
     allowed: false,
     intent: result.intent,
     reason: result.reason,
-    blocked_fields: result.blocked_fields
+    blocked_fields: result.blocked_fields,
+    ...(result.policy_rule ? { policy_rule: result.policy_rule } : {}),
+    ...(result.risk_class ? { risk_class: result.risk_class } : {}),
+    ...(result.next_step ? { next_step: result.next_step } : {})
   };
 }
 

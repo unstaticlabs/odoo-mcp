@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { OdooQueue } from "../odoo-queue";
 import type { Props } from "../server";
+import { annotateActionExecutability } from "../lifecycle-allowlist";
 import { CURATED_MODEL_ACTIONS, type CuratedAction } from "./actions-map";
 import {
   CORE_MODEL_ALLOWLIST,
@@ -42,6 +43,12 @@ export interface ModelAction {
   label?: string;
   confirm?: string;
   source: "view" | "curated";
+  /** Whether call_model_method may execute this under connector policy. */
+  executable?: boolean;
+  deny_reason?: string;
+  alternative?: string;
+  risk_class?: string;
+  policy_rule?: string;
 }
 
 const BUTTON_TAG_RE = /<button\b([^>]*)>/gi;
@@ -90,6 +97,21 @@ export function mergeModelActions(curated: CuratedAction[], viewActions: ModelAc
     merged.set(action.method, action);
   }
   return Array.from(merged.values());
+}
+
+/** Attach connector executability annotations (discovery honesty). Exported for unit testing. */
+export function annotateModelActions(model: string, actions: ModelAction[]): ModelAction[] {
+  return actions.map((action) => {
+    const ann = annotateActionExecutability(model, action.method);
+    return {
+      ...action,
+      executable: ann.executable,
+      ...(ann.deny_reason ? { deny_reason: ann.deny_reason } : {}),
+      ...(ann.alternative ? { alternative: ann.alternative } : {}),
+      ...(ann.risk_class ? { risk_class: ann.risk_class } : {}),
+      ...(ann.policy_rule ? { policy_rule: ann.policy_rule } : {})
+    };
+  });
 }
 
 export function registerReadTools(server: McpServer, getProps: () => Props | undefined, queue: OdooQueue, cache: TtlCache) {
@@ -680,7 +702,9 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
       title: "List Model Actions",
       annotations: { readOnlyHint: true, openWorldHint: false },
       description:
-        "Read-only: discover valid action methods (e.g. action_post, button_draft) for an Odoo model, combining form-view buttons with a curated list. Discovery only — execute these via call_model_method; they change record state.",
+        "Read-only: discover action methods (e.g. action_post, button_draft) for an Odoo model, combining form-view buttons with a curated list. " +
+        "Discovery ≠ unrestricted execution: only actions with executable:true may be called via call_model_method under connector policy " +
+        "(allowlisted reversible lifecycle + required write context + compatible record state). High-risk methods are annotated executable:false with deny_reason and alternative.",
       inputSchema: {
         model: z.string()
       },
@@ -691,10 +715,17 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
               method: z.string().describe("Model method name to pass to call_model_method"),
               label: z.string().optional().describe("Human-readable button label"),
               confirm: z.string().optional().describe("Confirmation prompt Odoo shows before this action"),
-              source: z.enum(["view", "curated"]).describe("Discovered from the form view or from the curated map")
+              source: z.enum(["view", "curated"]).describe("Discovered from the form view or from the curated map"),
+              executable: z
+                .boolean()
+                .describe("True when call_model_method may execute this under connector lifecycle policy"),
+              deny_reason: z.string().optional().describe("Why the connector refuses execution when executable is false"),
+              alternative: z.string().optional().describe("Suggested tool or human path when not executable"),
+              risk_class: z.string().optional().describe("Connector risk class when known"),
+              policy_rule: z.string().optional().describe("Connector policy rule id when known")
             })
           )
-          .describe("Action methods available on this model"),
+          .describe("Action methods available on this model (with connector executability)"),
         note: z.string().optional().describe("Present when view discovery failed and only curated actions are returned")
       }
     },
@@ -714,7 +745,7 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
       }
 
       const curated = CURATED_MODEL_ACTIONS[model] ?? [];
-      const actions = mergeModelActions(curated, viewActions);
+      const actions = annotateModelActions(model, mergeModelActions(curated, viewActions));
       return mcpStructured({ actions, ...(note ? { note } : {}) });
     }
   );

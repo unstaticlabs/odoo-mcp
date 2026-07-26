@@ -657,7 +657,9 @@ export function registerBillingWriteTools(
       title: "Update Draft Expense",
       description:
         "Write: update preparatory fields on a draft hr.expense only. Refuses non-draft records and " +
-        "lifecycle/payment fields. Does not validate, post, approve, or delete — leave those to a human.",
+        "lifecycle/payment fields. Does not validate, post, or delete. For reset→edit→resubmit/reapprove " +
+        "hygiene use call_model_method on allowlisted methods (action_reset / action_submit / action_approve) " +
+        "with write context and a compatible record state (see list_model_actions executable:true).",
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
       inputSchema: {
         record_id: z.number().int().positive(),
@@ -700,7 +702,9 @@ export function registerBillingWriteTools(
               intent: "financial_mutation",
               reason:
                 `hr.expense ${record_id} is not draft (current state: ${current}). ` +
-                "billing.update_draft_expense only updates draft expenses; leave validate/post/approve to a human."
+                "billing.update_draft_expense only updates draft expenses. " +
+                "If the expense is submitted/approved, call_model_method action_reset (with write context) first, then retry; " +
+                "post/pay remain blocked on generic MCP tools."
             }
           );
         }
@@ -740,7 +744,8 @@ export function registerBillingWriteTools(
       description:
         "Write: update preparatory header/line fields on a draft vendor bill (account.move with " +
         "move_type=in_invoice) only. Refuses posted moves, other move types, and lifecycle/payment fields. " +
-        "Does not validate, post, reconcile, send, or delete — leave those to a human.",
+        "Does not validate, post, reconcile, send, or delete. To reset a posted/cancel vendor bill to draft, " +
+        "use call_model_method button_draft with write context (in_invoice / in_refund only; see list_model_actions).",
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
       inputSchema: {
         record_id: z.number().int().positive(),
@@ -784,7 +789,9 @@ export function registerBillingWriteTools(
               intent: "financial_mutation",
               reason:
                 `account.move ${record_id} is not draft (current state: ${current}). ` +
-                "billing.configure_draft_vendor_bill only updates draft vendor bills; leave validate/post to a human."
+                "billing.configure_draft_vendor_bill only updates draft vendor bills. " +
+                "If the bill is posted/cancel, call_model_method button_draft (vendor bills only, with write context) first; " +
+                "post/reconcile remain blocked on generic MCP tools."
             }
           );
         }

@@ -38,6 +38,7 @@ const {
   normalizeRecords,
   parseButtonsFromArch,
   mergeModelActions,
+  annotateModelActions,
   CURATED_MODEL_ACTIONS,
   deriveWorkflowStatus,
   classifyAggregationDiagnosis,
@@ -2351,6 +2352,17 @@ describe("mergeModelActions", () => {
     const methods = merged.map((a: any) => a.method);
     expect(new Set(methods).size).toBe(methods.length);
   });
+
+  test("annotateModelActions marks button_draft executable and action_post not", () => {
+    const annotated = annotateModelActions(
+      "account.move",
+      mergeModelActions(CURATED_MODEL_ACTIONS["account.move"], [])
+    );
+    const byMethod = new Map(annotated.map((a) => [a.method, a]));
+    expect(byMethod.get("button_draft")?.executable).toBe(true);
+    expect(byMethod.get("action_post")?.executable).toBe(false);
+    expect(byMethod.get("action_post")?.alternative).toContain("bookkeeping");
+  });
 });
 
 describe("list_model_actions tool", () => {
@@ -2386,8 +2398,19 @@ describe("list_model_actions tool", () => {
     const payload = JSON.parse(result.content[0].text);
     expect(payload.note).toBeUndefined();
     const byMethod = new Map(payload.actions.map((a: any) => [a.method, a]));
-    expect(byMethod.get("action_post")).toEqual({ method: "action_post", label: "Post (from view)", source: "view" });
-    expect(byMethod.get("button_draft")).toEqual({ method: "button_draft", source: "curated" });
+    expect(byMethod.get("action_post")).toMatchObject({
+      method: "action_post",
+      label: "Post (from view)",
+      source: "view",
+      executable: false,
+      risk_class: "irreversible_posting"
+    });
+    expect(byMethod.get("button_draft")).toMatchObject({
+      method: "button_draft",
+      source: "curated",
+      executable: true,
+      risk_class: "reversible_lifecycle"
+    });
     expect(byMethod.get("do_print")).toBeUndefined();
   });
 
@@ -2403,9 +2426,45 @@ describe("list_model_actions tool", () => {
     const payload = JSON.parse(result.content[0].text);
     expect(typeof payload.note).toBe("string");
     expect(payload.actions).toEqual([
-      { method: "action_confirm", source: "curated" },
-      { method: "action_cancel", source: "curated" }
+      {
+        method: "action_confirm",
+        source: "curated",
+        executable: false,
+        deny_reason: "Method is not on the connector reversible-lifecycle allowlist for call_model_method.",
+        alternative: "Use dedicated billing.* / bookkeeping.* tools or the Odoo UI.",
+        policy_rule: "sensitive_model_method_denied"
+      },
+      {
+        method: "action_cancel",
+        source: "curated",
+        executable: false,
+        deny_reason: "Method is not on the connector reversible-lifecycle allowlist for call_model_method.",
+        alternative: "Use dedicated billing.* / bookkeeping.* tools or the Odoo UI.",
+        policy_rule: "sensitive_model_method_denied"
+      }
     ]);
+  });
+
+  test("marks hr.expense allowlisted lifecycle executable and action_post not", async () => {
+    const agent = await buildWriteToolAgent();
+    globalThis.fetch = mock(() =>
+      Promise.resolve(
+        new Response(JSON.stringify({ result: { views: { form: { arch: "<form/>" } } } }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        })
+      )
+    );
+
+    const handler = getToolHandler(agent, "list_model_actions");
+    const result = await handler({ model: "hr.expense" });
+    expect(result.isError).toBeUndefined();
+    const payload = JSON.parse(result.content[0].text);
+    const byMethod = new Map<string, any>(payload.actions.map((a: any) => [a.method, a]));
+    expect(byMethod.get("action_reset")?.executable).toBe(true);
+    expect(byMethod.get("action_submit")?.executable).toBe(true);
+    expect(byMethod.get("action_approve")?.executable).toBe(true);
+    expect(byMethod.get("action_post")?.executable).toBe(false);
   });
 
   test("rejects empty-string model without calling fetch", async () => {

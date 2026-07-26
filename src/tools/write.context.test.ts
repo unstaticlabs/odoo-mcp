@@ -25,6 +25,7 @@ function buildWriteHandlers(queue: OdooQueue) {
     updateRecord: handler("update_record"),
     deleteRecord: handler("delete_record"),
     batchUpdate: handler("batch_update"),
+    callModelMethod: handler("call_model_method"),
     updateExpense: handler("billing.update_draft_expense")
   };
 }
@@ -183,5 +184,145 @@ describe("context param on write tools", () => {
       model: "hr.expense",
       context: "user asked to correct the expense date"
     });
+  });
+});
+
+describe("call_model_method — reversible lifecycle preflight", () => {
+  afterEach(() => {
+    mock.restore();
+  });
+
+  test("allowlisted action_reset with compatible state + context reaches Odoo enqueue", async () => {
+    spyOn(console, "log").mockImplementation(() => {});
+    const calls: { model: string; method: string; args: Record<string, unknown> }[] = [];
+    const queue = dispatchQueue((model, method, args) => {
+      calls.push({ model, method, args });
+      if (method === "read") return [{ id: 394, state: "approved" }];
+      return true;
+    });
+    const { callModelMethod } = buildWriteHandlers(queue);
+
+    const reset = await callModelMethod({
+      model: "hr.expense",
+      method: "action_reset",
+      ids: [394],
+      context: "user asked to reset expense 394 to draft for date correction"
+    });
+    expect(reset.isError).toBeUndefined();
+    expect(calls.some((c) => c.method === "action_reset")).toBe(true);
+    expect(calls.find((c) => c.method === "action_reset")?.args).toEqual({ ids: [394] });
+    expect(calls.find((c) => c.method === "action_reset")?.args).not.toHaveProperty("context");
+
+    // After reset, draft billing update still works.
+    const draftQueue = dispatchQueue((_model, method) => {
+      if (method === "read") return [{ id: 394, state: "draft" }];
+      return true;
+    });
+    const { updateExpense: updateDraft } = buildWriteHandlers(draftQueue);
+    const upd = await updateDraft({
+      record_id: 394,
+      values: { date: "2026-07-04" },
+      context: "user asked to fix the date after reset"
+    });
+    expect(upd.isError).toBeUndefined();
+  });
+
+  test("missing context blocks allowlisted lifecycle before mutate", async () => {
+    const calls: string[] = [];
+    const queue = dispatchQueue((_model, method) => {
+      calls.push(method);
+      return true;
+    });
+    const { callModelMethod } = buildWriteHandlers(queue);
+
+    const result = await callModelMethod({
+      model: "hr.expense",
+      method: "action_reset",
+      ids: [394]
+    });
+    expect(result.isError).toBe(true);
+    const envelope = JSON.parse(result.content[0].text);
+    expect(envelope.error).toBe("write_blocked");
+    expect(envelope.policy_rule).toBe("lifecycle_context_required");
+    expect(envelope.recoverable).toBe(true);
+    expect(calls).toEqual([]);
+  });
+
+  test("incompatible state blocks before mutate", async () => {
+    const calls: string[] = [];
+    const queue = dispatchQueue((_model, method) => {
+      calls.push(method);
+      if (method === "read") return [{ id: 394, state: "draft" }];
+      return true;
+    });
+    const { callModelMethod } = buildWriteHandlers(queue);
+
+    const result = await callModelMethod({
+      model: "hr.expense",
+      method: "action_reset",
+      ids: [394],
+      context: "user asked to reset"
+    });
+    expect(result.isError).toBe(true);
+    const envelope = JSON.parse(result.content[0].text);
+    expect(envelope.policy_rule).toBe("lifecycle_state_incompatible");
+    expect(envelope.details).toContain("draft");
+    expect(calls).toEqual(["read"]);
+  });
+
+  test("action_post stays blocked even with context (no keyword bypass)", async () => {
+    const calls: string[] = [];
+    const queue = dispatchQueue((_model, method) => {
+      calls.push(method);
+      return true;
+    });
+    const { callModelMethod } = buildWriteHandlers(queue);
+
+    const result = await callModelMethod({
+      model: "account.move",
+      method: "action_post",
+      ids: [1],
+      context: "please post this invoice urgently for payment"
+    });
+    expect(result.isError).toBe(true);
+    const envelope = JSON.parse(result.content[0].text);
+    expect(envelope.policy_rule).toBe("high_risk_method");
+    expect(envelope.risk_class).toBe("irreversible_posting");
+    expect(calls).toEqual([]);
+  });
+
+  test("CRUD write on hr.expense via update_record still blocked with policy_rule", async () => {
+    const queue = dispatchQueue(() => true);
+    const { updateRecord } = buildWriteHandlers(queue);
+    const result = await updateRecord({
+      model: "hr.expense",
+      record_id: 394,
+      values: { date: "2026-07-04" },
+      context: "try generic write"
+    });
+    expect(result.isError).toBe(true);
+    const envelope = JSON.parse(result.content[0].text);
+    expect(envelope.policy_rule).toBe("sensitive_model_crud");
+    expect(envelope.next_step).toBeTruthy();
+  });
+
+  test("button_draft refuses non-vendor move_type", async () => {
+    const calls: string[] = [];
+    const queue = dispatchQueue((_model, method) => {
+      calls.push(method);
+      if (method === "read") return [{ id: 9, state: "posted", move_type: "out_invoice" }];
+      return true;
+    });
+    const { callModelMethod } = buildWriteHandlers(queue);
+    const result = await callModelMethod({
+      model: "account.move",
+      method: "button_draft",
+      ids: [9],
+      context: "user asked to reset customer invoice"
+    });
+    expect(result.isError).toBe(true);
+    const envelope = JSON.parse(result.content[0].text);
+    expect(envelope.policy_rule).toBe("lifecycle_move_type_incompatible");
+    expect(calls).toEqual(["read"]);
   });
 });

@@ -13,11 +13,30 @@ reads, normalize the shapes, and refuse to write until a human confirms.
 |---|---|
 | Expense population **audit** (account/VAT/payment/attachments/duplicates/totals) | `billing.audit_expenses` (read-only) |
 | Draft vendor-bill / expense **preparatory** fields (draft-only) | `billing.update_draft_expense`, `billing.configure_draft_vendor_bill` |
+| Reversible expense / vendor-bill **lifecycle** (reset→edit→resubmit/reapprove) | `call_model_method` on allowlisted methods only (`list_model_actions` → `executable:true`), with required write `context` + compatible record `state` (and vendor-bill `move_type` for `button_draft`) |
 | Tax-close / report external value / return / lock-exception | `bookkeeping.plan_safe_write` (validate-only + human confirm) |
-| Raw CRUD on ledger / `hr.*` / `account.*` models | Still forbidden via `update_record` / `batch_update` |
+| Raw CRUD on ledger / `hr.*` / `account.*` models | Still forbidden via `update_record` / `batch_update` / `create_record` / `delete_record` |
+
+#### Capability-gated reversible lifecycle (no orchestrator)
+
+Generic CRUD on `hr.expense` / `hr.expense.sheet` / `account.move` stays blocked. Operators compose:
+
+1. `call_model_method` — allowlisted reset-to-draft (`action_reset` / `action_reset_expense_sheets` / `button_draft`) when state-compatible + non-empty write `context` (audit-only; never sent to Odoo).
+2. `billing.update_draft_expense` / `billing.configure_draft_vendor_bill` — draft preparatory fields only.
+3. `call_model_method` — allowlisted submit/approve (`action_submit` / `action_approve` / sheet equivalents) when state-compatible + `context`.
+
+High-risk methods (`action_post`, payment post/register, reconcile, delete, lock) stay denied on generic MCP writes (or on existing `bookkeeping.plan_safe_write` plan/confirm). There is **no** end-to-end billing orchestrator tool in v1.
+
+Chosen method names (aligned with curated `actions-map` + typical Odoo 17–19):
+
+| Model | Allowlisted methods | Compatible `from_states` |
+|---|---|---|
+| `hr.expense` | `action_reset`, `action_submit`, `action_approve` | reset: submitted/approved/reported; submit: draft; approve: submitted |
+| `hr.expense.sheet` | `action_reset_expense_sheets`, `action_submit_sheet`, `action_approve_expense_sheets` | reset: submit/approve; submit: draft; approve: submit |
+| `account.move` | `button_draft` only | posted/cancel; **and** `move_type` ∈ {in_invoice, in_refund} |
 
 Draft bill/expense prep is **not** part of `plan_safe_write`. Generic writes remain hard-blocked;
-deny text routes agents to the matching namespace.
+deny envelopes carry `policy_rule` / `risk_class` / `next_step` and route agents to the matching namespace.
 
 Registered on the MCP server in [`src/server.ts`](../src/server.ts) (`registerBookkeepingTools`,
 `registerReturnPreviewTools`, `registerReportLineTools`, `registerSourceDocumentTools`,

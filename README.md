@@ -71,8 +71,8 @@ The server never logs, stores, or echoes your key.
 | `bookkeeping.preview_returns` | read | `company` (positive int), `from`/`to` (string), `return_type_xmlids` (string[] min 1) — which `account.return` cards should exist; blank periodicity → `configuration_issues` |
 | `bookkeeping.plan_safe_write` | validate-only | `operation` (enum: `create_or_update_report_external_value`, `create_manual_tax_return`, `update_return_type_periodicity`, `create_lock_exception`), `company` (string), `values` (object) — dry-run write plan + HMAC confirmation token; never writes |
 | `billing.audit_expenses` | read | `state` / `product_id` / `analytic_account_id` (optional; analytic post-filters `analytic_distribution` keys), `date_from`/`date_to`, `company_id`, `limit` (1–100, default 50), `offset`, `order` — population audit with account/taxes/payment_mode/attachments, in-page duplicate candidates, and totals |
-| `billing.update_draft_expense` | write | `record_id` (positive int), `values` (allowlisted draft `hr.expense` prep fields: date/name/description/product/account/analytics/qty/price/tax/reference), `context` (optional) — draft-only; no validate/post |
-| `billing.configure_draft_vendor_bill` | write | `record_id` (positive int), `values` (allowlisted draft `account.move` `in_invoice` header + `invoice_line_ids`), `context` (optional) — draft vendor bills only; no validate/post/reconcile |
+| `billing.update_draft_expense` | write | `record_id` (positive int), `values` (allowlisted draft `hr.expense` prep fields: date/name/description/product/account/analytics/qty/price/tax/reference), `context` (optional) — draft-only; lifecycle via `call_model_method` |
+| `billing.configure_draft_vendor_bill` | write | `record_id` (positive int), `values` (allowlisted draft `account.move` `in_invoice` header + `invoice_line_ids`), `context` (optional) — draft vendor bills only; reset via `call_model_method` `button_draft` |
 | `feedback.submit` | write | `title` (5–120 chars), `message` (20–4000 chars; concrete details, no secrets), `category` (`bug` \| `documentation_gap` \| `missing_feature` \| `dx_friction`), `tool_name` (string, optional) — files an `[agent-feedback]` card in the maintainers' tracker; see [Agent feedback](#agent-feedback) |
 
 **`aggregate_records` validation.** Before calling Odoo `read_group`, the server validates `groupby` and
@@ -106,6 +106,11 @@ can only do what their Odoo account permits.
   connector classifies by **model + method + field names**, not free-text keywords.
 - **Draft vendor-bill / expense prep** — use `billing.update_draft_expense` /
   `billing.configure_draft_vendor_bill` (draft-only allowlisted fields; no validate/post).
+- **Reversible expense / vendor-bill lifecycle** — use `call_model_method` on allowlisted
+  methods only (`list_model_actions` marks `executable:true`: expense reset/submit/approve,
+  sheet equivalents, vendor-bill `button_draft`). Requires write `context` + compatible
+  record state. Compose reset → billing draft edit → submit/approve; there is no single
+  orchestrator tool. High-risk post/pay/reconcile stay blocked (or on `bookkeeping.plan_safe_write`).
 - **Tax-close / report / return / lock-exception mutations** — **`bookkeeping.plan_safe_write` only**
   (four operations documented in [docs/bookkeeping.md](docs/bookkeeping.md)). It never handles PM
   models or draft bill/expense prep.
@@ -117,8 +122,10 @@ Every write tool accepts an optional `context` string (≤ 500 chars): one sente
 agent-declared intent, e.g. `"user asked to move task 42 to Review"`. It is **audit-only** —
 logged server-side as a structured `write_context` line (visible in Workers Logs /
 `wrangler tail`), **never sent to Odoo**, and **never consulted by the write-safety gate**,
-which continues to classify purely by model + method + field structure. Do not put
-credentials or sensitive personal data in it.
+which continues to classify purely by model + method + field structure. **Exception:**
+allowlisted reversible lifecycle via `call_model_method` **requires** non-empty `context`
+(still audit-only — never a keyword authz bypass). Do not put credentials or sensitive
+personal data in it.
 
 ### Agent feedback
 
@@ -249,7 +256,8 @@ per invocation) or when you have more than 8 tasks.
 **Do not** bulk-fetch PM chatter via `search_records` on `mail.message` with
 `[["model","=","project.task"],["res_id","in",ids]]` and `body`/`preview` — MCP hosts may
 block finance-keyword message bodies. Accounting chatter on invoices/journals is still
-blocked on `account.move` / `hr.expense`; draft bill/expense prep uses `billing.*`, and
+blocked on `account.move` / `hr.expense`; draft bill/expense prep uses `billing.*`, reversible
+lifecycle uses allowlisted `call_model_method` (see [docs/bookkeeping.md](docs/bookkeeping.md)), and
 tax-close mutations use `bookkeeping.plan_safe_write` — not generic `mail.message` reads.
 
 ## Resources
