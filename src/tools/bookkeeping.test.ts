@@ -606,6 +606,54 @@ describe("bookkeeping.review_key_accounts", () => {
     expect(result.content[0].text).toContain("Nope");
   });
 
+  test("balances read_group failure yields null amounts and severity unknown (never 0 + ok)", async () => {
+    const { fetchMock } = buildFetchMock({
+      ...SUSPENSE_ACCOUNT_OVERRIDE,
+      "account.move.line.read_group": {
+        status: 500,
+        body: { error: { message: "read_group failed: Access Denied" } }
+      }
+    });
+    globalThis.fetch = fetchMock;
+    const handler = buildReviewHandler(makeQueue(), new TtlCache());
+
+    const result = await handler({ company: "Acme Corp", date_to: "2026-03-31", account_codes: ["471000"] });
+
+    expect(result.isError).toBeUndefined();
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.warnings.some((w: string) => w.includes("account.move.line (balances)"))).toBe(true);
+    expect(parsed.accounts).toHaveLength(1);
+    const account = parsed.accounts[0];
+    expect(account.balance).toBeNull();
+    expect(account.debit).toBeNull();
+    expect(account.credit).toBeNull();
+    expect(account.severity).toBe("unknown");
+    expect(account.severity).not.toBe("ok");
+  });
+
+  test("successful read_group with no lines defaults missing accounts to 0 balance and ok severity", async () => {
+    const { fetchMock } = buildFetchMock({
+      ...SUSPENSE_ACCOUNT_OVERRIDE,
+      "account.move.line.read_group": { status: 200, body: [] },
+      "account.move.line.search_read": { status: 200, body: [] }
+    });
+    globalThis.fetch = fetchMock;
+    const handler = buildReviewHandler(makeQueue(), new TtlCache());
+
+    const result = await handler({ company: "Acme Corp", date_to: "2026-03-31", account_codes: ["471000"] });
+
+    expect(result.isError).toBeUndefined();
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.warnings.some((w: string) => w.includes("account.move.line (balances)"))).toBe(false);
+    expect(parsed.accounts).toHaveLength(1);
+    const account = parsed.accounts[0];
+    expect(account.balance).toBe(0);
+    expect(account.debit).toBe(0);
+    expect(account.credit).toBe(0);
+    expect(account.open_item_count).toBe(0);
+    expect(account.severity).toBe("ok");
+  });
+
   test("issues a bounded number of live Odoo calls once fields_get is cached", async () => {
     const { fetchMock, calls } = buildFetchMock(SUSPENSE_ACCOUNT_OVERRIDE);
     globalThis.fetch = fetchMock;

@@ -445,12 +445,14 @@ interface KeyAccountReview {
   code: string;
   name: unknown;
   id: number;
-  balance: number;
-  debit: number;
-  credit: number;
+  /** Null when the balances `read_group` failed (not the same as a true zero balance). */
+  balance: number | null;
+  debit: number | null;
+  credit: number | null;
   account_type: unknown;
   reconcile: unknown;
-  severity: "attention" | "ok" | "info";
+  /** `"unknown"` when balances (or open-lines, when that would otherwise invent a clean `"ok"`) could not be fetched. */
+  severity: "attention" | "ok" | "info" | "unknown";
   open_item_count: number;
   top_lines: Record<string, unknown>[];
 }
@@ -505,6 +507,8 @@ async function buildKeyAccountsReview(
   const moveLineFieldsMeta = await getFieldsCached(cache, queue, conn, "account.move.line");
 
   // Call 2: balances grouped by account (balance:sum when present, else debit/credit fallback).
+  // Distinguishes query failure from a true empty aggregate so we never invent 0 + "ok".
+  let balancesQueryFailed = false;
   const balanceByAccount: Record<string, { balance: number; debit: number; credit: number }> = {};
   const hasBalance = "balance" in moveLineFieldsMeta;
   const aggregates: string[] = [];
@@ -533,10 +537,12 @@ async function buildKeyAccountsReview(
       balanceByAccount[String(acc[0])] = { balance, debit, credit };
     }
   } catch (err) {
+    balancesQueryFailed = true;
     warnings.push(warnOn("account.move.line (balances)", err));
   }
 
   // Call 3: unreconciled open lines. Prefer amount_residual != 0; fall back to reconciled = false.
+  let openLinesQueryFailed = false;
   let openByAccount: Record<string, unknown[]> = {};
   const openPredicate: unknown | null =
     "amount_residual" in moveLineFieldsMeta
@@ -563,6 +569,7 @@ async function buildKeyAccountsReview(
       })) as Record<string, unknown>[];
       openByAccount = groupByAccountId(normalizeRecords(openRows, moveLineFieldsMeta));
     } catch (err) {
+      openLinesQueryFailed = true;
       warnings.push(warnOn("account.move.line (open lines)", err));
     }
   }
@@ -570,9 +577,30 @@ async function buildKeyAccountsReview(
   const accounts: KeyAccountReview[] = accountRows.map((row) => {
     const id = row.id as number;
     const code = row.code as string;
-    const bal = balanceByAccount[String(id)] ?? { balance: 0, debit: 0, credit: 0 };
     const openLines = (openByAccount[String(id)] ?? []) as Record<string, unknown>[];
     const openItemCount = openLines.length;
+
+    if (balancesQueryFailed) {
+      return {
+        code,
+        name: row.name ?? null,
+        id,
+        balance: null,
+        debit: null,
+        credit: null,
+        account_type: row.account_type ?? null,
+        reconcile: row.reconcile ?? null,
+        severity: "unknown" as const,
+        open_item_count: openItemCount,
+        top_lines: openLines.slice(0, 10)
+      };
+    }
+
+    const bal = balanceByAccount[String(id)] ?? { balance: 0, debit: 0, credit: 0 };
+    // When open-lines failed, do not invent open_item_count=0 into a clean "ok".
+    let severity: KeyAccountReview["severity"] = computeSeverity(code, bal.balance, openItemCount);
+    if (openLinesQueryFailed && severity === "ok") severity = "unknown";
+
     return {
       code,
       name: row.name ?? null,
@@ -582,7 +610,7 @@ async function buildKeyAccountsReview(
       credit: bal.credit,
       account_type: row.account_type ?? null,
       reconcile: row.reconcile ?? null,
-      severity: computeSeverity(code, bal.balance, openItemCount),
+      severity,
       open_item_count: openItemCount,
       top_lines: openLines.slice(0, 10)
     };
@@ -759,7 +787,9 @@ export function registerBookkeepingTools(server: McpServer, getProps: () => Prop
       description:
         "Read-only: review key balance-sheet accounts (e.g. suspense 471000, internal transfers 580000, " +
         "compte courant d'associe 455100, VAT credit 445670) and flag closure blockers. Returns per-account " +
-        "balance, open-item count, top open lines, and a FACTUAL severity heuristic. Unknown codes -> warnings.",
+        "balance, open-item count, top open lines, and a FACTUAL severity heuristic. When the balances " +
+        "read_group fails, balance/debit/credit are null and severity is 'unknown' (never invent 0 + 'ok'). " +
+        "A successful empty aggregate still yields 0 balances and computeSeverity. Unknown codes -> warnings.",
       annotations: { readOnlyHint: true, openWorldHint: false },
       inputSchema: {
         company: z.string(),
@@ -773,14 +803,20 @@ export function registerBookkeepingTools(server: McpServer, getProps: () => Prop
               code: z.string(),
               name: z.unknown(),
               id: z.number().int(),
-              balance: z.number(),
-              debit: z.number(),
-              credit: z.number(),
+              balance: z
+                .number()
+                .nullable()
+                .describe("Null when the balances read_group failed; 0 means a true empty aggregate"),
+              debit: z.number().nullable(),
+              credit: z.number().nullable(),
               account_type: z.unknown(),
               reconcile: z.unknown(),
               severity: z
-                .enum(["attention", "ok", "info"])
-                .describe("Factual heuristic: 'attention' = suspense account carrying a balance/open items (closure blocker)"),
+                .enum(["attention", "ok", "info", "unknown"])
+                .describe(
+                  "Factual heuristic: 'attention' = suspense account carrying a balance/open items (closure blocker); " +
+                    "'unknown' = balances (or open-lines needed for a clean 'ok') could not be fetched"
+                ),
               open_item_count: z.number().int(),
               top_lines: zOdooRecords.describe("Up to 10 most recent open account.move.line rows")
             })
