@@ -920,13 +920,13 @@ function sensitiveModelMethodDeniedReason(model: string, method: string): { reas
       reason: `Method "${method}" on ${model} is not allowlisted for generic MCP writes.${allowHint} ${BILLING_DRAFT_PREP_DENY_REASON}`,
       next_step:
         allowed.length > 0
-          ? `Retry with an allowlisted method (${allowed.join(", ")}) plus write context, or use billing.* / bookkeeping.plan_safe_write.`
-          : "Use billing.* / bookkeeping.plan_safe_write or the Odoo UI."
+          ? `Retry with an allowlisted method (${allowed.join(", ")}) plus write context, or use billing.* draft tools / the Odoo UI.`
+          : "Use billing.* draft tools, bookkeeping.plan_safe_write (tax/lock ops only), or the Odoo UI."
     };
   }
   return {
     reason: `Method "${method}" on ${model} is blocked by the connector safety layer. ${BOOKKEEPING_DENY_REASON}`,
-    next_step: "Use bookkeeping.plan_safe_write for validated accounting/tax operations, or the Odoo UI."
+    next_step: "Use bookkeeping.plan_safe_write for its four tax/lock operations only, or the Odoo UI."
   };
 }
 

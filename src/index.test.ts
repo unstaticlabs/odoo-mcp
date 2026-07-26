@@ -2361,7 +2361,8 @@ describe("mergeModelActions", () => {
     const byMethod = new Map(annotated.map((a) => [a.method, a]));
     expect(byMethod.get("button_draft")?.executable).toBe(true);
     expect(byMethod.get("action_post")?.executable).toBe(false);
-    expect(byMethod.get("action_post")?.alternative).toContain("bookkeeping");
+    expect(byMethod.get("action_post")?.alternative).toBe("human / Odoo UI");
+    expect(byMethod.get("action_post")?.alternative).not.toContain("bookkeeping");
   });
 });
 
@@ -2430,17 +2431,17 @@ describe("list_model_actions tool", () => {
         method: "action_confirm",
         source: "curated",
         executable: false,
-        deny_reason: "Method is not on the connector reversible-lifecycle allowlist for call_model_method.",
-        alternative: "Use dedicated billing.* / bookkeeping.* tools or the Odoo UI.",
-        policy_rule: "sensitive_model_method_denied"
+        deny_reason:
+          "Writes to sale.order via generic MCP write tools are not allowlisted. Project-management work should use project.task / mail.activity (res_model=project.task) or chatter.",
+        alternative: "Use dedicated project.* tools where applicable, or the Odoo UI / a human."
       },
       {
         method: "action_cancel",
         source: "curated",
         executable: false,
-        deny_reason: "Method is not on the connector reversible-lifecycle allowlist for call_model_method.",
-        alternative: "Use dedicated billing.* / bookkeeping.* tools or the Odoo UI.",
-        policy_rule: "sensitive_model_method_denied"
+        deny_reason:
+          "Writes to sale.order via generic MCP write tools are not allowlisted. Project-management work should use project.task / mail.activity (res_model=project.task) or chatter.",
+        alternative: "Use dedicated project.* tools where applicable, or the Odoo UI / a human."
       }
     ]);
   });

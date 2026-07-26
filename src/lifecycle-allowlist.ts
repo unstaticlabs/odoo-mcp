@@ -3,6 +3,13 @@
  *
  * Pure policy data + helpers — no Odoo I/O. Field mutations stay on dedicated draft billing
  * tools; high-risk post/pay/reconcile/delete/lock methods stay denied.
+ *
+ * Odoo version notes (verified against upstream odoo/odoo addons/hr_expense):
+ * - Odoo 17–18: `hr.expense.sheet` exists; sheet states draft/submit/approve/post/done/cancel;
+ *   expense *line* states include legacy `reported` ("To Submit" while on a draft sheet).
+ * - Odoo 19: sheet model removed ("Bye Bye reports"); lifecycle lives on `hr.expense` with
+ *   states draft/submitted/approved/posted/in_payment/paid/refused (no `reported`).
+ *   Sheet allowlist entries below are therefore **pre-19 only**.
  */
 
 /** Machine-readable policy rule ids on write_blocked / discovery envelopes. */
@@ -12,6 +19,7 @@ export type PolicyRule =
   | "lifecycle_allowlist"
   | "lifecycle_state_incompatible"
   | "lifecycle_context_required"
+  | "lifecycle_ids_invalid"
   | "lifecycle_move_type_incompatible"
   | "sensitive_model_method_denied";
 
@@ -34,6 +42,8 @@ export type LifecycleRule = {
   /** For account.move: only these move_type values are allowed. */
   require_move_types?: readonly string[];
   next_step_hint?: string;
+  /** Human note for docs/discovery (not sent to clients unless copied into deny text). */
+  version_note?: string;
 };
 
 export type HighRiskRule = {
@@ -50,6 +60,16 @@ export type HighRiskRule = {
 const VENDOR_BILL_MOVE_TYPES = ["in_invoice", "in_refund"] as const;
 
 /**
+ * Alternative / next_step for irreversible posting & payment: human / Odoo UI only.
+ * `bookkeeping.plan_safe_write` covers only its four tax/lock operations — never post/pay.
+ */
+const HUMAN_ODOO_UI = "human / Odoo UI";
+const POST_NEXT_STEP = "Post in the Odoo UI / with a human. bookkeeping.plan_safe_write cannot post journal entries.";
+const PAY_NEXT_STEP = "Register or post payments in the Odoo UI / with a human.";
+const LOCK_NEXT_STEP =
+  "Use bookkeeping.plan_safe_write for create_lock_exception / tax-close operations (its four supported ops only), or perform this in the Odoo UI.";
+
+/**
  * v1 reversible lifecycle methods. Names match curated `actions-map` + typical Odoo 17–19
  * form buttons (`action_*` / `button_draft`).
  */
@@ -57,11 +77,14 @@ export const REVERSIBLE_LIFECYCLE_ALLOWLIST: readonly LifecycleRule[] = [
   {
     model: "hr.expense",
     method: "action_reset",
-    from_states: ["submitted", "approved", "reported"],
+    // Odoo 19: submitted/approved/refused (approval_state-driven). `reported` is legacy-only
+    // (17–18 line state while attached to a draft sheet; absent from Odoo 19 selection).
+    from_states: ["submitted", "approved", "refused", "reported"],
     risk_class: "reversible_lifecycle",
     policy_rule: "lifecycle_allowlist",
     next_step_hint:
-      "After reset to draft, use billing.update_draft_expense for preparatory fields, then action_submit / action_approve."
+      "After reset to draft, use billing.update_draft_expense for preparatory fields, then action_submit / action_approve.",
+    version_note: "Primary path on Odoo 19+; reported is legacy 17–18 vocabulary only."
   },
   {
     model: "hr.expense",
@@ -82,11 +105,13 @@ export const REVERSIBLE_LIFECYCLE_ALLOWLIST: readonly LifecycleRule[] = [
   {
     model: "hr.expense.sheet",
     method: "action_reset_expense_sheets",
-    from_states: ["submit", "approve"],
+    // Pre-19 sheet vocab: draft/submit/approve/post/done/cancel. Reset from non-draft hygiene states.
+    from_states: ["submit", "approve", "cancel"],
     risk_class: "reversible_lifecycle",
     policy_rule: "lifecycle_allowlist",
     next_step_hint:
-      "After sheet reset to draft, edit lines / use billing.update_draft_expense on draft expenses, then action_submit_sheet."
+      "After sheet reset to draft, edit lines / use billing.update_draft_expense on draft expenses, then action_submit_sheet.",
+    version_note: "hr.expense.sheet removed in Odoo 19 — allowlist is for Odoo 17–18 only."
   },
   {
     model: "hr.expense.sheet",
@@ -94,7 +119,8 @@ export const REVERSIBLE_LIFECYCLE_ALLOWLIST: readonly LifecycleRule[] = [
     from_states: ["draft"],
     risk_class: "reversible_lifecycle",
     policy_rule: "lifecycle_allowlist",
-    next_step_hint: "After submit, use call_model_method action_approve_expense_sheets when state is submit."
+    next_step_hint: "After submit, use call_model_method action_approve_expense_sheets when state is submit.",
+    version_note: "hr.expense.sheet removed in Odoo 19 — allowlist is for Odoo 17–18 only."
   },
   {
     model: "hr.expense.sheet",
@@ -102,7 +128,8 @@ export const REVERSIBLE_LIFECYCLE_ALLOWLIST: readonly LifecycleRule[] = [
     from_states: ["submit"],
     risk_class: "reversible_lifecycle",
     policy_rule: "lifecycle_allowlist",
-    next_step_hint: "Sheet approved. Posting/payment remains blocked on generic MCP tools."
+    next_step_hint: "Sheet approved. Posting/payment remains blocked on generic MCP tools.",
+    version_note: "hr.expense.sheet removed in Odoo 19 — allowlist is for Odoo 17–18 only."
   },
   {
     model: "account.move",
@@ -124,8 +151,8 @@ export const HIGH_RISK_METHOD_DENYLIST: readonly HighRiskRule[] = [
     risk_class: "irreversible_posting",
     policy_rule: "high_risk_method",
     reason: "Posting journal entries is irreversible from the connector's perspective.",
-    next_step: "Use bookkeeping.plan_safe_write for validated accounting writes, or post in the Odoo UI.",
-    alternative: "bookkeeping.plan_safe_write"
+    next_step: POST_NEXT_STEP,
+    alternative: HUMAN_ODOO_UI
   },
   {
     model: "account.move",
@@ -133,8 +160,8 @@ export const HIGH_RISK_METHOD_DENYLIST: readonly HighRiskRule[] = [
     risk_class: "destructive",
     policy_rule: "high_risk_method",
     reason: "Cancelling posted moves is blocked on generic MCP write tools.",
-    next_step: "Cancel in the Odoo UI / with a human, or use bookkeeping.plan_safe_write when applicable.",
-    alternative: "human / Odoo UI"
+    next_step: "Cancel in the Odoo UI / with a human.",
+    alternative: HUMAN_ODOO_UI
   },
   {
     model: "account.payment",
@@ -142,8 +169,8 @@ export const HIGH_RISK_METHOD_DENYLIST: readonly HighRiskRule[] = [
     risk_class: "irreversible_payment",
     policy_rule: "high_risk_method",
     reason: "Posting payments is blocked on generic MCP write tools.",
-    next_step: "Register or post payments in the Odoo UI / with a human.",
-    alternative: "human / Odoo UI"
+    next_step: PAY_NEXT_STEP,
+    alternative: HUMAN_ODOO_UI
   },
   {
     model: "account.payment",
@@ -152,7 +179,7 @@ export const HIGH_RISK_METHOD_DENYLIST: readonly HighRiskRule[] = [
     policy_rule: "high_risk_method",
     reason: "Payment draft-reset is not on the connector reversible-lifecycle allowlist.",
     next_step: "Reset payments in the Odoo UI / with a human.",
-    alternative: "human / Odoo UI"
+    alternative: HUMAN_ODOO_UI
   },
   {
     model: "account.payment",
@@ -161,7 +188,7 @@ export const HIGH_RISK_METHOD_DENYLIST: readonly HighRiskRule[] = [
     policy_rule: "high_risk_method",
     reason: "Cancelling payments is blocked on generic MCP write tools.",
     next_step: "Cancel payments in the Odoo UI / with a human.",
-    alternative: "human / Odoo UI"
+    alternative: HUMAN_ODOO_UI
   },
   {
     model: "hr.expense",
@@ -169,8 +196,8 @@ export const HIGH_RISK_METHOD_DENYLIST: readonly HighRiskRule[] = [
     risk_class: "irreversible_posting",
     policy_rule: "high_risk_method",
     reason: "Posting expenses creates accounting entries and is blocked on generic MCP tools.",
-    next_step: "Post in the Odoo UI / with a human.",
-    alternative: "human / Odoo UI"
+    next_step: POST_NEXT_STEP,
+    alternative: HUMAN_ODOO_UI
   },
   {
     model: "hr.expense",
@@ -178,8 +205,8 @@ export const HIGH_RISK_METHOD_DENYLIST: readonly HighRiskRule[] = [
     risk_class: "irreversible_payment",
     policy_rule: "high_risk_method",
     reason: "Paying expenses is blocked on generic MCP write tools.",
-    next_step: "Register payment in the Odoo UI / with a human.",
-    alternative: "human / Odoo UI"
+    next_step: PAY_NEXT_STEP,
+    alternative: HUMAN_ODOO_UI
   },
   {
     model: "hr.expense.sheet",
@@ -187,8 +214,8 @@ export const HIGH_RISK_METHOD_DENYLIST: readonly HighRiskRule[] = [
     risk_class: "irreversible_posting",
     policy_rule: "high_risk_method",
     reason: "Creating journal entries from expense sheets is blocked on generic MCP tools.",
-    next_step: "Post sheets in the Odoo UI / with a human.",
-    alternative: "human / Odoo UI"
+    next_step: POST_NEXT_STEP,
+    alternative: HUMAN_ODOO_UI
   }
 ];
 
@@ -229,18 +256,23 @@ export function getHighRiskMethodRule(model: string, method: string): HighRiskRu
   if (!HIGH_RISK_METHOD_NAME_RE.test(m)) return undefined;
   // Pattern match on sensitive-ish method names when model-scoped entry is absent.
   const risk_class: HighRiskRule["risk_class"] =
-    /pay|payment/i.test(m) ? "irreversible_payment" : /reconcil/i.test(m) ? "irreversible_payment" : /lock/i.test(m) ? "lock_sensitive" : "irreversible_posting";
+    /pay|payment/i.test(m)
+      ? "irreversible_payment"
+      : /reconcil/i.test(m)
+        ? "irreversible_payment"
+        : /lock/i.test(m)
+          ? "lock_sensitive"
+          : "irreversible_posting";
+  const isLock = risk_class === "lock_sensitive";
   return {
     model: model.trim(),
     method: m,
     risk_class,
     policy_rule: "high_risk_method",
     reason: `Method "${m}" is a high-risk financial mutation and is blocked on generic MCP write tools.`,
-    next_step:
-      risk_class === "lock_sensitive" || risk_class === "irreversible_posting"
-        ? "Use bookkeeping.plan_safe_write for validated accounting/tax operations, or perform this in the Odoo UI."
-        : "Perform this in the Odoo UI / with a human.",
-    alternative: risk_class === "lock_sensitive" || risk_class === "irreversible_posting" ? "bookkeeping.plan_safe_write" : "human / Odoo UI"
+    next_step: isLock ? LOCK_NEXT_STEP : risk_class === "irreversible_payment" ? PAY_NEXT_STEP : POST_NEXT_STEP,
+    // plan_safe_write only for lock/tax-close — never for posting or payment.
+    alternative: isLock ? "bookkeeping.plan_safe_write" : HUMAN_ODOO_UI
   };
 }
 
@@ -276,10 +308,11 @@ export type ActionExecutability = {
 };
 
 /**
- * Annotate a discovered/curated action with connector executability.
- * Fail-closed on sensitive models: only the reversible lifecycle allowlist is executable.
+ * Sensitive-model fail-closed annotation only (lifecycle allowlist / high-risk / unknown).
+ * For non-sensitive models use `annotateActionExecutability` in write-safety.ts, which consults
+ * the real write gate so deny_reason/alternative match call_model_method.
  */
-export function annotateActionExecutability(model: string, method: string): ActionExecutability {
+export function annotateSensitiveModelActionExecutability(model: string, method: string): ActionExecutability {
   const lifecycle = getReversibleLifecycleRule(model, method);
   if (lifecycle) {
     return {
@@ -305,7 +338,7 @@ export function annotateActionExecutability(model: string, method: string): Acti
     deny_reason: "Method is not on the connector reversible-lifecycle allowlist for call_model_method.",
     alternative: allowlistedMethodsForModel(model).length
       ? `call_model_method with allowlisted methods: ${allowlistedMethodsForModel(model).join(", ")}`
-      : "Use dedicated billing.* / bookkeeping.* tools or the Odoo UI.",
+      : "Use dedicated billing.* tools, bookkeeping.plan_safe_write (tax/lock ops only), or the Odoo UI.",
     policy_rule: "sensitive_model_method_denied"
   };
 }

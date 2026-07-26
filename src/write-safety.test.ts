@@ -161,7 +161,7 @@ describe("assessWriteOperation — financial mutations are blocked", () => {
     expect(verdict.risk_class).toBe("reversible_lifecycle");
   });
 
-  test("account.move action_post is blocked as high_risk_method", () => {
+  test("account.move action_post is blocked as high_risk_method with human/UI next_step", () => {
     const verdict = assessWriteOperation({
       model: "account.move",
       method: "action_post",
@@ -170,7 +170,8 @@ describe("assessWriteOperation — financial mutations are blocked", () => {
     expect(verdict.allowed).toBe(false);
     expect(verdict.policy_rule).toBe("high_risk_method");
     expect(verdict.risk_class).toBe("irreversible_posting");
-    expect(verdict.next_step).toBeTruthy();
+    expect(verdict.next_step).toMatch(/Odoo UI/i);
+    expect(verdict.next_step).not.toMatch(/Use bookkeeping\.plan_safe_write for validated accounting writes/);
   });
 });
 

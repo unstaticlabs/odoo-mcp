@@ -25,6 +25,7 @@ export const CURATED_MODEL_ACTIONS: Record<string, CuratedAction[]> = {
     { method: "action_pay", risk_hint: "irreversible_payment" }
   ],
   "hr.expense.sheet": [
+    // Pre-Odoo-19 only — sheet model removed in 19 ("Bye Bye reports").
     { method: "action_submit_sheet", risk_hint: "reversible_lifecycle" },
     { method: "action_approve_expense_sheets", risk_hint: "reversible_lifecycle" },
     { method: "action_reset_expense_sheets", risk_hint: "reversible_lifecycle" }

@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { OdooQueue } from "../odoo-queue";
 import type { Props } from "../server";
-import { annotateActionExecutability } from "../lifecycle-allowlist";
+import { annotateActionExecutability } from "../write-safety";
 import { CURATED_MODEL_ACTIONS, type CuratedAction } from "./actions-map";
 import {
   CORE_MODEL_ALLOWLIST,

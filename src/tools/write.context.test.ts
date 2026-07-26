@@ -227,6 +227,153 @@ describe("call_model_method — reversible lifecycle preflight", () => {
     expect(upd.isError).toBeUndefined();
   });
 
+  test("action_submit happy path with draft state + context reaches enqueue", async () => {
+    spyOn(console, "log").mockImplementation(() => {});
+    const calls: string[] = [];
+    const queue = dispatchQueue((_model, method) => {
+      calls.push(method);
+      if (method === "read") return [{ id: 10, state: "draft" }];
+      return true;
+    });
+    const { callModelMethod } = buildWriteHandlers(queue);
+    const result = await callModelMethod({
+      model: "hr.expense",
+      method: "action_submit",
+      ids: [10],
+      context: "user asked to submit expense 10"
+    });
+    expect(result.isError).toBeUndefined();
+    expect(calls).toEqual(["read", "action_submit"]);
+  });
+
+  test("action_approve happy path with submitted state + context reaches enqueue", async () => {
+    spyOn(console, "log").mockImplementation(() => {});
+    const calls: string[] = [];
+    const queue = dispatchQueue((_model, method) => {
+      calls.push(method);
+      if (method === "read") return [{ id: 11, state: "submitted" }];
+      return true;
+    });
+    const { callModelMethod } = buildWriteHandlers(queue);
+    const result = await callModelMethod({
+      model: "hr.expense",
+      method: "action_approve",
+      ids: [11],
+      context: "manager approved expense 11"
+    });
+    expect(result.isError).toBeUndefined();
+    expect(calls).toEqual(["read", "action_approve"]);
+  });
+
+  test("sheet action_submit_sheet happy path (pre-19 model) reaches enqueue", async () => {
+    spyOn(console, "log").mockImplementation(() => {});
+    const calls: string[] = [];
+    const queue = dispatchQueue((_model, method) => {
+      calls.push(method);
+      if (method === "read") return [{ id: 5, state: "draft" }];
+      return true;
+    });
+    const { callModelMethod } = buildWriteHandlers(queue);
+    const result = await callModelMethod({
+      model: "hr.expense.sheet",
+      method: "action_submit_sheet",
+      ids: [5],
+      context: "user asked to submit expense sheet 5"
+    });
+    expect(result.isError).toBeUndefined();
+    expect(calls).toEqual(["read", "action_submit_sheet"]);
+  });
+
+  test("sheet action_approve_expense_sheets and action_reset_expense_sheets happy paths", async () => {
+    spyOn(console, "log").mockImplementation(() => {});
+    const approveQueue = dispatchQueue((_model, method) => {
+      if (method === "read") return [{ id: 6, state: "submit" }];
+      return true;
+    });
+    const { callModelMethod: approveCall } = buildWriteHandlers(approveQueue);
+    const approved = await approveCall({
+      model: "hr.expense.sheet",
+      method: "action_approve_expense_sheets",
+      ids: [6],
+      context: "manager approved sheet 6"
+    });
+    expect(approved.isError).toBeUndefined();
+
+    const resetQueue = dispatchQueue((_model, method) => {
+      if (method === "read") return [{ id: 7, state: "approve" }];
+      return true;
+    });
+    const { callModelMethod: resetCall } = buildWriteHandlers(resetQueue);
+    const reset = await resetCall({
+      model: "hr.expense.sheet",
+      method: "action_reset_expense_sheets",
+      ids: [7],
+      context: "user asked to reset sheet 7 to draft"
+    });
+    expect(reset.isError).toBeUndefined();
+  });
+
+  test("button_draft happy path on vendor bill reaches enqueue", async () => {
+    spyOn(console, "log").mockImplementation(() => {});
+    const calls: { method: string; args: Record<string, unknown> }[] = [];
+    const queue = dispatchQueue((_model, method, args) => {
+      calls.push({ method, args });
+      if (method === "read") return [{ id: 9, state: "posted", move_type: "in_invoice" }];
+      return true;
+    });
+    const { callModelMethod } = buildWriteHandlers(queue);
+    const result = await callModelMethod({
+      model: "account.move",
+      method: "button_draft",
+      ids: [9],
+      context: "user asked to reset vendor bill 9 to draft"
+    });
+    expect(result.isError).toBeUndefined();
+    expect(calls.map((c) => c.method)).toEqual(["read", "button_draft"]);
+    expect(calls.find((c) => c.method === "read")?.args.fields).toEqual(["id", "state", "move_type"]);
+  });
+
+  test("partial pre-read (fewer rows than ids) refuses before mutate", async () => {
+    const calls: string[] = [];
+    const queue = dispatchQueue((_model, method) => {
+      calls.push(method);
+      // Odoo often omits missing ids silently — only return one of two requested.
+      if (method === "read") return [{ id: 1, state: "approved" }];
+      return true;
+    });
+    const { callModelMethod } = buildWriteHandlers(queue);
+    const result = await callModelMethod({
+      model: "hr.expense",
+      method: "action_reset",
+      ids: [1, 2],
+      context: "user asked to reset expenses 1 and 2"
+    });
+    expect(result.isError).toBe(true);
+    const envelope = JSON.parse(result.content[0].text);
+    expect(envelope.policy_rule).toBe("lifecycle_ids_invalid");
+    expect(envelope.details).toContain("2");
+    expect(calls).toEqual(["read"]);
+  });
+
+  test("empty ids list uses lifecycle_ids_invalid not state_incompatible", async () => {
+    const calls: string[] = [];
+    const queue = dispatchQueue((_model, method) => {
+      calls.push(method);
+      return true;
+    });
+    const { callModelMethod } = buildWriteHandlers(queue);
+    const result = await callModelMethod({
+      model: "hr.expense",
+      method: "action_reset",
+      ids: [],
+      context: "user asked to reset"
+    });
+    expect(result.isError).toBe(true);
+    const envelope = JSON.parse(result.content[0].text);
+    expect(envelope.policy_rule).toBe("lifecycle_ids_invalid");
+    expect(calls).toEqual([]);
+  });
+
   test("missing context blocks allowlisted lifecycle before mutate", async () => {
     const calls: string[] = [];
     const queue = dispatchQueue((_model, method) => {
@@ -288,6 +435,8 @@ describe("call_model_method — reversible lifecycle preflight", () => {
     const envelope = JSON.parse(result.content[0].text);
     expect(envelope.policy_rule).toBe("high_risk_method");
     expect(envelope.risk_class).toBe("irreversible_posting");
+    expect(envelope.next_step).toMatch(/Odoo UI/i);
+    expect(envelope.next_step).toMatch(/cannot post/i);
     expect(calls).toEqual([]);
   });
 

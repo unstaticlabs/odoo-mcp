@@ -415,8 +415,10 @@ export const zWriteContext = z
   .optional()
   .describe(
     "Why this write is happening — one short sentence of intent distilled from the conversation " +
-      "(e.g. 'user asked to move task 42 to Review'). Audit-logged server-side; never sent to Odoo. " +
-      "Do not include credentials, API keys, or sensitive personal data."
+      "(e.g. 'user asked to move task 42 to Review'). Audit-logged server-side; never sent to Odoo; " +
+      "never a keyword authz bypass (the write-safety gate still classifies by model/method/fields). " +
+      "Optional on most write tools; **required** (non-empty) for allowlisted reversible lifecycle via " +
+      "call_model_method. Do not include credentials, API keys, or sensitive personal data."
   );
 
 /** Emit an audit log line for a contextualized write. No-op when the caller omitted context. */

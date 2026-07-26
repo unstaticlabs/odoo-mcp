@@ -108,12 +108,13 @@ can only do what their Odoo account permits.
   `billing.configure_draft_vendor_bill` (draft-only allowlisted fields; no validate/post).
 - **Reversible expense / vendor-bill lifecycle** — use `call_model_method` on allowlisted
   methods only (`list_model_actions` marks `executable:true`: expense reset/submit/approve,
-  sheet equivalents, vendor-bill `button_draft`). Requires write `context` + compatible
-  record state. Compose reset → billing draft edit → submit/approve; there is no single
-  orchestrator tool. High-risk post/pay/reconcile stay blocked (or on `bookkeeping.plan_safe_write`).
+  sheet equivalents on Odoo 17–18 only, vendor-bill `button_draft`). Requires write `context` +
+  compatible record state. Compose reset → billing draft edit → submit/approve; there is no
+  single orchestrator tool. High-risk post/pay/reconcile stay blocked — use the Odoo UI / a
+  human (`bookkeeping.plan_safe_write` is tax/lock ops only, never posting).
 - **Tax-close / report / return / lock-exception mutations** — **`bookkeeping.plan_safe_write` only**
   (four operations documented in [docs/bookkeeping.md](docs/bookkeeping.md)). It never handles PM
-  models or draft bill/expense prep.
+  models, draft bill/expense prep, or journal posting.
 - **Multi-task chatter** — see [docs/testing.md](docs/testing.md) § bulk chatter reads.
 
 ### Write context (audit only)

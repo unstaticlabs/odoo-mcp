@@ -12,7 +12,13 @@ import {
   PM_TEXT_FIELDS,
   type PmWriteIntent
 } from "./safety";
-import type { PolicyRule, RiskClass } from "./lifecycle-allowlist";
+import {
+  annotateSensitiveModelActionExecutability,
+  getReversibleLifecycleRule,
+  type ActionExecutability,
+  type PolicyRule,
+  type RiskClass
+} from "./lifecycle-allowlist";
 
 export type WriteIntent = PmWriteIntent;
 
@@ -198,4 +204,64 @@ export function assessWriteOperation(input: WriteOperationInput): WriteSafetyVer
 /** Convenience helper for tool handlers. */
 export function assertWriteAllowed(input: WriteOperationInput): WriteSafetyVerdict {
   return assessWriteOperation(input);
+}
+
+/**
+ * Discovery honesty for `list_model_actions`: whether `call_model_method` may execute this
+ * under connector policy.
+ *
+ * - Allowlisted reversible lifecycle → executable.
+ * - Sensitive-model denials (CRUD / high-risk / unknown) → fail-closed annotations from
+ *   `annotateSensitiveModelActionExecutability` (matches classifySensitiveModelWrite).
+ * - Non-sensitive models (sale.order, purchase.order, …) → mirror `assessWriteOperation`
+ *   only; never invent `sensitive_model_*` policy_rule or billing.* alternatives.
+ */
+export function annotateActionExecutability(model: string, method: string): ActionExecutability {
+  const lifecycle = getReversibleLifecycleRule(model, method);
+  if (lifecycle) {
+    return {
+      executable: true,
+      risk_class: lifecycle.risk_class,
+      policy_rule: lifecycle.policy_rule
+    };
+  }
+
+  const verdict = assessWriteOperation({ model, method, args: { ids: [1] } });
+  if (verdict.allowed) {
+    return {
+      executable: true,
+      ...(verdict.risk_class ? { risk_class: verdict.risk_class } : {}),
+      ...(verdict.policy_rule ? { policy_rule: verdict.policy_rule } : {})
+    };
+  }
+
+  const policy = verdict.policy_rule;
+  if (
+    policy === "high_risk_method" ||
+    policy === "sensitive_model_method_denied" ||
+    policy === "sensitive_model_crud"
+  ) {
+    if (policy === "sensitive_model_crud") {
+      return {
+        executable: false,
+        deny_reason: verdict.reason,
+        alternative: verdict.next_step,
+        ...(verdict.risk_class ? { risk_class: verdict.risk_class } : {}),
+        policy_rule: policy
+      };
+    }
+    // high_risk + unknown sensitive method: use allowlist annotator (correct alternatives).
+    return annotateSensitiveModelActionExecutability(model, method);
+  }
+
+  // Non-sensitive deny — gate prose only (no sensitive_* / billing.* invention).
+  return {
+    executable: false,
+    deny_reason:
+      verdict.reason ?? "Not allowlisted for call_model_method under connector write policy.",
+    alternative:
+      verdict.next_step ?? "Use dedicated project.* tools where applicable, or the Odoo UI / a human.",
+    ...(verdict.risk_class ? { risk_class: verdict.risk_class } : {}),
+    ...(verdict.policy_rule ? { policy_rule: verdict.policy_rule } : {})
+  };
 }

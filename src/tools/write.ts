@@ -78,7 +78,7 @@ async function gateLifecycleCall(opts: {
       {
         intent: "financial_mutation",
         reason: `Allowlisted lifecycle method "${method}" on ${model} requires at least one positive record id in ids.`,
-        policy_rule: "lifecycle_state_incompatible",
+        policy_rule: "lifecycle_ids_invalid",
         risk_class: "reversible_lifecycle",
         next_step: "Pass ids: [<positive int>, ...] for the target record(s).",
         recoverable: true
@@ -94,13 +94,13 @@ async function gateLifecycleCall(opts: {
     return mcpErrorFromException(err, { model, method: "read" });
   }
 
-  if (!Array.isArray(rows) || rows.length === 0) {
+  if (!Array.isArray(rows)) {
     return mcpWriteBlockedError(
       { model, method },
       {
         intent: "financial_mutation",
-        reason: `No ${model} records found for ids ${ids.join(", ")}.`,
-        policy_rule: "lifecycle_state_incompatible",
+        reason: `Pre-read for ${model} lifecycle gate returned a non-array result.`,
+        policy_rule: "lifecycle_ids_invalid",
         risk_class: "reversible_lifecycle",
         next_step: "Verify the record ids exist, then retry.",
         recoverable: true
@@ -108,9 +108,34 @@ async function gateLifecycleCall(opts: {
     );
   }
 
+  const byId = new Map<number, Record<string, unknown>>();
   for (const row of rows) {
     if (!row || typeof row !== "object" || Array.isArray(row)) continue;
     const rec = row as Record<string, unknown>;
+    const id = typeof rec.id === "number" && Number.isInteger(rec.id) ? rec.id : null;
+    if (id == null || id <= 0) continue;
+    byId.set(id, rec);
+  }
+
+  const missing = ids.filter((id) => !byId.has(id));
+  if (missing.length > 0) {
+    return mcpWriteBlockedError(
+      { model, method },
+      {
+        intent: "financial_mutation",
+        reason:
+          `Lifecycle pre-read did not return every requested id for ${model}. Missing: ${missing.join(", ")}. ` +
+          `Refusing to mutate unvalidated ids.`,
+        policy_rule: "lifecycle_ids_invalid",
+        risk_class: "reversible_lifecycle",
+        next_step: "Verify all record ids exist and are readable, then retry with the full ids list.",
+        recoverable: true
+      }
+    );
+  }
+
+  for (const id of ids) {
+    const rec = byId.get(id)!;
     const state = typeof rec.state === "string" ? rec.state : null;
     if (!isCompatibleLifecycleState(rule, state)) {
       const draftHint =
@@ -124,7 +149,7 @@ async function gateLifecycleCall(opts: {
         {
           intent: "financial_mutation",
           reason:
-            `${model} id ${rec.id} is in state "${state ?? "unknown"}"; "${method}" requires one of: ${rule.from_states.join(", ")}.${draftHint}`,
+            `${model} id ${id} is in state "${state ?? "unknown"}"; "${method}" requires one of: ${rule.from_states.join(", ")}.${draftHint}`,
           policy_rule: "lifecycle_state_incompatible",
           risk_class: "reversible_lifecycle",
           next_step:
@@ -143,7 +168,7 @@ async function gateLifecycleCall(opts: {
           {
             intent: "financial_mutation",
             reason:
-              `${model} id ${rec.id} has move_type "${moveType ?? "unknown"}"; "${method}" is only allowlisted for vendor bills (${rule.require_move_types.join(", ")}).`,
+              `${model} id ${id} has move_type "${moveType ?? "unknown"}"; "${method}" is only allowlisted for vendor bills (${rule.require_move_types.join(", ")}).`,
             policy_rule: "lifecycle_move_type_incompatible",
             risk_class: "reversible_lifecycle",
             next_step:

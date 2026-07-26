@@ -25,15 +25,17 @@ Generic CRUD on `hr.expense` / `hr.expense.sheet` / `account.move` stays blocked
 2. `billing.update_draft_expense` / `billing.configure_draft_vendor_bill` — draft preparatory fields only.
 3. `call_model_method` — allowlisted submit/approve (`action_submit` / `action_approve` / sheet equivalents) when state-compatible + `context`.
 
-High-risk methods (`action_post`, payment post/register, reconcile, delete, lock) stay denied on generic MCP writes (or on existing `bookkeeping.plan_safe_write` plan/confirm). There is **no** end-to-end billing orchestrator tool in v1.
+High-risk methods (`action_post`, payment post/register, reconcile, delete) stay denied on generic
+MCP writes — route to **human / Odoo UI**. `bookkeeping.plan_safe_write` is only for its four
+tax/lock operations (never post/pay). There is **no** end-to-end billing orchestrator tool in v1.
 
-Chosen method names (aligned with curated `actions-map` + typical Odoo 17–19):
+Chosen method names (aligned with curated `actions-map` + upstream Odoo 17–19 `hr_expense`):
 
-| Model | Allowlisted methods | Compatible `from_states` |
-|---|---|---|
-| `hr.expense` | `action_reset`, `action_submit`, `action_approve` | reset: submitted/approved/reported; submit: draft; approve: submitted |
-| `hr.expense.sheet` | `action_reset_expense_sheets`, `action_submit_sheet`, `action_approve_expense_sheets` | reset: submit/approve; submit: draft; approve: submit |
-| `account.move` | `button_draft` only | posted/cancel; **and** `move_type` ∈ {in_invoice, in_refund} |
+| Model | Allowlisted methods | Compatible `from_states` | Version note |
+|---|---|---|---|
+| `hr.expense` | `action_reset`, `action_submit`, `action_approve` | reset: submitted/approved/refused (+ legacy `reported`); submit: draft; approve: submitted | Primary on Odoo 19+ (sheet removed). `reported` is 17–18 line vocab only. |
+| `hr.expense.sheet` | `action_reset_expense_sheets`, `action_submit_sheet`, `action_approve_expense_sheets` | reset: submit/approve/cancel; submit: draft; approve: submit | **Pre-19 only** — model removed in Odoo 19. |
+| `account.move` | `button_draft` only | posted/cancel; **and** `move_type` ∈ {in_invoice, in_refund} | Cross-version |
 
 Draft bill/expense prep is **not** part of `plan_safe_write`. Generic writes remain hard-blocked;
 deny envelopes carry `policy_rule` / `risk_class` / `next_step` and route agents to the matching namespace.
