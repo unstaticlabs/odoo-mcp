@@ -67,13 +67,64 @@ export function riskClassToBucket(risk: RiskClass): ActionRiskBucket {
  * - CRUD create/write → reversible_configuration (Odoo validates).
  * - Other mutating methods default to reversible_lifecycle (Odoo validates workflow).
  */
-export function classifyOperation(model: string, method: string): OperationClassification {
+/**
+ * Models whose records ARE the lock, not merely locked data. Creating or editing one moves an
+ * accounting period's boundary, which the 2026-07-28 decision names as lock-sensitive and therefore
+ * irreversible — regardless of the CRUD verb used to do it.
+ */
+const LOCK_SENSITIVE_MODELS = new Set(["account.lock_exception"]);
+
+/**
+ * Field names that move a lock/close boundary when written on any accounting model. Writing one of
+ * these through generic CRUD is the same act as calling a lock method, so it earns the same gate.
+ */
+const LOCK_DATE_FIELD_RE =
+  /^(fiscalyear_lock_date|tax_lock_date|hard_lock_date|purchase_lock_date|sale_lock_date|period_lock_date|lock_date|.*_lock_date)$/i;
+
+/** Lock-boundary fields present in a create/write payload, if any. */
+export function lockSensitiveFields(args: Record<string, unknown> | undefined): string[] {
+  if (!args) return [];
+  const records: Record<string, unknown>[] = [];
+  const valsList = (args as { vals_list?: unknown }).vals_list;
+  const vals = (args as { vals?: unknown }).vals;
+  if (Array.isArray(valsList)) {
+    for (const v of valsList) if (v && typeof v === "object" && !Array.isArray(v)) records.push(v as Record<string, unknown>);
+  }
+  if (vals && typeof vals === "object" && !Array.isArray(vals)) records.push(vals as Record<string, unknown>);
+  const hits = new Set<string>();
+  for (const rec of records) {
+    for (const field of Object.keys(rec)) if (LOCK_DATE_FIELD_RE.test(field)) hits.add(field);
+  }
+  return [...hits];
+}
+
+export function classifyOperation(
+  model: string,
+  method: string,
+  args?: Record<string, unknown>
+): OperationClassification {
   const m = model.trim();
   const meth = method.trim();
 
   const highRisk = getHighRiskMethodRule(m, meth);
   if (highRisk) {
     return classificationFromHighRisk(highRisk);
+  }
+
+  // Lock-sensitive before the CRUD fast-path: `create`/`write` on a lock record, or a write that
+  // moves a lock date on any model, must not fall through to reversible_configuration.
+  if (isMutatingMethodForLockCheck(meth)) {
+    if (LOCK_SENSITIVE_MODELS.has(m)) {
+      return lockSensitiveClassification(
+        `Creating or modifying ${m} moves an accounting lock boundary and requires confirmation.`
+      );
+    }
+    const lockFields = lockSensitiveFields(args);
+    if (lockFields.length > 0) {
+      return lockSensitiveClassification(
+        `This write sets lock-boundary field(s) ${lockFields.join(", ")} on ${m}, which moves an accounting lock and requires confirmation.`
+      );
+    }
   }
 
   if (meth === "unlink") {
@@ -141,6 +192,23 @@ export function classifyOperation(model: string, method: string): OperationClass
     risk_class: "reversible_lifecycle",
     requires_confirmation: false,
     policy_rule: "reversible_lifecycle"
+  };
+}
+
+/** CRUD verbs whose payload can move a lock boundary. */
+function isMutatingMethodForLockCheck(method: string): boolean {
+  return method === "create" || method === "write" || method === "unlink";
+}
+
+function lockSensitiveClassification(reason: string): OperationClassification {
+  return {
+    bucket: "irreversible_ledger",
+    risk_class: "lock_sensitive",
+    requires_confirmation: true,
+    policy_rule: "irreversible_confirmation_required",
+    reason,
+    next_step:
+      "Retry the same call with confirmation_token from the preflight response, or use bookkeeping.plan_safe_write for tax-close / lock-exception operations."
   };
 }
 

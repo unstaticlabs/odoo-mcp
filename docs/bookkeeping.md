@@ -13,7 +13,7 @@ reads, normalize the shapes, and refuse to write until a human confirms.
 |---|---|
 | Expense population **audit** (account/VAT/payment/attachments/duplicates/totals) | `billing.audit_expenses` (read-only) |
 | Draft vendor-bill / expense **preparatory** fields (draft-only) | `billing.update_draft_expense`, `billing.configure_draft_vendor_bill` |
-| Reversible expense / vendor-bill **lifecycle** (reset→edit→resubmit/reapprove) | `call_model_method` on allowlisted methods only (`list_model_actions` → `executable:true`), with required write `context` + compatible record `state` (and vendor-bill `move_type` for `button_draft`) |
+| Reversible expense / vendor-bill **lifecycle** (reset→edit→resubmit/reapprove) | `call_model_method` on allowlisted methods only (`list_model_actions` → `executable:true`), with required write `context` + compatible record `state`; a transition that leaves `posted` additionally needs `confirmation_token` |
 | Tax-close / report external value / return / lock-exception | `bookkeeping.plan_safe_write` (validate-only + human confirm) |
 | Reversible CRUD / lifecycle on `account.*` / `hr.*` / etc. | Allowed via generic write tools — Odoo ACLs/workflow/locks are authority (not model-prefix denial) |
 | Irreversible ledger ops (post / pay / reconcile / delete non-PM / lock) | Generic writes with `confirmation_token` (preflight → confirm → execute) |
@@ -39,11 +39,25 @@ same policy table ([`src/lifecycle-allowlist.ts`](../src/lifecycle-allowlist.ts)
 - Odoo's own record-level flags (`can_reset`, `can_approve`) truthy where the version exposes them;
   a flag absent on the running version is skipped, never treated as a refusal.
 
-**The fence — irreversible needs confirmation, not a flat deny.** High-risk methods (`action_post`,
-payment post/register, reconcile, non-PM delete, lock-sensitive) require a `confirmation_token`
-round-trip on generic MCP writes (preflight → confirm → execute). **No lifecycle rule transitions
-out of `posted` / `in_payment` / `paid` without that path.** Un-posting: `button_draft` is
-state-gated for allowlisted vendor-bill cases; Odoo still enforces hash/lock on posted moves.
+**The fence — irreversible needs confirmation, not a flat deny.** High-risk methods require a
+`confirmation_token` round-trip on generic MCP writes (preflight → confirm → execute). That class is:
+
+- **posting**, under every alias — `action_post`, the ORM-internal `_post`, and per-model variants
+  such as `button_validate` on bank statements. Matching only the public button name would let the
+  same mutation through under a different label;
+- **payment** post/register, **reconcile**, and non-PM **delete**;
+- **lock-sensitive** writes — both `account.lock_exception` CRUD and any write that sets a
+  lock-boundary field (`fiscalyear_lock_date`, `tax_lock_date`, `hard_lock_date`, …) on a reachable
+  model. Note these fields live on `res.company` in Odoo 18/19, which the connector still
+  default-denies, so that escalation is currently load-bearing only for `account.*`;
+- **un-posting** — `button_draft` from state `posted`. Resetting a posted move to draft removes an
+  accounting record that exists; it is the reverse of `action_post` and carries the same gate. From
+  `cancel` there is no live entry to remove, so that direction executes in one call.
+
+**Every** mutating write tool enforces this — `create_record`, `update_record`, `batch_update`,
+`delete_record` and `call_model_method` all route through one guard, and all accept
+`confirmation_token`. `batch_update` validates the whole batch before applying any update, so a
+policy refusal can never cause a partial write.
 `bookkeeping.plan_safe_write` is only for its four tax/lock operations (never post/pay). There is
 **no** end-to-end billing orchestrator tool.
 
@@ -64,7 +78,7 @@ Method names for the generic path (aligned with curated `actions-map` + upstream
 |---|---|---|---|
 | `hr.expense` | `action_reset`, `action_submit`, `action_approve` | reset: submitted/approved/refused (+ legacy `reported`); submit: draft; approve: submitted | Primary on Odoo 19+ (sheet removed). `reported` is 17–18 line vocab only. |
 | `hr.expense.sheet` | `action_reset_expense_sheets`, `action_submit_sheet`, `action_approve_expense_sheets` | reset: submit/approve/cancel; submit: draft; approve: submit | **Pre-19 only** — model removed in Odoo 19. |
-| `account.move` | `button_draft` only | `cancel` only; **and** `move_type` ∈ {in_invoice, in_refund} | Cross-version. `posted` deliberately excluded — un-posting is a ledger change. |
+| `account.move` | `button_draft` only | `cancel` (single call) or `posted` (**confirmation_token required**) | Cross-version. Not restricted by `move_type`: #2201's case is a manual entry, and Odoo's hash/lock checks are the authority on which moves may be reset. |
 
 Draft bill/expense prep is **not** part of `plan_safe_write`. Generic writes are action-classified
 (reversible → Odoo; irreversible → confirmation). Deny envelopes carry `refusing_layer` /

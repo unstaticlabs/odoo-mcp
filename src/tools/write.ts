@@ -1,9 +1,9 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { isReversibleLifecycleMethod } from "../lifecycle-allowlist";
+import { isReversibleLifecycleMethod, type RiskClass } from "../lifecycle-allowlist";
 import { preflightLifecycleCall } from "../lifecycle-gate";
 import type { OdooQueue } from "../odoo-queue";
-import { classifyOperation } from "../policy";
+import { classifyOperation, type OperationClassification } from "../policy";
 import {
   issueConfirmationToken,
   verifyConfirmationToken,
@@ -47,6 +47,48 @@ function gateWrite(model: string, method: string, args: Record<string, unknown>)
   return null;
 }
 
+/**
+ * THE gate for every mutating write tool: connector policy first, then the irreversible
+ * confirmation path. Returns a response to send back, or null when the call may execute.
+ *
+ * Every write tool must route through this. `gateWrite` alone is not sufficient — it deliberately
+ * lets `irreversible_confirmation_required` pass so the two-phase path can own it, which means any
+ * tool calling only `gateWrite` executes irreversible operations unconfirmed. Keeping both steps in
+ * one function is what stops that gap from reopening per-tool.
+ */
+async function guardMutation(opts: {
+  model: string;
+  method: string;
+  /** Odoo JSON-2 body, used for policy classification (vals/vals_list/ids). */
+  args: Record<string, unknown>;
+  ids?: number[];
+  /** Payload signed into the confirmation token alongside model/method/ids. */
+  kwargs?: Record<string, unknown>;
+  confirmation_token?: string;
+  getSecret: () => string | undefined;
+}) {
+  const blocked = gateWrite(opts.model, opts.method, opts.args);
+  if (blocked) return blocked;
+  return handleIrreversibleConfirmation({
+    model: opts.model,
+    method: opts.method,
+    ids: opts.ids,
+    kwargs: opts.kwargs,
+    args: opts.args,
+    confirmation_token: opts.confirmation_token,
+    getSecret: opts.getSecret
+  });
+}
+
+/** Shared schema fragment so every mutating tool advertises the token identically. */
+const zConfirmationToken = z
+  .string()
+  .optional()
+  .describe(
+    "Confirmation token from a previous preflight response. Required only for irreversible operations " +
+      "(posting, paying, reconciling, deleting, lock-boundary writes); omit it to receive the preflight."
+  );
+
 /** Canonical plan signed into the irreversible confirmation token. */
 export function buildIrreversibleWritePlan(input: {
   model: string;
@@ -86,9 +128,26 @@ async function handleIrreversibleConfirmation(opts: {
   ids?: number[];
   kwargs?: Record<string, unknown>;
   confirmation_token?: string;
+  /** Odoo body, so field-level lock-boundary escalation can see vals/vals_list. */
+  args?: Record<string, unknown>;
+  /**
+   * Escalate an operation the pure classifier considers reversible. Used when live record state is
+   * what makes it irreversible (see `confirm_from_states`), which classification cannot know.
+   */
+  forceConfirmation?: { risk_class: RiskClass; reason: string };
   getSecret: () => string | undefined;
 }): Promise<ReturnType<typeof mcpConfirmationRequired> | ReturnType<typeof mcpWriteBlockedError> | null> {
-  const classification = classifyOperation(opts.model, opts.method);
+  const classified = classifyOperation(opts.model, opts.method, opts.args);
+  const classification: OperationClassification = opts.forceConfirmation
+    ? {
+        ...classified,
+        bucket: "irreversible_ledger",
+        risk_class: opts.forceConfirmation.risk_class,
+        requires_confirmation: true,
+        policy_rule: "irreversible_confirmation_required",
+        reason: opts.forceConfirmation.reason
+      }
+    : classified;
   if (!classification.requires_confirmation) return null;
 
   const plan = buildIrreversibleWritePlan({
@@ -206,7 +265,8 @@ export function registerWriteTools(
       inputSchema: {
         model: z.string().min(1),
         values: z.record(z.string(), z.any()),
-        context: zWriteContext
+        context: zWriteContext,
+        confirmation_token: zConfirmationToken
       },
       outputSchema: {
         id: z.number().int().describe("Database id of the created record"),
@@ -220,9 +280,16 @@ export function registerWriteTools(
           .describe("project.task only: the create succeeded but posting the provenance stamp to the chatter failed")
       }
     },
-    async ({ model, values, context }) => {
+    async ({ model, values, context, confirmation_token }) => {
       logWriteContext("create_record", model, context);
-      const blocked = gateWrite(model, "create", { vals_list: [values] });
+      const blocked = await guardMutation({
+        model,
+        method: "create",
+        args: { vals_list: [values] },
+        kwargs: { vals_list: [values] },
+        confirmation_token,
+        getSecret
+      });
       if (blocked) return blocked;
 
       const props = getProps();
@@ -330,15 +397,24 @@ export function registerWriteTools(
         model: z.string().min(1),
         record_id: z.number().int().positive(),
         values: z.record(z.string(), z.any()),
-        context: zWriteContext
+        context: zWriteContext,
+        confirmation_token: zConfirmationToken
       },
       outputSchema: {
         ok: z.boolean().describe("True when the write succeeded")
       }
     },
-    async ({ model, record_id, values, context }) => {
+    async ({ model, record_id, values, context, confirmation_token }) => {
       logWriteContext("update_record", model, context);
-      const blocked = gateWrite(model, "write", { ids: [record_id], vals: values });
+      const blocked = await guardMutation({
+        model,
+        method: "write",
+        args: { ids: [record_id], vals: values },
+        ids: [record_id],
+        kwargs: { vals: values },
+        confirmation_token,
+        getSecret
+      });
       if (blocked) return blocked;
       try {
         await queue.enqueue(requireConnection(getProps()), model, "write", {
@@ -371,7 +447,8 @@ export function registerWriteTools(
             })
           )
           .min(1),
-        context: zWriteContext
+        context: zWriteContext,
+        confirmation_token: zConfirmationToken
       },
       outputSchema: {
         results: z
@@ -379,15 +456,30 @@ export function registerWriteTools(
           .describe("One entry per applied update, in input order (fail-fast: absent entries were not attempted)")
       }
     },
-    async ({ model, updates, context }) => {
+    async ({ model, updates, context, confirmation_token }) => {
       logWriteContext("batch_update", model, context);
       if (!model || !model.trim()) return mcpError("model must be a non-empty string");
+
+      // Validate EVERY update before applying ANY of them. Gating inside the write loop would let a
+      // refusal on update N land updates 1..N-1 first — a partial write caused by our own policy,
+      // which is exactly what the fail-fast contract must not do.
+      for (const u of updates) {
+        const blocked = await guardMutation({
+          model,
+          method: "write",
+          args: { ids: [u.record_id], vals: u.values },
+          ids: [u.record_id],
+          kwargs: { vals: u.values },
+          confirmation_token,
+          getSecret
+        });
+        if (blocked) return blocked;
+      }
+
       try {
         const conn = requireConnection(getProps());
         const results: { record_id: number; ok: boolean }[] = [];
         for (const u of updates) {
-          const blocked = gateWrite(model, "write", { ids: [u.record_id], vals: u.values });
-          if (blocked) return blocked;
           await queue.enqueue(conn, model, "write", { ids: [u.record_id], vals: u.values });
           results.push({ record_id: u.record_id, ok: true });
         }
@@ -580,6 +672,31 @@ export function registerWriteTools(
           if (!preflight.ok) {
             logWriteContext("call_model_method", model, context);
             return preflight.response;
+          }
+
+          // The pure classifier cannot see record state, so an allowlisted method that is only
+          // irreversible FROM certain states (un-posting a posted move) is escalated here, once the
+          // live read has told us which ids are actually in such a state.
+          if (preflight.confirmation_required_ids.length > 0) {
+            const stateConfirm = await handleIrreversibleConfirmation({
+              model,
+              method,
+              ids: preflight.confirmation_required_ids,
+              kwargs: namedKwargs,
+              forceConfirmation: {
+                risk_class: "irreversible_posting",
+                reason:
+                  `${model}.${method} on record(s) ${preflight.confirmation_required_ids.join(", ")} would leave state ` +
+                  `"${preflight.states.get(preflight.confirmation_required_ids[0]) ?? "unknown"}" — this un-posts an existing ` +
+                  `journal entry and requires confirmation.`
+              },
+              confirmation_token,
+              getSecret
+            });
+            if (stateConfirm) {
+              logWriteContext("call_model_method", model, context);
+              return stateConfirm;
+            }
           }
         }
 

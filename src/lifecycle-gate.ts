@@ -11,6 +11,7 @@
 import {
   excludedStateHint,
   failedGuardFields,
+  requiresConfirmationFromState,
   getReversibleLifecycleRule,
   isCompatibleLifecycleState,
   isCompatibleMoveType,
@@ -30,7 +31,16 @@ type ToolResponse = ReturnType<typeof mcpWriteBlockedError> | ReturnType<typeof 
  * validation, so callers that want before/after evidence need no second read.
  */
 export type LifecyclePreflight =
-  | { ok: true; ids: number[]; states: Map<number, string | null> }
+  | {
+      ok: true;
+      ids: number[];
+      states: Map<number, string | null>;
+      /**
+       * Ids whose CURRENT state makes this transition irreversible (e.g. un-posting a posted move).
+       * The caller must route these through the confirmation path before executing.
+       */
+      confirmation_required_ids: number[];
+    }
   | { ok: false; response: ToolResponse };
 
 export type LifecycleCallOptions = {
@@ -146,7 +156,7 @@ export async function preflightLifecycleCall(opts: LifecycleCallOptions): Promis
   const { model, method, context, queue, getProps } = opts;
   const rule = getReversibleLifecycleRule(model, method);
   // Not a lifecycle call — nothing for this gate to validate.
-  if (!rule) return { ok: true, ids: [], states: new Map() };
+  if (!rule) return { ok: true, ids: [], states: new Map(), confirmation_required_ids: [] };
 
   if (!context || !context.trim()) {
     return refuse(model, method, {
@@ -242,7 +252,8 @@ export async function preflightLifecycleCall(opts: LifecycleCallOptions): Promis
 
   const states = new Map<number, string | null>();
   for (const id of ids) states.set(id, stateOf(byId.get(id)!));
-  return { ok: true, ids, states };
+  const confirmation_required_ids = ids.filter((id) => requiresConfirmationFromState(rule, states.get(id)));
+  return { ok: true, ids, states, confirmation_required_ids };
 }
 
 export type LifecycleActionRecord = {

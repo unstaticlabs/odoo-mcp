@@ -56,6 +56,13 @@ export type LifecycleRule = {
    * absent on the running Odoo version is skipped, never treated as false.
    */
   guard_fields?: readonly string[];
+  /**
+   * Current `state` values from which this transition is irreversible and therefore requires a
+   * confirmation token, even though the method itself is allowlisted. State-aware by necessity: the
+   * pure classifier only sees (model, method), so "un-posting is dangerous but resetting a
+   * cancelled record is not" can only be decided once the live record has been read.
+   */
+  confirm_from_states?: readonly string[];
   next_step_hint?: string;
   /** Human note for docs/discovery (not sent to clients unless copied into deny text). */
   version_note?: string;
@@ -163,9 +170,18 @@ export const REVERSIBLE_LIFECYCLE_ALLOWLIST: readonly LifecycleRule[] = [
   {
     model: "account.move",
     method: "button_draft",
-    // Posted + cancel: Odoo enforces hash / lock / move_type. Connector no longer refuses posted
-    // resets solely by policy (#2201 reset → correct → repost of unhashed unlocked moves).
+    // Posted + cancel: Odoo enforces hash / lock / move_type. The connector no longer refuses posted
+    // resets solely by policy (#2201 reset → correct → repost of unhashed unlocked moves) — but see
+    // `confirm_from_states`: un-posting is gated, it is not free.
     from_states: ["cancel", "posted"],
+    // Resetting a POSTED move to draft un-posts its journal entry: it removes an accounting record
+    // that exists. That is the reverse of `action_post` and belongs in the same risk class — an
+    // unhashed, unlocked entry has neither of Odoo's own guards. From `cancel` there is no live
+    // entry to remove, so that direction stays unconfirmed.
+    confirm_from_states: ["posted"],
+    // Deliberately NOT restricted by move_type. Odoo's hash/lock checks are the authority on which
+    // moves may be reset, and #2201's motivating case is a manual entry (move_type `entry`), not a
+    // vendor bill. The safety comes from `confirm_from_states`, not from a move_type allowlist.
     risk_class: "reversible_lifecycle",
     policy_rule: "lifecycle_allowlist",
     next_step_hint:
@@ -267,8 +283,16 @@ const HIGH_RISK_BY_KEY = new Map<string, HighRiskRule>(
 );
 
 /** Methods that look like posting / payment / reconcile regardless of curated denylist. */
+/**
+ * Method names that are high-risk regardless of a model-scoped catalog entry.
+ *
+ * Odoo exposes the same irreversible operation under several names — the public button
+ * (`action_post`), the ORM-internal (`_post`), and per-model variants (`button_validate` on bank
+ * statements). Matching only the public name lets the same mutation through under a different
+ * label, so every known alias for post / pay / reconcile / lock belongs here.
+ */
 const HIGH_RISK_METHOD_NAME_RE =
-  /^(action_post|button_post|action_register_payment|post_payments|reconcile|action_reconcile|js_assign_outstanding_line|button_set_lock|action_lock)/i;
+  /^(_post|action_post|button_post|post$|action_register_payment|register_payment|post_payments|reconcile|action_reconcile|js_assign_outstanding_line|button_set_lock|action_lock|button_validate|action_validate)/i;
 
 function key(model: string, method: string): string {
   return `${model.trim()}::${method.trim()}`;
@@ -349,6 +373,19 @@ export function lifecycleReadFields(rule: LifecycleRule): string[] {
 export function failedGuardFields(rule: LifecycleRule, record: Record<string, unknown>): string[] {
   if (!rule.guard_fields?.length) return [];
   return rule.guard_fields.filter((field) => field in record && !record[field]);
+}
+
+/**
+ * True when this transition, from this live state, is irreversible and needs a confirmation token.
+ * Structural rather than name-based: any rule may declare the states it must not leave unconfirmed.
+ */
+export function requiresConfirmationFromState(
+  rule: LifecycleRule,
+  state: string | null | undefined
+): boolean {
+  if (!rule.confirm_from_states?.length) return false;
+  if (typeof state !== "string") return false;
+  return rule.confirm_from_states.includes(state.trim());
 }
 
 /** Extra guidance for a deliberately-excluded current state, when the rule documents one. */
