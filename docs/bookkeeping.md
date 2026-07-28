@@ -15,11 +15,12 @@ reads, normalize the shapes, and refuse to write until a human confirms.
 | Draft vendor-bill / expense **preparatory** fields (draft-only) | `billing.update_draft_expense`, `billing.configure_draft_vendor_bill` |
 | Reversible expense / vendor-bill **lifecycle** (reset→edit→resubmit/reapprove) | `call_model_method` on allowlisted methods only (`list_model_actions` → `executable:true`), with required write `context` + compatible record `state` (and vendor-bill `move_type` for `button_draft`) |
 | Tax-close / report external value / return / lock-exception | `bookkeeping.plan_safe_write` (validate-only + human confirm) |
-| Raw CRUD on ledger / `hr.*` / `account.*` models | Still forbidden via `update_record` / `batch_update` / `create_record` / `delete_record` |
+| Reversible CRUD / lifecycle on `account.*` / `hr.*` / etc. | Allowed via generic write tools — Odoo ACLs/workflow/locks are authority (not model-prefix denial) |
+| Irreversible ledger ops (post / pay / reconcile / delete non-PM / lock) | Generic writes with `confirmation_token` (preflight → confirm → execute) |
 
 #### Capability-gated reversible lifecycle (no orchestrator)
 
-Generic CRUD on `hr.expense` / `hr.expense.sheet` / `account.move` stays blocked. Operators compose:
+Reversible CRUD on `hr.expense` / `hr.expense.sheet` / `account.move` is **not** prefix-forbidden; Odoo validates. Prefer dedicated billing tools / allowlisted lifecycle when available. Operators compose:
 
 1. **Reset to draft** — `billing.reset_expense` (dedicated tool, available on `/accounting/mcp`), or
    `call_model_method` on an allowlisted reset method (`action_reset` /
@@ -38,12 +39,13 @@ same policy table ([`src/lifecycle-allowlist.ts`](../src/lifecycle-allowlist.ts)
 - Odoo's own record-level flags (`can_reset`, `can_approve`) truthy where the version exposes them;
   a flag absent on the running version is skipped, never treated as a refusal.
 
-**The fence — nothing at or past the journal entry.** High-risk methods (`action_post`, payment
-post/register, reconcile, delete) stay denied on generic MCP writes, and **no lifecycle rule
-transitions out of `posted` / `in_payment` / `paid`**. Un-posting counts: `button_draft` is
-allowlisted for **cancelled** vendor bills only, because resetting a posted move to draft removes
-its journal entry. Route those to **human / Odoo UI**. `bookkeeping.plan_safe_write` is only for its
-four tax/lock operations (never post/pay). There is **no** end-to-end billing orchestrator tool.
+**The fence — irreversible needs confirmation, not a flat deny.** High-risk methods (`action_post`,
+payment post/register, reconcile, non-PM delete, lock-sensitive) require a `confirmation_token`
+round-trip on generic MCP writes (preflight → confirm → execute). **No lifecycle rule transitions
+out of `posted` / `in_payment` / `paid` without that path.** Un-posting: `button_draft` is
+state-gated for allowlisted vendor-bill cases; Odoo still enforces hash/lock on posted moves.
+`bookkeeping.plan_safe_write` is only for its four tax/lock operations (never post/pay). There is
+**no** end-to-end billing orchestrator tool.
 
 Dedicated expense lifecycle tools (also the only lifecycle path on `/accounting/mcp`):
 
@@ -64,8 +66,9 @@ Method names for the generic path (aligned with curated `actions-map` + upstream
 | `hr.expense.sheet` | `action_reset_expense_sheets`, `action_submit_sheet`, `action_approve_expense_sheets` | reset: submit/approve/cancel; submit: draft; approve: submit | **Pre-19 only** — model removed in Odoo 19. |
 | `account.move` | `button_draft` only | `cancel` only; **and** `move_type` ∈ {in_invoice, in_refund} | Cross-version. `posted` deliberately excluded — un-posting is a ledger change. |
 
-Draft bill/expense prep is **not** part of `plan_safe_write`. Generic writes remain hard-blocked;
-deny envelopes carry `policy_rule` / `risk_class` / `next_step` and route agents to the matching namespace.
+Draft bill/expense prep is **not** part of `plan_safe_write`. Generic writes are action-classified
+(reversible → Odoo; irreversible → confirmation). Deny envelopes carry `refusing_layer` /
+`policy_rule` / `risk_class` / `next_step` and route agents to the matching next step.
 
 Registered on the MCP server in [`src/server.ts`](../src/server.ts) (`registerBookkeepingTools`,
 `registerReturnPreviewTools`, `registerReportLineTools`, `registerSourceDocumentTools`,

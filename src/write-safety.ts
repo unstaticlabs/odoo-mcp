@@ -68,7 +68,7 @@ export function isMutatingOdooMethod(method: string): boolean {
  * minimum (project.task + mail.activity→project.task). Mirrors the pre-refactor allowlist so
  * generic writes to project.project, project metadata (tags/types/stages), and project-scoped
  * activities keep working alongside dedicated projects.* tools. Reached only after the
- * canonical classifier denies; sensitive models (account.*, hr.*, …) are blocked upstream.
+ * canonical classifier denies; formerly sensitive prefixes are action-classified upstream (see policy.ts).
  */
 const COMPAT_PROJECT_PROJECT_FIELDS = new Set([
   "name",
