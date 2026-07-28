@@ -551,40 +551,35 @@ describe("billing.configure_draft_vendor_bill", () => {
 });
 
 describe("classifier routing for billing models", () => {
-  test("account.move generic write still denied and routes to billing.*", () => {
+  test("account.move generic write is allowed (Odoo authority; billing.* remain convenience helpers)", () => {
     const result = classifyPmWriteIntent({
       model: "account.move",
       method: "write",
       args: { ids: [1], vals: { ref: "INV/001" } }
     });
-    expect(result.verdict).toBe("denied");
+    expect(result.verdict).toBe("allowed");
     expect(result.intent).toBe("financial_mutation");
-    expect(result.reason).toContain("billing.");
-    expect(result.reason).toContain("billing.configure_draft_vendor_bill");
-    // Must not imply draft prep lives solely on the tax planner.
-    expect(result.reason).not.toMatch(/plan_safe_write only/i);
+    expect(result.risk_class).toBe("reversible_configuration");
   });
 
-  test("hr.expense generic write still denied and routes to billing.*", () => {
+  test("hr.expense generic write is allowed as reversible configuration", () => {
     const result = classifyPmWriteIntent({
       model: "hr.expense",
       method: "write",
       args: { ids: [394], vals: { date: "2026-07-04" } }
     });
-    expect(result.verdict).toBe("denied");
-    expect(result.reason).toContain("billing.update_draft_expense");
-    expect(result.reason).toContain("bookkeeping.plan_safe_write");
+    expect(result.verdict).toBe("allowed");
+    expect(result.risk_class).toBe("reversible_configuration");
   });
 
-  test("other account.* models still point at plan_safe_write without billing draft tools", () => {
+  test("other account.* models are action-classified, not prefix-denied", () => {
     const result = classifyPmWriteIntent({
       model: "account.tax",
       method: "write",
       args: { ids: [1], vals: { name: "x" } }
     });
-    expect(result.verdict).toBe("denied");
-    expect(result.reason).toContain("bookkeeping.plan_safe_write");
-    expect(result.reason).not.toContain("billing.update_draft_expense");
+    expect(result.verdict).toBe("allowed");
+    expect(result.risk_class).toBe("reversible_configuration");
   });
 });
 

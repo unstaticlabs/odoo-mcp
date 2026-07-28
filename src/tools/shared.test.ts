@@ -1285,7 +1285,10 @@ describe("mcpErrorFromException non-regression", () => {
       method: "write",
       http_status: 403,
       details: "Access Denied by Odoo",
-      recoverable: false
+      recoverable: false,
+      refusing_layer: "odoo_acl",
+      next_step: "Use an Odoo user with the required access rights, or perform the action in the Odoo UI as that user.",
+      odoo_exception: "Access Denied by Odoo"
     });
     expect(envelope.diagnosis).toBeUndefined();
     expect(envelope.operation).toBeUndefined();

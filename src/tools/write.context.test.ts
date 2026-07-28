@@ -106,9 +106,9 @@ describe("context param on write tools", () => {
     const { updateRecord } = buildWriteHandlers(queue);
 
     const result = await updateRecord({
-      model: "account.move",
+      model: "project.task",
       record_id: 1,
-      values: { amount_total: 0 },
+      values: { sale_line_id: 99 },
       context: "declared intent on a blocked write"
     });
 
@@ -117,7 +117,7 @@ describe("context param on write tools", () => {
     expect(logged).toContainEqual({
       event: "write_context",
       tool: "update_record",
-      model: "account.move",
+      model: "project.task",
       context: "declared intent on a blocked write"
     });
   });
@@ -330,7 +330,7 @@ describe("call_model_method — reversible lifecycle preflight", () => {
     });
     expect(result.isError).toBeUndefined();
     expect(calls.map((c) => c.method)).toEqual(["read", "button_draft"]);
-    expect(calls.find((c) => c.method === "read")?.args.fields).toEqual(["id", "state", "move_type"]);
+    expect(calls.find((c) => c.method === "read")?.args.fields).toEqual(["id", "state"]);
   });
 
   test("partial pre-read (fewer rows than ids) refuses before mutate", async () => {
@@ -417,7 +417,7 @@ describe("call_model_method — reversible lifecycle preflight", () => {
     expect(calls).toEqual(["read"]);
   });
 
-  test("action_post stays blocked even with context (no keyword bypass)", async () => {
+  test("action_post requires confirmation even with context (no keyword bypass)", async () => {
     const calls: string[] = [];
     const queue = dispatchQueue((_model, method) => {
       calls.push(method);
@@ -433,15 +433,19 @@ describe("call_model_method — reversible lifecycle preflight", () => {
     });
     expect(result.isError).toBe(true);
     const envelope = JSON.parse(result.content[0].text);
-    expect(envelope.policy_rule).toBe("high_risk_method");
+    expect(envelope.error).toBe("confirmation_required");
+    expect(envelope.policy_rule).toBe("irreversible_confirmation_required");
     expect(envelope.risk_class).toBe("irreversible_posting");
-    expect(envelope.next_step).toMatch(/Odoo UI/i);
-    expect(envelope.next_step).toMatch(/cannot post/i);
+    expect(envelope.next_step).toMatch(/confirmation/i);
     expect(calls).toEqual([]);
   });
 
-  test("CRUD write on hr.expense via update_record still blocked with policy_rule", async () => {
-    const queue = dispatchQueue(() => true);
+  test("CRUD write on hr.expense via update_record reaches Odoo (no prefix deny)", async () => {
+    const calls: string[] = [];
+    const queue = dispatchQueue((_model, method) => {
+      calls.push(method);
+      return true;
+    });
     const { updateRecord } = buildWriteHandlers(queue);
     const result = await updateRecord({
       model: "hr.expense",
@@ -449,13 +453,11 @@ describe("call_model_method — reversible lifecycle preflight", () => {
       values: { date: "2026-07-04" },
       context: "try generic write"
     });
-    expect(result.isError).toBe(true);
-    const envelope = JSON.parse(result.content[0].text);
-    expect(envelope.policy_rule).toBe("sensitive_model_crud");
-    expect(envelope.next_step).toBeTruthy();
+    expect(result.isError).toBeUndefined();
+    expect(calls).toEqual(["write"]);
   });
 
-  test("button_draft refuses non-vendor move_type", async () => {
+  test("button_draft on customer invoice reaches Odoo (move_type no longer connector-gated)", async () => {
     const calls: string[] = [];
     const queue = dispatchQueue((_model, method) => {
       calls.push(method);
@@ -469,9 +471,7 @@ describe("call_model_method — reversible lifecycle preflight", () => {
       ids: [9],
       context: "user asked to reset customer invoice"
     });
-    expect(result.isError).toBe(true);
-    const envelope = JSON.parse(result.content[0].text);
-    expect(envelope.policy_rule).toBe("lifecycle_move_type_incompatible");
-    expect(calls).toEqual(["read"]);
+    expect(result.isError).toBeUndefined();
+    expect(calls).toEqual(["read", "button_draft"]);
   });
 });

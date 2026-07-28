@@ -79,6 +79,7 @@ function refuse(
         policy_rule: opts.policy_rule,
         risk_class: "reversible_lifecycle",
         next_step: opts.next_step,
+        refusing_layer: "connector_policy",
         recoverable: true
       }
     )

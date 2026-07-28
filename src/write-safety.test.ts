@@ -80,38 +80,43 @@ describe("assessWriteOperation — project management text is never keyword-bloc
   });
 });
 
-describe("assessWriteOperation — financial mutations are blocked", () => {
-  test("account.move write is blocked", () => {
+describe("assessWriteOperation — financial mutations use action risk, not prefix deny", () => {
+  test("account.move write is allowed as reversible configuration", () => {
     const verdict = assessWriteOperation({
       model: "account.move",
       method: "write",
       args: { ids: [1], vals: { ref: "INV/001" } }
     });
-    expect(verdict.allowed).toBe(false);
+    expect(verdict.allowed).toBe(true);
     expect(verdict.intent).toBe("financial_mutation");
-    expect(verdict.reason).toContain("billing.");
-    expect(verdict.reason).toContain("bookkeeping.plan_safe_write");
+    expect(verdict.risk_class).toBe("reversible_configuration");
   });
 
-  test("hr.expense write is blocked with billing routing", () => {
+  test("hr.expense write is allowed as reversible configuration", () => {
     const verdict = assessWriteOperation({
       model: "hr.expense",
       method: "write",
       args: { ids: [394], vals: { date: "2026-07-04" } }
     });
-    expect(verdict.allowed).toBe(false);
+    expect(verdict.allowed).toBe(true);
     expect(verdict.intent).toBe("financial_mutation");
-    expect(verdict.reason).toContain("billing.update_draft_expense");
   });
 
-  test("res.partner write is blocked as external-party mutation", () => {
-    const verdict = assessWriteOperation({
+  test("res.partner non-financial write is allowed; financial fields stay blocked", () => {
+    const allowed = assessWriteOperation({
       model: "res.partner",
       method: "write",
       args: { ids: [5], vals: { name: "Acme" } }
     });
-    expect(verdict.allowed).toBe(false);
-    expect(verdict.intent).toBe("financial_mutation");
+    expect(allowed.allowed).toBe(true);
+
+    const blocked = assessWriteOperation({
+      model: "res.partner",
+      method: "write",
+      args: { ids: [5], vals: { bank_ids: [[0, 0, [{ acc_number: "FR123" }]]] } }
+    });
+    expect(blocked.allowed).toBe(false);
+    expect(blocked.intent).toBe("financial_mutation");
   });
 
   test("project.task write with sale_line_id is blocked", () => {
@@ -138,15 +143,15 @@ describe("assessWriteOperation — financial mutations are blocked", () => {
     expect(verdict.reason).toContain("project.task");
   });
 
-  test("payment.order create is blocked", () => {
+  test("payment.order create is allowed as reversible configuration (no prefix deny)", () => {
     const verdict = assessWriteOperation({
       model: "payment.order",
       method: "create",
       args: { vals_list: [{ name: "SEPA batch" }] }
     });
-    expect(verdict.allowed).toBe(false);
+    expect(verdict.allowed).toBe(true);
     expect(verdict.intent).toBe("financial_mutation");
-    expect(verdict.policy_rule).toBe("sensitive_model_crud");
+    expect(verdict.risk_class).toBe("reversible_configuration");
   });
 
   test("hr.expense action_reset is allowed at classifier (state checked later)", () => {
@@ -161,17 +166,16 @@ describe("assessWriteOperation — financial mutations are blocked", () => {
     expect(verdict.risk_class).toBe("reversible_lifecycle");
   });
 
-  test("account.move action_post is blocked as high_risk_method with human/UI next_step", () => {
+  test("account.move action_post requires confirmation (not flat human/UI deny)", () => {
     const verdict = assessWriteOperation({
       model: "account.move",
       method: "action_post",
       args: { ids: [1] }
     });
     expect(verdict.allowed).toBe(false);
-    expect(verdict.policy_rule).toBe("high_risk_method");
+    expect(verdict.policy_rule).toBe("irreversible_confirmation_required");
     expect(verdict.risk_class).toBe("irreversible_posting");
-    expect(verdict.next_step).toMatch(/Odoo UI/i);
-    expect(verdict.next_step).not.toMatch(/Use bookkeeping\.plan_safe_write for validated accounting writes/);
+    expect(verdict.next_step).toMatch(/confirmation/i);
   });
 });
 
@@ -247,7 +251,7 @@ describe("assessWriteOperation — PM field allowlist", () => {
 });
 
 describe("assessWriteOperation — structure over content (negative control)", () => {
-  test("identical finance-keyword text is allowed on project.task but blocked on account.move", () => {
+  test("identical finance-keyword text is allowed on project.task and account.move (no prefix deny)", () => {
     const pmVerdict = assessWriteOperation({
       model: "project.task",
       method: "write",
@@ -260,7 +264,7 @@ describe("assessWriteOperation — structure over content (negative control)", (
       method: "write",
       args: { ids: [1], vals: { narration: FINANCE_KEYWORD_PM_TEXT.chatterBody } }
     });
-    expect(ledgerVerdict.allowed).toBe(false);
+    expect(ledgerVerdict.allowed).toBe(true);
     expect(ledgerVerdict.intent).toBe("financial_mutation");
   });
 });

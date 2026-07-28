@@ -211,10 +211,9 @@ export function assertWriteAllowed(input: WriteOperationInput): WriteSafetyVerdi
  * under connector policy.
  *
  * - Allowlisted reversible lifecycle → executable.
- * - Sensitive-model denials (CRUD / high-risk / unknown) → fail-closed annotations from
- *   `annotateSensitiveModelActionExecutability` (matches classifySensitiveModelWrite).
- * - Non-sensitive models (sale.order, purchase.order, …) → mirror `assessWriteOperation`
- *   only; never invent `sensitive_model_*` policy_rule or billing.* alternatives.
+ * - Irreversible ledger ops → executable with confirmation_required.
+ * - Reversible configuration / other methods on action-classified models → executable (Odoo authority).
+ * - Non-classified models (sale.order, …) → mirror `assessWriteOperation`.
  */
 export function annotateActionExecutability(model: string, method: string): ActionExecutability {
   const lifecycle = getReversibleLifecycleRule(model, method);
@@ -235,26 +234,23 @@ export function annotateActionExecutability(model: string, method: string): Acti
     };
   }
 
+  if (verdict.policy_rule === "irreversible_confirmation_required" || verdict.policy_rule === "high_risk_method") {
+    return {
+      executable: true,
+      confirmation_required: true,
+      deny_reason: verdict.reason,
+      alternative: "confirmation_token",
+      ...(verdict.risk_class ? { risk_class: verdict.risk_class } : {}),
+      policy_rule: "irreversible_confirmation_required"
+    };
+  }
+
+  // Fall back to allowlist annotator for any remaining sensitive_* rules.
   const policy = verdict.policy_rule;
-  if (
-    policy === "high_risk_method" ||
-    policy === "sensitive_model_method_denied" ||
-    policy === "sensitive_model_crud"
-  ) {
-    if (policy === "sensitive_model_crud") {
-      return {
-        executable: false,
-        deny_reason: verdict.reason,
-        alternative: verdict.next_step,
-        ...(verdict.risk_class ? { risk_class: verdict.risk_class } : {}),
-        policy_rule: policy
-      };
-    }
-    // high_risk + unknown sensitive method: use allowlist annotator (correct alternatives).
+  if (policy === "sensitive_model_method_denied" || policy === "sensitive_model_crud") {
     return annotateSensitiveModelActionExecutability(model, method);
   }
 
-  // Non-sensitive deny — gate prose only (no sensitive_* / billing.* invention).
   return {
     executable: false,
     deny_reason:
