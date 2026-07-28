@@ -1,8 +1,10 @@
 /**
- * Capability-gated reversible lifecycle allowlist for `call_model_method`.
+ * Capability-gated reversible lifecycle allowlist + irreversible method catalog for
+ * `call_model_method`.
  *
- * Pure policy data + helpers — no Odoo I/O. Field mutations stay on dedicated draft billing
- * tools; high-risk post/pay/reconcile/delete/lock methods stay denied.
+ * Pure policy data + helpers — no Odoo I/O. Irreversible posting / payment / reconcile /
+ * delete / lock methods require a confirmation token (see `policy.ts` + write tools); they
+ * are no longer flat denials. Odoo ACLs / workflow / locks / hashes remain the authority.
  *
  * Odoo version notes (verified against upstream odoo/odoo addons/hr_expense):
  * - Odoo 17–18: `hr.expense.sheet` exists; sheet states draft/submit/approve/post/done/cancel;
@@ -16,6 +18,10 @@
 export type PolicyRule =
   | "sensitive_model_crud"
   | "high_risk_method"
+  | "irreversible_confirmation_required"
+  | "irreversible_confirmation_invalid"
+  | "reversible_configuration"
+  | "reversible_lifecycle"
   | "lifecycle_allowlist"
   | "lifecycle_state_incompatible"
   | "lifecycle_context_required"
@@ -27,6 +33,7 @@ export type PolicyRule =
 /** Coarse risk class for operator/agent routing. */
 export type RiskClass =
   | "preparatory"
+  | "reversible_configuration"
   | "reversible_lifecycle"
   | "irreversible_posting"
   | "irreversible_payment"
@@ -49,6 +56,13 @@ export type LifecycleRule = {
    * absent on the running Odoo version is skipped, never treated as false.
    */
   guard_fields?: readonly string[];
+  /**
+   * Current `state` values from which this transition is irreversible and therefore requires a
+   * confirmation token, even though the method itself is allowlisted. State-aware by necessity: the
+   * pure classifier only sees (model, method), so "un-posting is dangerous but resetting a
+   * cancelled record is not" can only be decided once the live record has been read.
+   */
+  confirm_from_states?: readonly string[];
   next_step_hint?: string;
   /** Human note for docs/discovery (not sent to clients unless copied into deny text). */
   version_note?: string;
@@ -69,18 +83,17 @@ export type HighRiskRule = {
   alternative?: string;
 };
 
-/** Vendor-bill hygiene path — draft reset only for vendor bills / refunds. */
-const VENDOR_BILL_MOVE_TYPES = ["in_invoice", "in_refund"] as const;
-
 /**
- * Alternative / next_step for irreversible posting & payment: human / Odoo UI only.
+ * Confirmation-path next steps for irreversible ledger actions.
  * `bookkeeping.plan_safe_write` covers only its four tax/lock operations — never post/pay.
  */
-const HUMAN_ODOO_UI = "human / Odoo UI";
-const POST_NEXT_STEP = "Post in the Odoo UI / with a human. bookkeeping.plan_safe_write cannot post journal entries.";
-const PAY_NEXT_STEP = "Register or post payments in the Odoo UI / with a human.";
+const CONFIRM_RETRY =
+  "Retry the same call with confirmation_token from the preflight response (two-phase: preflight → confirm → execute).";
+const POST_NEXT_STEP = `Posting requires confirmation. ${CONFIRM_RETRY} bookkeeping.plan_safe_write cannot post journal entries.`;
+const PAY_NEXT_STEP = `Payment requires confirmation. ${CONFIRM_RETRY}`;
 const LOCK_NEXT_STEP =
-  "Use bookkeeping.plan_safe_write for create_lock_exception / tax-close operations (its four supported ops only), or perform this in the Odoo UI.";
+  `Lock-sensitive writes require confirmation. ${CONFIRM_RETRY} Or use bookkeeping.plan_safe_write for create_lock_exception / tax-close ops.`;
+const DESTROY_NEXT_STEP = `Destructive actions require confirmation. ${CONFIRM_RETRY}`;
 
 /**
  * v1 reversible lifecycle methods. Names match curated `actions-map` + typical Odoo 17–19
@@ -157,96 +170,105 @@ export const REVERSIBLE_LIFECYCLE_ALLOWLIST: readonly LifecycleRule[] = [
   {
     model: "account.move",
     method: "button_draft",
-    // `posted` is deliberately EXCLUDED: resetting a posted move to draft un-posts its journal
-    // entry, which is a ledger mutation on the human side of the connector fence (same reason
-    // hr.expense reset stops before `posted`). Only already-cancelled bills — which carry no live
-    // entry — may be returned to draft by an agent.
-    from_states: ["cancel"],
+    // Posted + cancel: Odoo enforces hash / lock / move_type. The connector no longer refuses posted
+    // resets solely by policy (#2201 reset → correct → repost of unhashed unlocked moves) — but see
+    // `confirm_from_states`: un-posting is gated, it is not free.
+    from_states: ["cancel", "posted"],
+    // Resetting a POSTED move to draft un-posts its journal entry: it removes an accounting record
+    // that exists. That is the reverse of `action_post` and belongs in the same risk class — an
+    // unhashed, unlocked entry has neither of Odoo's own guards. From `cancel` there is no live
+    // entry to remove, so that direction stays unconfirmed.
+    confirm_from_states: ["posted"],
+    // Deliberately NOT restricted by move_type. Odoo's hash/lock checks are the authority on which
+    // moves may be reset, and #2201's motivating case is a manual entry (move_type `entry`), not a
+    // vendor bill. The safety comes from `confirm_from_states`, not from a move_type allowlist.
     risk_class: "reversible_lifecycle",
     policy_rule: "lifecycle_allowlist",
-    require_move_types: VENDOR_BILL_MOVE_TYPES,
     next_step_hint:
-      "After draft reset on a cancelled vendor bill, use billing.configure_draft_vendor_bill for preparatory fields.",
+      "After draft reset, correct fields via update_record / billing.configure_draft_vendor_bill, then action_post with confirmation.",
     excluded_state_hints: {
-      posted:
-        "This bill is posted — resetting it to draft un-posts its journal entry, which the connector never does. Un-post in the Odoo UI / with a human, then retry."
+      draft: "Record is already draft — edit fields directly, then post with confirmation when ready."
     }
   }
 ];
 
-/** Explicit high-risk methods — never opened by the lifecycle allowlist. */
+/**
+ * Explicit irreversible methods — require confirmation token (not flat denial).
+ * Pattern matching in `getHighRiskMethodRule` covers posting/pay/reconcile/lock names
+ * even when the model is absent from this curated list.
+ */
 export const HIGH_RISK_METHOD_DENYLIST: readonly HighRiskRule[] = [
   {
     model: "account.move",
     method: "action_post",
     risk_class: "irreversible_posting",
     policy_rule: "high_risk_method",
-    reason: "Posting journal entries is irreversible from the connector's perspective.",
+    reason: "Posting journal entries is irreversible from the connector's perspective and requires confirmation.",
     next_step: POST_NEXT_STEP,
-    alternative: HUMAN_ODOO_UI
+    alternative: "confirmation_token"
   },
   {
     model: "account.move",
     method: "button_cancel",
     risk_class: "destructive",
     policy_rule: "high_risk_method",
-    reason: "Cancelling posted moves is blocked on generic MCP write tools.",
-    next_step: "Cancel in the Odoo UI / with a human.",
-    alternative: HUMAN_ODOO_UI
+    reason: "Cancelling moves is destructive and requires confirmation.",
+    next_step: DESTROY_NEXT_STEP,
+    alternative: "confirmation_token"
   },
   {
     model: "account.payment",
     method: "action_post",
     risk_class: "irreversible_payment",
     policy_rule: "high_risk_method",
-    reason: "Posting payments is blocked on generic MCP write tools.",
+    reason: "Posting payments requires confirmation.",
     next_step: PAY_NEXT_STEP,
-    alternative: HUMAN_ODOO_UI
+    alternative: "confirmation_token"
   },
   {
     model: "account.payment",
     method: "action_draft",
     risk_class: "irreversible_payment",
     policy_rule: "high_risk_method",
-    reason: "Payment draft-reset is not on the connector reversible-lifecycle allowlist.",
-    next_step: "Reset payments in the Odoo UI / with a human.",
-    alternative: HUMAN_ODOO_UI
+    reason: "Payment draft-reset can reverse posted payment state and requires confirmation.",
+    next_step: PAY_NEXT_STEP,
+    alternative: "confirmation_token"
   },
   {
     model: "account.payment",
     method: "action_cancel",
     risk_class: "destructive",
     policy_rule: "high_risk_method",
-    reason: "Cancelling payments is blocked on generic MCP write tools.",
-    next_step: "Cancel payments in the Odoo UI / with a human.",
-    alternative: HUMAN_ODOO_UI
+    reason: "Cancelling payments is destructive and requires confirmation.",
+    next_step: DESTROY_NEXT_STEP,
+    alternative: "confirmation_token"
   },
   {
     model: "hr.expense",
     method: "action_post",
     risk_class: "irreversible_posting",
     policy_rule: "high_risk_method",
-    reason: "Posting expenses creates accounting entries and is blocked on generic MCP tools.",
+    reason: "Posting expenses creates accounting entries and requires confirmation.",
     next_step: POST_NEXT_STEP,
-    alternative: HUMAN_ODOO_UI
+    alternative: "confirmation_token"
   },
   {
     model: "hr.expense",
     method: "action_pay",
     risk_class: "irreversible_payment",
     policy_rule: "high_risk_method",
-    reason: "Paying expenses is blocked on generic MCP write tools.",
+    reason: "Paying expenses requires confirmation.",
     next_step: PAY_NEXT_STEP,
-    alternative: HUMAN_ODOO_UI
+    alternative: "confirmation_token"
   },
   {
     model: "hr.expense.sheet",
     method: "action_sheet_move_create",
     risk_class: "irreversible_posting",
     policy_rule: "high_risk_method",
-    reason: "Creating journal entries from expense sheets is blocked on generic MCP tools.",
+    reason: "Creating journal entries from expense sheets requires confirmation.",
     next_step: POST_NEXT_STEP,
-    alternative: HUMAN_ODOO_UI
+    alternative: "confirmation_token"
   }
 ];
 
@@ -261,8 +283,16 @@ const HIGH_RISK_BY_KEY = new Map<string, HighRiskRule>(
 );
 
 /** Methods that look like posting / payment / reconcile regardless of curated denylist. */
+/**
+ * Method names that are high-risk regardless of a model-scoped catalog entry.
+ *
+ * Odoo exposes the same irreversible operation under several names — the public button
+ * (`action_post`), the ORM-internal (`_post`), and per-model variants (`button_validate` on bank
+ * statements). Matching only the public name lets the same mutation through under a different
+ * label, so every known alias for post / pay / reconcile / lock belongs here.
+ */
 const HIGH_RISK_METHOD_NAME_RE =
-  /^(action_post|button_post|action_register_payment|post_payments|reconcile|action_reconcile|js_assign_outstanding_line|button_set_lock|action_lock)/i;
+  /^(_post|action_post|button_post|post$|action_register_payment|register_payment|post_payments|reconcile|action_reconcile|js_assign_outstanding_line|button_set_lock|action_lock|button_validate|action_validate)/i;
 
 function key(model: string, method: string): string {
   return `${model.trim()}::${method.trim()}`;
@@ -300,10 +330,9 @@ export function getHighRiskMethodRule(model: string, method: string): HighRiskRu
     method: m,
     risk_class,
     policy_rule: "high_risk_method",
-    reason: `Method "${m}" is a high-risk financial mutation and is blocked on generic MCP write tools.`,
+    reason: `Method "${m}" is an irreversible ledger mutation and requires confirmation.`,
     next_step: isLock ? LOCK_NEXT_STEP : risk_class === "irreversible_payment" ? PAY_NEXT_STEP : POST_NEXT_STEP,
-    // plan_safe_write only for lock/tax-close — never for posting or payment.
-    alternative: isLock ? "bookkeeping.plan_safe_write" : HUMAN_ODOO_UI
+    alternative: "confirmation_token"
   };
 }
 
@@ -346,6 +375,19 @@ export function failedGuardFields(rule: LifecycleRule, record: Record<string, un
   return rule.guard_fields.filter((field) => field in record && !record[field]);
 }
 
+/**
+ * True when this transition, from this live state, is irreversible and needs a confirmation token.
+ * Structural rather than name-based: any rule may declare the states it must not leave unconfirmed.
+ */
+export function requiresConfirmationFromState(
+  rule: LifecycleRule,
+  state: string | null | undefined
+): boolean {
+  if (!rule.confirm_from_states?.length) return false;
+  if (typeof state !== "string") return false;
+  return rule.confirm_from_states.includes(state.trim());
+}
+
 /** Extra guidance for a deliberately-excluded current state, when the rule documents one. */
 export function excludedStateHint(rule: LifecycleRule, state: string | null | undefined): string | undefined {
   if (typeof state !== "string") return undefined;
@@ -360,6 +402,8 @@ export function allowlistedMethodsForModel(model: string): string[] {
 
 export type ActionExecutability = {
   executable: boolean;
+  /** When true, executable only after a confirmation_token from preflight. */
+  confirmation_required?: boolean;
   deny_reason?: string;
   alternative?: string;
   risk_class?: RiskClass;
@@ -367,9 +411,9 @@ export type ActionExecutability = {
 };
 
 /**
- * Sensitive-model fail-closed annotation only (lifecycle allowlist / high-risk / unknown).
- * For non-sensitive models use `annotateActionExecutability` in write-safety.ts, which consults
- * the real write gate so deny_reason/alternative match call_model_method.
+ * Fail-closed annotation for discovery (`list_model_actions`).
+ * Irreversible methods are marked confirmation_required (not permanently non-executable).
+ * Unknown reversible methods on any model are executable under Odoo authority (v1 policy).
  */
 export function annotateSensitiveModelActionExecutability(model: string, method: string): ActionExecutability {
   const lifecycle = getReversibleLifecycleRule(model, method);
@@ -384,20 +428,30 @@ export function annotateSensitiveModelActionExecutability(model: string, method:
   const highRisk = getHighRiskMethodRule(model, method);
   if (highRisk) {
     return {
-      executable: false,
+      executable: true,
+      confirmation_required: true,
       deny_reason: highRisk.reason,
       alternative: highRisk.alternative,
       risk_class: highRisk.risk_class,
-      policy_rule: highRisk.policy_rule
+      policy_rule: "irreversible_confirmation_required"
     };
   }
 
+  if (method.trim() === "unlink") {
+    return {
+      executable: true,
+      confirmation_required: true,
+      deny_reason: `Deleting ${model} records requires confirmation.`,
+      alternative: "confirmation_token",
+      risk_class: "destructive",
+      policy_rule: "irreversible_confirmation_required"
+    };
+  }
+
+  // Reversible config / unknown lifecycle — Odoo is the authority (no prefix deny).
   return {
-    executable: false,
-    deny_reason: "Method is not on the connector reversible-lifecycle allowlist for call_model_method.",
-    alternative: allowlistedMethodsForModel(model).length
-      ? `call_model_method with allowlisted methods: ${allowlistedMethodsForModel(model).join(", ")}`
-      : "Use dedicated billing.* tools, bookkeeping.plan_safe_write (tax/lock ops only), or the Odoo UI.",
-    policy_rule: "sensitive_model_method_denied"
+    executable: true,
+    risk_class: isSensitiveModelCrudMethod(method) ? "reversible_configuration" : "reversible_lifecycle",
+    policy_rule: isSensitiveModelCrudMethod(method) ? "reversible_configuration" : "reversible_lifecycle"
   };
 }

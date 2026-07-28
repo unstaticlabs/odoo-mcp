@@ -1246,18 +1246,15 @@ describe("create_record provenance stamping", () => {
     expect(text).not.toContain("[agent-source]");
   });
 
-  test("res.partner create is blocked by connector safety before any Odoo call", async () => {
+  test("res.partner non-financial create reaches Odoo (no blanket partner deny)", async () => {
     const queue = makeStubQueue({ createId: 5 });
     const agent = await buildAgentWithQueue(queue);
     const handler = getToolHandler(agent, "create_record");
 
     const result = await handler({ model: "res.partner", values: { name: "Acme" } });
 
-    expect(result.isError).toBe(true);
-    expect(queue.calls.length).toBe(0);
-    const envelope = JSON.parse(result.content[0].text);
-    expect(envelope.error).toBe("write_blocked");
-    expect(envelope.intent).toBe("financial_mutation");
+    expect(result.isError).toBeUndefined();
+    expect(queue.calls.some((c: any) => c.method === "create")).toBe(true);
   });
 
   test("post failure isolation: still returns id + warning, isError not set", async () => {
@@ -1415,21 +1412,18 @@ describe("write safety gate (connector)", () => {
     });
   });
 
-  test("update_record blocks account.move before Odoo is called", async () => {
+  test("update_record allows account.move write through to Odoo (no prefix deny)", async () => {
     const queue = makeStubQueue();
     const agent = await buildAgentWithQueue(queue);
     const handler = getToolHandler(agent, "update_record");
 
     const result = await handler({ model: "account.move", record_id: 1, values: { ref: "INV/1" } });
 
-    expect(result.isError).toBe(true);
-    expect(queue.calls.length).toBe(0);
-    const envelope = JSON.parse(result.content[0].text);
-    expect(envelope.error).toBe("write_blocked");
-    expect(envelope.intent).toBe("financial_mutation");
+    expect(result.isError).toBeUndefined();
+    expect(queue.calls.some((c: any) => c.method === "write")).toBe(true);
   });
 
-  test("update_record blocks finance-keyword text on account.move (structure over content)", async () => {
+  test("update_record allows finance-keyword text on account.move (structure over content; no prefix deny)", async () => {
     const queue = makeStubQueue();
     const agent = await buildAgentWithQueue(queue);
     const handler = getToolHandler(agent, "update_record");
@@ -1440,11 +1434,8 @@ describe("write safety gate (connector)", () => {
       values: { narration: FINANCE_KEYWORD_PM_TEXT.chatterBody }
     });
 
-    expect(result.isError).toBe(true);
-    expect(queue.calls.length).toBe(0);
-    const envelope = JSON.parse(result.content[0].text);
-    expect(envelope.error).toBe("write_blocked");
-    expect(envelope.intent).toBe("financial_mutation");
+    expect(result.isError).toBeUndefined();
+    expect(queue.calls.some((c: any) => c.method === "write")).toBe(true);
   });
 
   test("call_model_method read bypasses the write safety gate", async () => {
@@ -1574,17 +1565,15 @@ describe("write safety gate (connector)", () => {
     expect(envelope.intent).toBe("disallowed");
   });
 
-  test("create_record for res.partner is blocked before Odoo", async () => {
-    const queue = makeStubQueue();
+  test("create_record for res.partner non-financial fields reaches Odoo", async () => {
+    const queue = makeStubQueue({ createId: 9 });
     const agent = await buildAgentWithQueue(queue);
     const handler = getToolHandler(agent, "create_record");
 
     const result = await handler({ model: "res.partner", values: { name: "Acme" } });
 
-    expect(result.isError).toBe(true);
-    expect(queue.calls.length).toBe(0);
-    const envelope = JSON.parse(result.content[0].text);
-    expect(envelope.error).toBe("write_blocked");
+    expect(result.isError).toBeUndefined();
+    expect(queue.calls.some((c: any) => c.method === "create")).toBe(true);
   });
 });
 
@@ -2353,15 +2342,16 @@ describe("mergeModelActions", () => {
     expect(new Set(methods).size).toBe(methods.length);
   });
 
-  test("annotateModelActions marks button_draft executable and action_post not", () => {
+  test("annotateModelActions marks button_draft executable and action_post confirmation-required", () => {
     const annotated = annotateModelActions(
       "account.move",
       mergeModelActions(CURATED_MODEL_ACTIONS["account.move"], [])
     );
     const byMethod = new Map(annotated.map((a) => [a.method, a]));
     expect(byMethod.get("button_draft")?.executable).toBe(true);
-    expect(byMethod.get("action_post")?.executable).toBe(false);
-    expect(byMethod.get("action_post")?.alternative).toBe("human / Odoo UI");
+    expect(byMethod.get("action_post")?.executable).toBe(true);
+    expect(byMethod.get("action_post")?.confirmation_required).toBe(true);
+    expect(byMethod.get("action_post")?.alternative).toBe("confirmation_token");
     expect(byMethod.get("action_post")?.alternative).not.toContain("bookkeeping");
   });
 });
@@ -2403,7 +2393,8 @@ describe("list_model_actions tool", () => {
       method: "action_post",
       label: "Post (from view)",
       source: "view",
-      executable: false,
+      executable: true,
+      confirmation_required: true,
       risk_class: "irreversible_posting"
     });
     expect(byMethod.get("button_draft")).toMatchObject({
@@ -2446,7 +2437,7 @@ describe("list_model_actions tool", () => {
     ]);
   });
 
-  test("marks hr.expense allowlisted lifecycle executable and action_post not", async () => {
+  test("marks hr.expense allowlisted lifecycle executable and action_post confirmation-required", async () => {
     const agent = await buildWriteToolAgent();
     globalThis.fetch = mock(() =>
       Promise.resolve(
@@ -2465,7 +2456,8 @@ describe("list_model_actions tool", () => {
     expect(byMethod.get("action_reset")?.executable).toBe(true);
     expect(byMethod.get("action_submit")?.executable).toBe(true);
     expect(byMethod.get("action_approve")?.executable).toBe(true);
-    expect(byMethod.get("action_post")?.executable).toBe(false);
+    expect(byMethod.get("action_post")?.executable).toBe(true);
+    expect(byMethod.get("action_post")?.confirmation_required).toBe(true);
   });
 
   test("rejects empty-string model without calling fetch", async () => {
@@ -2504,7 +2496,11 @@ describe("JSON error envelope (tool handlers)", () => {
       method: "write",
       http_status: 403,
       details: "Access Denied by Odoo",
-      recoverable: false
+      recoverable: false,
+      refusing_layer: "odoo_acl",
+      next_step: "Use an Odoo user with the required access rights, or perform the action in the Odoo UI as that user.",
+      odoo_exception: "Access Denied by Odoo",
+      record_ids: [1]
     });
     expect(result.content[0].text).not.toContain("secret-key");
     expect(result.content[0].text).not.toContain("Bearer");

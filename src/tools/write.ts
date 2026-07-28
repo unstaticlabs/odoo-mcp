@@ -1,12 +1,19 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { isReversibleLifecycleMethod } from "../lifecycle-allowlist";
+import { isReversibleLifecycleMethod, type RiskClass } from "../lifecycle-allowlist";
 import { preflightLifecycleCall } from "../lifecycle-gate";
 import type { OdooQueue } from "../odoo-queue";
+import { classifyOperation, type OperationClassification } from "../policy";
+import {
+  issueConfirmationToken,
+  verifyConfirmationToken,
+  type WritePlan
+} from "../safety";
 import type { Props } from "../server";
 import { assessWriteOperation, isMutatingOdooMethod } from "../write-safety";
 import {
   logWriteContext,
+  mcpConfirmationRequired,
   mcpError,
   mcpErrorFromException,
   mcpStructured,
@@ -18,20 +25,233 @@ import {
 
 const PM_WRITE_ROUTING_NOTE =
   " Project-management notes (including banking/B2C/deadline operational text) on project.task / project.project / mail.activity→project.* are allowed. " +
-  "For draft vendor-bill / expense prep use billing.update_draft_expense / billing.configure_draft_vendor_bill. " +
-  "For reversible expense/bill lifecycle (reset→edit→resubmit/reapprove) use call_model_method on allowlisted methods with required write context (see list_model_actions executable:true). " +
-  "For tax-close / report / return / lock-exception mutations use bookkeeping.plan_safe_write.";
+  "Accounting models are action-classified (not prefix-denied): reversible configuration/lifecycle go to Odoo; " +
+  "irreversible posting/payment/reconcile/delete/lock require a confirmation_token (preflight → confirm → execute). " +
+  "Draft vendor-bill / expense prep helpers: billing.update_draft_expense / billing.configure_draft_vendor_bill. " +
+  "Tax-close / report / return / lock-exception: bookkeeping.plan_safe_write.";
 
 function gateWrite(model: string, method: string, args: Record<string, unknown>) {
   if (!isMutatingOdooMethod(method)) return null;
   const verdict = assessWriteOperation({ model, method, args });
-  if (!verdict.allowed) {
-    return mcpWriteBlockedError({ model, method }, verdict);
+  // Irreversible confirmation is handled by the confirmation path (not a flat write_blocked).
+  if (!verdict.allowed && verdict.policy_rule !== "irreversible_confirmation_required") {
+    return mcpWriteBlockedError(
+      { model, method },
+      {
+        ...verdict,
+        refusing_layer: "connector_policy",
+        next_step: verdict.next_step ?? "Adjust the request and retry."
+      }
+    );
   }
   return null;
 }
 
-export function registerWriteTools(server: McpServer, getProps: () => Props | undefined, queue: OdooQueue) {
+/**
+ * THE gate for every mutating write tool: connector policy first, then the irreversible
+ * confirmation path. Returns a response to send back, or null when the call may execute.
+ *
+ * Every write tool must route through this. `gateWrite` alone is not sufficient — it deliberately
+ * lets `irreversible_confirmation_required` pass so the two-phase path can own it, which means any
+ * tool calling only `gateWrite` executes irreversible operations unconfirmed. Keeping both steps in
+ * one function is what stops that gap from reopening per-tool.
+ */
+async function guardMutation(opts: {
+  model: string;
+  method: string;
+  /** Odoo JSON-2 body, used for policy classification (vals/vals_list/ids). */
+  args: Record<string, unknown>;
+  ids?: number[];
+  /** Payload signed into the confirmation token alongside model/method/ids. */
+  kwargs?: Record<string, unknown>;
+  confirmation_token?: string;
+  getSecret: () => string | undefined;
+}) {
+  const blocked = gateWrite(opts.model, opts.method, opts.args);
+  if (blocked) return blocked;
+  return handleIrreversibleConfirmation({
+    model: opts.model,
+    method: opts.method,
+    ids: opts.ids,
+    kwargs: opts.kwargs,
+    args: opts.args,
+    confirmation_token: opts.confirmation_token,
+    getSecret: opts.getSecret
+  });
+}
+
+/** Shared schema fragment so every mutating tool advertises the token identically. */
+const zConfirmationToken = z
+  .string()
+  .optional()
+  .describe(
+    "Confirmation token from a previous preflight response. Required only for irreversible operations " +
+      "(posting, paying, reconciling, deleting, lock-boundary writes); omit it to receive the preflight."
+  );
+
+/** Canonical plan signed into the irreversible confirmation token. */
+export function buildIrreversibleWritePlan(input: {
+  model: string;
+  method: string;
+  ids?: number[];
+  kwargs?: Record<string, unknown>;
+}): WritePlan {
+  const values: Record<string, unknown> = {
+    ...(input.kwargs ?? {}),
+    ...(input.ids ? { ids: [...input.ids].sort((a, b) => a - b) } : {})
+  };
+  return {
+    operation: "irreversible_execute",
+    model: input.model.trim(),
+    method: input.method.trim(),
+    values,
+    company_id: 0,
+    evidence: [],
+    warnings: []
+  };
+}
+
+function extractIds(ids: unknown): number[] | undefined {
+  if (!Array.isArray(ids)) return undefined;
+  const out = ids.filter((id): id is number => typeof id === "number" && Number.isInteger(id) && id > 0);
+  return out.length ? [...new Set(out)] : undefined;
+}
+
+/**
+ * Two-phase gate for irreversible ledger ops.
+ * - No token → preflight response with confirmation_token (no mutate).
+ * - Token present → verify HMAC over the canonical plan, then allow execute.
+ */
+async function handleIrreversibleConfirmation(opts: {
+  model: string;
+  method: string;
+  ids?: number[];
+  kwargs?: Record<string, unknown>;
+  confirmation_token?: string;
+  /** Odoo body, so field-level lock-boundary escalation can see vals/vals_list. */
+  args?: Record<string, unknown>;
+  /**
+   * Escalate an operation the pure classifier considers reversible. Used when live record state is
+   * what makes it irreversible (see `confirm_from_states`), which classification cannot know.
+   */
+  forceConfirmation?: { risk_class: RiskClass; reason: string };
+  getSecret: () => string | undefined;
+}): Promise<ReturnType<typeof mcpConfirmationRequired> | ReturnType<typeof mcpWriteBlockedError> | null> {
+  const classified = classifyOperation(opts.model, opts.method, opts.args);
+  const classification: OperationClassification = opts.forceConfirmation
+    ? {
+        ...classified,
+        bucket: "irreversible_ledger",
+        risk_class: opts.forceConfirmation.risk_class,
+        requires_confirmation: true,
+        policy_rule: "irreversible_confirmation_required",
+        reason: opts.forceConfirmation.reason
+      }
+    : classified;
+  if (!classification.requires_confirmation) return null;
+
+  const plan = buildIrreversibleWritePlan({
+    model: opts.model,
+    method: opts.method,
+    ids: opts.ids,
+    kwargs: opts.kwargs
+  });
+  const would_execute = {
+    model: opts.model,
+    method: opts.method,
+    ...(opts.ids ? { ids: opts.ids } : {}),
+    ...(opts.kwargs && Object.keys(opts.kwargs).length ? { kwargs: opts.kwargs } : {})
+  };
+
+  if (!opts.confirmation_token || !opts.confirmation_token.trim()) {
+    const secret = opts.getSecret();
+    let confirmation_token: string | undefined;
+    if (secret) {
+      confirmation_token = await issueConfirmationToken(plan, secret, Date.now());
+    }
+    return mcpConfirmationRequired({
+      model: opts.model,
+      method: opts.method,
+      details:
+        classification.reason ??
+        `Irreversible operation ${opts.model}.${opts.method} requires confirmation before execute.`,
+      risk_class: classification.risk_class,
+      next_step:
+        confirmation_token != null
+          ? "Retry the same call with confirmation_token to execute, then verify the result in Odoo."
+          : "CONFIRMATION_SECRET is not configured; irreversible execute is unavailable. Configure the secret or use the Odoo UI.",
+      confirmation_token,
+      record_ids: opts.ids,
+      would_execute
+    });
+  }
+
+  const secret = opts.getSecret();
+  if (!secret) {
+    return mcpWriteBlockedError(
+      { model: opts.model, method: opts.method },
+      {
+        intent: "financial_mutation",
+        reason: "CONFIRMATION_SECRET is not configured; cannot verify confirmation_token.",
+        policy_rule: "irreversible_confirmation_invalid",
+        risk_class: classification.risk_class,
+        refusing_layer: "connector_policy",
+        next_step: "Configure CONFIRMATION_SECRET on the worker, or perform this action in the Odoo UI.",
+        recoverable: true,
+        record_ids: opts.ids
+      }
+    );
+  }
+
+  const verdict = await verifyConfirmationToken(opts.confirmation_token.trim(), plan, secret, Date.now());
+  if (verdict !== "valid") {
+    return mcpWriteBlockedError(
+      { model: opts.model, method: opts.method },
+      {
+        intent: "financial_mutation",
+        reason:
+          verdict === "expired"
+            ? "confirmation_token expired — re-run without a token to obtain a fresh preflight token."
+            : "confirmation_token mismatch — token must be issued for this exact model/method/ids/kwargs.",
+        policy_rule: "irreversible_confirmation_invalid",
+        risk_class: classification.risk_class,
+        refusing_layer: "connector_policy",
+        next_step: "Call again without confirmation_token to get a new preflight token, then retry with that token.",
+        recoverable: true,
+        record_ids: opts.ids
+      }
+    );
+  }
+
+  return null;
+}
+
+/** Post-write verification: re-read state when ids are known. Never fails the write. */
+async function verifyAfterWrite(opts: {
+  model: string;
+  ids: number[];
+  queue: OdooQueue;
+  getProps: () => Props | undefined;
+}): Promise<Record<string, unknown> | undefined> {
+  if (opts.ids.length === 0) return undefined;
+  try {
+    const rows = await opts.queue.enqueue(requireConnection(opts.getProps()), opts.model, "read", {
+      ids: opts.ids,
+      fields: ["id", "state", "active"]
+    });
+    if (!Array.isArray(rows)) return undefined;
+    return { records: rows };
+  } catch {
+    return undefined;
+  }
+}
+
+export function registerWriteTools(
+  server: McpServer,
+  getProps: () => Props | undefined,
+  queue: OdooQueue,
+  getSecret: () => string | undefined = () => undefined
+) {
   server.registerTool(
     "create_record",
     {
@@ -45,7 +265,8 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
       inputSchema: {
         model: z.string().min(1),
         values: z.record(z.string(), z.any()),
-        context: zWriteContext
+        context: zWriteContext,
+        confirmation_token: zConfirmationToken
       },
       outputSchema: {
         id: z.number().int().describe("Database id of the created record"),
@@ -59,9 +280,16 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
           .describe("project.task only: the create succeeded but posting the provenance stamp to the chatter failed")
       }
     },
-    async ({ model, values, context }) => {
+    async ({ model, values, context, confirmation_token }) => {
       logWriteContext("create_record", model, context);
-      const blocked = gateWrite(model, "create", { vals_list: [values] });
+      const blocked = await guardMutation({
+        model,
+        method: "create",
+        args: { vals_list: [values] },
+        kwargs: { vals_list: [values] },
+        confirmation_token,
+        getSecret
+      });
       if (blocked) return blocked;
 
       const props = getProps();
@@ -152,7 +380,7 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
         });
         return mcpStructured({ result }, JSON.stringify(result, null, 2));
       } catch (err) {
-        return mcpErrorFromException(err, { model, method: "message_post" });
+        return mcpErrorFromException(err, { model, method: "message_post", record_ids: [record_id] });
       }
     }
   );
@@ -169,15 +397,24 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
         model: z.string().min(1),
         record_id: z.number().int().positive(),
         values: z.record(z.string(), z.any()),
-        context: zWriteContext
+        context: zWriteContext,
+        confirmation_token: zConfirmationToken
       },
       outputSchema: {
         ok: z.boolean().describe("True when the write succeeded")
       }
     },
-    async ({ model, record_id, values, context }) => {
+    async ({ model, record_id, values, context, confirmation_token }) => {
       logWriteContext("update_record", model, context);
-      const blocked = gateWrite(model, "write", { ids: [record_id], vals: values });
+      const blocked = await guardMutation({
+        model,
+        method: "write",
+        args: { ids: [record_id], vals: values },
+        ids: [record_id],
+        kwargs: { vals: values },
+        confirmation_token,
+        getSecret
+      });
       if (blocked) return blocked;
       try {
         await queue.enqueue(requireConnection(getProps()), model, "write", {
@@ -186,7 +423,7 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
         });
         return mcpStructured({ ok: true }, JSON.stringify(true, null, 2));
       } catch (err) {
-        return mcpErrorFromException(err, { model, method: "write" });
+        return mcpErrorFromException(err, { model, method: "write", record_ids: [record_id] });
       }
     }
   );
@@ -210,7 +447,8 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
             })
           )
           .min(1),
-        context: zWriteContext
+        context: zWriteContext,
+        confirmation_token: zConfirmationToken
       },
       outputSchema: {
         results: z
@@ -218,21 +456,36 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
           .describe("One entry per applied update, in input order (fail-fast: absent entries were not attempted)")
       }
     },
-    async ({ model, updates, context }) => {
+    async ({ model, updates, context, confirmation_token }) => {
       logWriteContext("batch_update", model, context);
       if (!model || !model.trim()) return mcpError("model must be a non-empty string");
+
+      // Validate EVERY update before applying ANY of them. Gating inside the write loop would let a
+      // refusal on update N land updates 1..N-1 first — a partial write caused by our own policy,
+      // which is exactly what the fail-fast contract must not do.
+      for (const u of updates) {
+        const blocked = await guardMutation({
+          model,
+          method: "write",
+          args: { ids: [u.record_id], vals: u.values },
+          ids: [u.record_id],
+          kwargs: { vals: u.values },
+          confirmation_token,
+          getSecret
+        });
+        if (blocked) return blocked;
+      }
+
       try {
         const conn = requireConnection(getProps());
         const results: { record_id: number; ok: boolean }[] = [];
         for (const u of updates) {
-          const blocked = gateWrite(model, "write", { ids: [u.record_id], vals: u.values });
-          if (blocked) return blocked;
           await queue.enqueue(conn, model, "write", { ids: [u.record_id], vals: u.values });
           results.push({ record_id: u.record_id, ok: true });
         }
         return mcpStructured({ results }, JSON.stringify(results, null, 2));
       } catch (err) {
-        return mcpErrorFromException(err, { model, method: "write" });
+        return mcpErrorFromException(err, { model, method: "write", partial_write: true });
       }
     }
   );
@@ -293,7 +546,7 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
         }
         return mcpStructured({ results }, JSON.stringify(results, null, 2));
       } catch (err) {
-        return mcpErrorFromException(err, { model, method: "message_post" });
+        return mcpErrorFromException(err, { model, method: "message_post", partial_write: true });
       }
     }
   );
@@ -302,26 +555,49 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
     "delete_record",
     {
       title: "Delete Record",
-      description: "Write: delete a single Odoo record by id.",
+      description:
+        "Write: delete a single Odoo record by id. Destructive — requires confirmation_token (call once without token to preflight)." +
+        PM_WRITE_ROUTING_NOTE,
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
       inputSchema: {
         model: z.string().min(1),
         record_id: z.number().int().positive(),
-        context: zWriteContext
+        context: zWriteContext,
+        confirmation_token: z
+          .string()
+          .optional()
+          .describe("HMAC token from a prior unconfirmed delete_record preflight for this exact model/record_id")
       },
       outputSchema: {
-        ok: z.boolean().describe("True when the delete succeeded")
+        ok: z.boolean().describe("True when the delete succeeded"),
+        verification: z.unknown().optional().describe("Post-delete read evidence when available")
       }
     },
-    async ({ model, record_id, context }) => {
+    async ({ model, record_id, context, confirmation_token }) => {
       logWriteContext("delete_record", model, context);
+      // PM unlink (project.task) stays single-shot; irreversible unlink needs confirmation.
       const blocked = gateWrite(model, "unlink", { ids: [record_id] });
       if (blocked) return blocked;
+
+      const confirm = await handleIrreversibleConfirmation({
+        model,
+        method: "unlink",
+        ids: [record_id],
+        confirmation_token,
+        getSecret
+      });
+      if (confirm) return confirm;
+
+      const wasIrreversible = classifyOperation(model, "unlink").requires_confirmation;
       try {
         await queue.enqueue(requireConnection(getProps()), model, "unlink", { ids: [record_id] });
+        if (wasIrreversible) {
+          const verification = await verifyAfterWrite({ model, ids: [record_id], queue, getProps });
+          return mcpStructured({ ok: true, ...(verification ? { verification } : {}) }, JSON.stringify(true, null, 2));
+        }
         return mcpStructured({ ok: true }, JSON.stringify(true, null, 2));
       } catch (err) {
-        return mcpErrorFromException(err, { model, method: "unlink" });
+        return mcpErrorFromException(err, { model, method: "unlink", record_ids: [record_id] });
       }
     }
   );
@@ -332,7 +608,8 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
       title: "Call Model Method (advanced)",
       description:
         "Escape hatch: call an arbitrary Odoo model method. Odoo's JSON-2 API has NO positional args — every body key is bound as a named kwarg (record-bound methods take a top-level `ids`). Pass record ids via `ids` and all other parameters via `kwargs`. " +
-        "On sensitive models (account.* / hr.*), only allowlisted reversible lifecycle methods are executable (see list_model_actions executable:true); they require write context and a compatible record state. High-risk methods (post/pay/reconcile) stay blocked." +
+        "Action-based risk policy (not model-prefix denial): reversible configuration/lifecycle methods execute under Odoo ACLs; " +
+        "irreversible posting/payment/reconcile/delete/lock require confirmation_token (omit token for preflight)." +
         PM_WRITE_ROUTING_NOTE,
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
       inputSchema: {
@@ -342,13 +619,18 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
         kwargs: z.record(z.string(), z.any()).default({}),
         // Deprecated: JSON-2 cannot bind positional args; kept so old callers fail loudly instead of silently.
         args: z.array(z.any()).default([]),
-        context: zWriteContext
+        context: zWriteContext,
+        confirmation_token: z
+          .string()
+          .optional()
+          .describe("HMAC token from a prior unconfirmed call_model_method preflight for this exact model/method/ids/kwargs")
       },
       outputSchema: {
-        result: z.unknown().describe("Raw return value of the invoked model method")
+        result: z.unknown().describe("Raw return value of the invoked model method"),
+        verification: z.unknown().optional().describe("Post-write state evidence for irreversible ops when available")
       }
     },
-    async ({ model, method, ids, kwargs, args, context }) => {
+    async ({ model, method, ids, kwargs, args, context, confirmation_token }) => {
       if (!model || !model.trim()) return mcpError("model must be a non-empty string");
       if (!method || !method.trim()) return mcpError("method must be a non-empty string");
       const positionalArgs = args ?? [];
@@ -360,27 +642,78 @@ export function registerWriteTools(server: McpServer, getProps: () => Props | un
       }
       try {
         const body = { ...namedKwargs, ...(ids !== undefined ? { ids } : {}) };
-        // Pure classifier first — CRUD / high-risk stay denied; allowlisted lifecycle passes.
+        const recordIds = extractIds(ids);
+
+        // Pure classifier — flat denials only (PM field gates, etc.). Irreversible → confirmation path.
         const blocked = gateWrite(model, method, body);
         if (blocked) {
           logWriteContext("call_model_method", model, context);
           return blocked;
         }
 
-        // Stateful preflight for allowlisted reversible lifecycle (context + ids + state + guards).
+        if (isMutatingOdooMethod(method)) {
+          const confirm = await handleIrreversibleConfirmation({
+            model,
+            method,
+            ids: recordIds,
+            kwargs: namedKwargs,
+            confirmation_token,
+            getSecret
+          });
+          if (confirm) {
+            logWriteContext("call_model_method", model, context);
+            return confirm;
+          }
+        }
+
+        // Stateful preflight for curated reversible lifecycle (context + ids + state + guards).
         if (isMutatingOdooMethod(method) && isReversibleLifecycleMethod(model, method)) {
           const preflight = await preflightLifecycleCall({ model, method, ids, context, queue, getProps });
           if (!preflight.ok) {
             logWriteContext("call_model_method", model, context);
             return preflight.response;
           }
+
+          // The pure classifier cannot see record state, so an allowlisted method that is only
+          // irreversible FROM certain states (un-posting a posted move) is escalated here, once the
+          // live read has told us which ids are actually in such a state.
+          if (preflight.confirmation_required_ids.length > 0) {
+            const stateConfirm = await handleIrreversibleConfirmation({
+              model,
+              method,
+              ids: preflight.confirmation_required_ids,
+              kwargs: namedKwargs,
+              forceConfirmation: {
+                risk_class: "irreversible_posting",
+                reason:
+                  `${model}.${method} on record(s) ${preflight.confirmation_required_ids.join(", ")} would leave state ` +
+                  `"${preflight.states.get(preflight.confirmation_required_ids[0]) ?? "unknown"}" — this un-posts an existing ` +
+                  `journal entry and requires confirmation.`
+              },
+              confirmation_token,
+              getSecret
+            });
+            if (stateConfirm) {
+              logWriteContext("call_model_method", model, context);
+              return stateConfirm;
+            }
+          }
         }
 
         logWriteContext("call_model_method", model, context);
         const result = await queue.enqueue(requireConnection(getProps()), model, method, body);
-        return mcpStructured({ result }, JSON.stringify(result, null, 2));
+
+        let verification: Record<string, unknown> | undefined;
+        if (classifyOperation(model, method).requires_confirmation && recordIds?.length) {
+          verification = await verifyAfterWrite({ model, ids: recordIds, queue, getProps });
+        }
+
+        return mcpStructured(
+          { result, ...(verification ? { verification } : {}) },
+          JSON.stringify(result, null, 2)
+        );
       } catch (err) {
-        return mcpErrorFromException(err, { model, method });
+        return mcpErrorFromException(err, { model, method, record_ids: extractIds(ids) });
       }
     }
   );

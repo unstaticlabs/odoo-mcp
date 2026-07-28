@@ -45,6 +45,8 @@ export interface ModelAction {
   source: "view" | "curated";
   /** Whether call_model_method may execute this under connector policy. */
   executable?: boolean;
+  /** When true, executable only after confirmation_token preflight. */
+  confirmation_required?: boolean;
   deny_reason?: string;
   alternative?: string;
   risk_class?: string;
@@ -106,6 +108,7 @@ export function annotateModelActions(model: string, actions: ModelAction[]): Mod
     return {
       ...action,
       executable: ann.executable,
+      ...(ann.confirmation_required ? { confirmation_required: true } : {}),
       ...(ann.deny_reason ? { deny_reason: ann.deny_reason } : {}),
       ...(ann.alternative ? { alternative: ann.alternative } : {}),
       ...(ann.risk_class ? { risk_class: ann.risk_class } : {}),
@@ -703,8 +706,9 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
       annotations: { readOnlyHint: true, openWorldHint: false },
       description:
         "Read-only: discover action methods (e.g. action_post, button_draft) for an Odoo model, combining form-view buttons with a curated list. " +
-        "Discovery ≠ unrestricted execution: only actions with executable:true may be called via call_model_method under connector policy " +
-        "(allowlisted reversible lifecycle + required write context + compatible record state). High-risk methods are annotated executable:false with deny_reason and alternative.",
+        "Discovery ≠ unrestricted execution: actions with executable:true may be called via call_model_method under connector policy " +
+        "(reversible configuration/lifecycle under Odoo ACLs; irreversible ledger ops need confirmation_token). " +
+        "Irreversible methods are annotated executable:true with confirmation_required:true.",
       inputSchema: {
         model: z.string()
       },
@@ -718,9 +722,13 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
               source: z.enum(["view", "curated"]).describe("Discovered from the form view or from the curated map"),
               executable: z
                 .boolean()
-                .describe("True when call_model_method may execute this under connector lifecycle policy"),
-              deny_reason: z.string().optional().describe("Why the connector refuses execution when executable is false"),
-              alternative: z.string().optional().describe("Suggested tool or human path when not executable"),
+                .describe("True when call_model_method may execute this under connector policy (possibly with confirmation)"),
+              confirmation_required: z
+                .boolean()
+                .optional()
+                .describe("True when a confirmation_token from preflight is required before execute"),
+              deny_reason: z.string().optional().describe("Why the connector refuses or gates execution"),
+              alternative: z.string().optional().describe("Suggested tool, confirmation_token, or human path"),
               risk_class: z.string().optional().describe("Connector risk class when known"),
               policy_rule: z.string().optional().describe("Connector policy rule id when known")
             })
