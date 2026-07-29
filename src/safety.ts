@@ -1,5 +1,6 @@
 import { type CachedFieldMeta, type TtlCache, getFieldsCached } from "./cache";
 import { type PolicyRule, type RiskClass } from "./lifecycle-allowlist";
+import { PROJECT_TASK_WAITING_STATE } from "./normalizer";
 import { classifyOperation } from "./policy";
 import { OdooError, type OdooConnection } from "./odoo";
 import type { OdooQueue } from "./odoo-queue";
@@ -746,6 +747,8 @@ export interface PmWriteIntentResult {
   risk_class?: RiskClass;
   /** Short concrete next action for operators/agents. */
   next_step?: string;
+  /** True when the agent can retry after fixing the payload (surfaced on write_blocked envelopes). */
+  recoverable?: boolean;
 }
 
 /** Prose keys are never keyword-scanned; exempt from financial-field pattern matching. Exported for unit testing. */
@@ -853,7 +856,7 @@ function pmDenied(
   intent: PmWriteIntent,
   reason: string,
   blocked_fields?: string[],
-  meta?: { policy_rule?: PolicyRule; risk_class?: RiskClass; next_step?: string }
+  meta?: { policy_rule?: PolicyRule; risk_class?: RiskClass; next_step?: string; recoverable?: boolean }
 ): PmWriteIntentResult {
   return {
     verdict: "denied",
@@ -862,7 +865,8 @@ function pmDenied(
     blocked_fields,
     ...(meta?.policy_rule ? { policy_rule: meta.policy_rule } : {}),
     ...(meta?.risk_class ? { risk_class: meta.risk_class } : {}),
-    ...(meta?.next_step ? { next_step: meta.next_step } : {})
+    ...(meta?.next_step ? { next_step: meta.next_step } : {}),
+    ...(meta?.recoverable != null ? { recoverable: meta.recoverable } : {})
   };
 }
 
@@ -1007,6 +1011,21 @@ function classifyResPartner(method: string, args: Record<string, unknown>): PmWr
   };
 }
 
+/**
+ * True when any value record asks Odoo to set the computed Waiting state. Exported for unit testing.
+ */
+export function taskValsRequestWaitingState(records: Record<string, unknown>[]): boolean {
+  return records.some((rec) => rec.state === PROJECT_TASK_WAITING_STATE);
+}
+
+export const WAITING_STATE_FORBIDDEN_REASON =
+  `project.task.state "${PROJECT_TASK_WAITING_STATE}" (Waiting) is derived from open Blocked By dependencies, ` +
+  "not a status agents may set.";
+
+export const WAITING_STATE_FORBIDDEN_NEXT_STEP =
+  "Set depend_on_ids (Blocked By) so Odoo computes Waiting; for deferred work use stage/assignees/activities/dates " +
+  `while keeping an ordinary open state. Do not write state=${PROJECT_TASK_WAITING_STATE}.`;
+
 function classifyProjectTask(method: string, args: Record<string, unknown>): PmWriteIntentResult {
   if (method === "message_post") return pmAllowed();
   if (PM_LIFECYCLE_METHODS.has(method)) return pmAllowed();
@@ -1015,9 +1034,19 @@ function classifyProjectTask(method: string, args: Record<string, unknown>): PmW
     return pmDenied("disallowed", `project.task method "${method}" is not allowed via generic write tools.`);
   }
 
-  const blocked = fieldsOutsideAllowlist(collectPmValueRecords(args), PROJECT_TASK_PM_FIELDS);
+  const records = collectPmValueRecords(args);
+  const blocked = fieldsOutsideAllowlist(records, PROJECT_TASK_PM_FIELDS);
   if (blocked.length > 0) {
     return denyNonAllowlistedFields("project.task", blocked);
+  }
+
+  // `state` stays writable (Done / Cancelled / In Progress); only the computed Waiting value is refused.
+  if (taskValsRequestWaitingState(records)) {
+    return pmDenied("project_management", WAITING_STATE_FORBIDDEN_REASON, undefined, {
+      policy_rule: "waiting_state_forbidden",
+      next_step: WAITING_STATE_FORBIDDEN_NEXT_STEP,
+      recoverable: true
+    });
   }
 
   return pmAllowed();

@@ -39,6 +39,8 @@ export interface WriteSafetyVerdict {
   policy_rule?: PolicyRule;
   risk_class?: RiskClass;
   next_step?: string;
+  /** True when the agent can retry after fixing the payload (surfaced on write_blocked envelopes). */
+  recoverable?: boolean;
 }
 
 /** Odoo methods that do not mutate data — skipped by the write-safety gate. */
@@ -198,7 +200,8 @@ export function assessWriteOperation(input: WriteOperationInput): WriteSafetyVer
     blocked_fields: result.blocked_fields,
     ...(result.policy_rule ? { policy_rule: result.policy_rule } : {}),
     ...(result.risk_class ? { risk_class: result.risk_class } : {}),
-    ...(result.next_step ? { next_step: result.next_step } : {})
+    ...(result.next_step ? { next_step: result.next_step } : {}),
+    ...(result.recoverable != null ? { recoverable: result.recoverable } : {})
   };
 }
 

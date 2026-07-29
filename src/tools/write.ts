@@ -3,6 +3,7 @@ import { z } from "zod";
 import { isReversibleLifecycleMethod, type RiskClass } from "../lifecycle-allowlist";
 import { preflightLifecycleCall } from "../lifecycle-gate";
 import type { OdooQueue } from "../odoo-queue";
+import { preflightProjectTaskStateWrite } from "../project-task-state-gate";
 import { classifyOperation, type OperationClassification } from "../policy";
 import {
   issueConfirmationToken,
@@ -48,8 +49,32 @@ function gateWrite(model: string, method: string, args: Record<string, unknown>)
 }
 
 /**
+ * Stateful `project.task.state` guard — refuses In Progress while Odoo would recompute Waiting.
+ * Only touches Odoo when the payload actually sets `state`, so ordinary PM writes stay single-call.
+ */
+async function guardProjectTaskState(opts: {
+  model: string;
+  method: string;
+  args: Record<string, unknown>;
+  ids?: number[];
+  queue: OdooQueue;
+  getProps: () => Props | undefined;
+}) {
+  if (opts.model !== "project.task") return null;
+  const preflight = await preflightProjectTaskStateWrite({
+    method: opts.method,
+    ids: opts.ids,
+    args: opts.args,
+    queue: opts.queue,
+    getProps: opts.getProps
+  });
+  return preflight.ok ? null : preflight.response;
+}
+
+/**
  * THE gate for every mutating write tool: connector policy first, then the irreversible
- * confirmation path. Returns a response to send back, or null when the call may execute.
+ * confirmation path, then the stateful project.task guard. Returns a response to send back, or null
+ * when the call may execute.
  *
  * Every write tool must route through this. `gateWrite` alone is not sufficient — it deliberately
  * lets `irreversible_confirmation_required` pass so the two-phase path can own it, which means any
@@ -66,10 +91,12 @@ async function guardMutation(opts: {
   kwargs?: Record<string, unknown>;
   confirmation_token?: string;
   getSecret: () => string | undefined;
+  queue: OdooQueue;
+  getProps: () => Props | undefined;
 }) {
   const blocked = gateWrite(opts.model, opts.method, opts.args);
   if (blocked) return blocked;
-  return handleIrreversibleConfirmation({
+  const confirm = await handleIrreversibleConfirmation({
     model: opts.model,
     method: opts.method,
     ids: opts.ids,
@@ -77,6 +104,15 @@ async function guardMutation(opts: {
     args: opts.args,
     confirmation_token: opts.confirmation_token,
     getSecret: opts.getSecret
+  });
+  if (confirm) return confirm;
+  return guardProjectTaskState({
+    model: opts.model,
+    method: opts.method,
+    args: opts.args,
+    ids: opts.ids,
+    queue: opts.queue,
+    getProps: opts.getProps
   });
 }
 
@@ -288,7 +324,9 @@ export function registerWriteTools(
         args: { vals_list: [values] },
         kwargs: { vals_list: [values] },
         confirmation_token,
-        getSecret
+        getSecret,
+        queue,
+        getProps
       });
       if (blocked) return blocked;
 
@@ -413,7 +451,9 @@ export function registerWriteTools(
         ids: [record_id],
         kwargs: { vals: values },
         confirmation_token,
-        getSecret
+        getSecret,
+        queue,
+        getProps
       });
       if (blocked) return blocked;
       try {
@@ -471,7 +511,9 @@ export function registerWriteTools(
           ids: [u.record_id],
           kwargs: { vals: u.values },
           confirmation_token,
-          getSecret
+          getSecret,
+          queue,
+          getProps
         });
         if (blocked) return blocked;
       }
@@ -697,6 +739,22 @@ export function registerWriteTools(
               logWriteContext("call_model_method", model, context);
               return stateConfirm;
             }
+          }
+        }
+
+        // Stateful project.task guard: Waiting is computed, so In Progress needs no open blockers.
+        if (isMutatingOdooMethod(method)) {
+          const stateBlocked = await guardProjectTaskState({
+            model,
+            method,
+            args: body,
+            ids: recordIds,
+            queue,
+            getProps
+          });
+          if (stateBlocked) {
+            logWriteContext("call_model_method", model, context);
+            return stateBlocked;
           }
         }
 

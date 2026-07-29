@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { classifyPmWriteIntent, planIssuesToken, PM_MODEL_ALLOWLIST } from "./safety";
+import {
+  classifyPmWriteIntent,
+  planIssuesToken,
+  PM_MODEL_ALLOWLIST,
+  taskValsRequestWaitingState
+} from "./safety";
 
 describe("classifyPmWriteIntent — finance-keyword prose must not affect verdict", () => {
   test("project.task write with description mentioning banking, B2C export, month-end close is allowed", () => {
@@ -251,6 +256,89 @@ describe("classifyPmWriteIntent — reversible lifecycle allowlist", () => {
     });
     expect(result.verdict).toBe("allowed");
     expect(result.risk_class).toBe("reversible_lifecycle");
+  });
+});
+
+describe("classifyPmWriteIntent — Waiting is derived, not written", () => {
+  test("project.task create with state=04_waiting_normal is denied", () => {
+    const result = classifyPmWriteIntent({
+      model: "project.task",
+      method: "create",
+      args: { vals_list: [{ name: "Blocked work", project_id: 4, state: "04_waiting_normal" }] }
+    });
+    expect(result.verdict).toBe("denied");
+    expect(result.intent).toBe("project_management");
+    expect(result.policy_rule).toBe("waiting_state_forbidden");
+    expect(result.next_step).toContain("depend_on_ids");
+    expect(result.recoverable).toBe(true);
+  });
+
+  test("project.task write with state=04_waiting_normal is denied", () => {
+    const result = classifyPmWriteIntent({
+      model: "project.task",
+      method: "write",
+      args: { ids: [42], vals: { state: "04_waiting_normal" } }
+    });
+    expect(result.verdict).toBe("denied");
+    expect(result.policy_rule).toBe("waiting_state_forbidden");
+    expect(result.reason).toContain("04_waiting_normal");
+  });
+
+  test("one Waiting entry in a vals_list denies the whole batch", () => {
+    const result = classifyPmWriteIntent({
+      model: "project.task",
+      method: "create",
+      args: {
+        vals_list: [
+          { name: "Fine", project_id: 4 },
+          { name: "Wedged", project_id: 4, state: "04_waiting_normal" }
+        ]
+      }
+    });
+    expect(result.policy_rule).toBe("waiting_state_forbidden");
+  });
+
+  test("taskValsRequestWaitingState only matches the Waiting value", () => {
+    expect(taskValsRequestWaitingState([{ state: "04_waiting_normal" }])).toBe(true);
+    expect(taskValsRequestWaitingState([{ state: "01_in_progress" }, { state: "1_done" }])).toBe(false);
+    expect(taskValsRequestWaitingState([{ name: "no state here" }])).toBe(false);
+  });
+
+  test("other states stay writable by the pure classifier", () => {
+    for (const state of ["01_in_progress", "1_done", "1_canceled", "03_approved"]) {
+      const result = classifyPmWriteIntent({
+        model: "project.task",
+        method: "write",
+        args: { ids: [42], vals: { state } }
+      });
+      expect(result).toEqual({ verdict: "allowed", intent: "project_management" });
+    }
+  });
+
+  test("state=01_in_progress without dependencies is allowed (open blockers are a stateful check)", () => {
+    const result = classifyPmWriteIntent({
+      model: "project.task",
+      method: "create",
+      args: { vals_list: [{ name: "Start now", project_id: 4, state: "01_in_progress" }] }
+    });
+    expect(result).toEqual({ verdict: "allowed", intent: "project_management" });
+  });
+
+  test("stage / assignee / date / dependency writes without state are untouched", () => {
+    const result = classifyPmWriteIntent({
+      model: "project.task",
+      method: "write",
+      args: {
+        ids: [42],
+        vals: {
+          stage_id: 7,
+          user_ids: [[6, 0, [3]]],
+          date_deadline: "2026-08-01",
+          depend_on_ids: [[4, 99]]
+        }
+      }
+    });
+    expect(result).toEqual({ verdict: "allowed", intent: "project_management" });
   });
 });
 

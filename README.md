@@ -129,6 +129,44 @@ can only do what their Odoo account permits.
   models, draft bill/expense prep, or journal posting.
 - **Multi-task chatter** — see [docs/testing.md](docs/testing.md) § bulk chatter reads.
 
+### Task state vs stage vs assignee vs dates vs Blocked By
+
+On Odoo 19, `project.task.state` is **not** a free-form status field. `04_waiting_normal`
+("Waiting") is **computed** from the task's `stage_id` and its open `depend_on_ids` (Blocked By):
+a successor enters Waiting on its own the moment a predecessor is open, and leaves it on its own
+when every predecessor is closed. Writing that value by hand produces a task the Odoo UI can only
+move to Done or Cancelled. These are five different things and only the last one is derived:
+
+| Concept | Field | Meaning |
+|---|---|---|
+| Stage | `stage_id` | Kanban column — where the work sits in *your* process |
+| Assignee | `user_ids` | Who owns it |
+| Scheduling | `date_start` / `date_deadline` / `mail.activity` | When it is due or planned |
+| Blocked By | `depend_on_ids` | Which tasks must close first |
+| Waiting | `state` | **Derived** by Odoo from stage + open Blocked By |
+
+The connector enforces this:
+
+1. **Waiting is never written.** `state = "04_waiting_normal"` is refused on every write path
+   (`projects.create_task`, `create_record`, `update_record`, `batch_update`, `call_model_method`)
+   with `policy_rule: "waiting_state_forbidden"`. No Odoo call is made.
+2. **To express blocking, set `depend_on_ids`** and let Odoo compute Waiting.
+3. **To defer work, use stage, assignees, activities or dates** — and keep an ordinary open state.
+4. **In Progress requires no open blockers.** Setting `state = "01_in_progress"` while open
+   `depend_on_ids` remain is refused with `policy_rule: "in_progress_blocked_by_dependencies"` and
+   the blocker ids in `relevant_state`; Odoo would recompute Waiting and the write would be a
+   silent no-op. A blocker counts as closed only in `03_approved`, `1_done` or `1_canceled`.
+5. **Everything else stays editable while Waiting** — stage, assignees, dates, `depend_on_ids`,
+   chatter and activities are never refused by these rules. Only payloads that set `state` are
+   checked, so ordinary PM writes cost no extra Odoo call.
+6. **Dates never imply Waiting.** A future `date_start` or planned date is not a Waiting trigger;
+   the connector does not infer Waiting from dates, stages or assignees, and neither does Odoo.
+7. **Reads explain it.** `projects.get_task` and `get_record` on a Waiting `project.task` return
+   `_waiting_derived`, `_open_blocker_ids` and `_waiting_explanation` alongside `_workflow_status`.
+8. **Stale Waiting is repairable one task at a time.** When the annotation shows no open blockers,
+   the Waiting state is stale — write `state = "01_in_progress"`, which the gate allows precisely
+   because it found nothing blocking. There is deliberately no batch "fix all Waiting tasks" tool.
+
 ### Write context (audit only)
 
 Every write tool accepts an optional `context` string (≤ 500 chars): one sentence of

@@ -8,7 +8,7 @@ import {
 } from "../odoo";
 import { classifyRefusingLayer, nextStepForLayer } from "../policy";
 import type { OdooQueue } from "../odoo-queue";
-import { normalizeRecords } from "../normalizer";
+import { annotateWaitingDependency, isWaitingTaskRecord, normalizeRecords } from "../normalizer";
 import type { Props } from "../server";
 import type { TtlCache } from "../cache";
 
@@ -1802,5 +1802,83 @@ export async function fetchRecordChatter(
     return normalizeRecords(rows);
   } catch (err) {
     return { error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/**
+ * Fields a single-record `project.task` read must project for the Waiting annotation to be possible.
+ * Waiting is computed from Blocked By, so without these two the read cannot say *why* a task waits.
+ */
+const WAITING_ANNOTATION_FIELDS = ["state", "depend_on_ids"] as const;
+
+/**
+ * Widen a single-record projection so a Waiting `project.task` can be explained.
+ *
+ * Adds `state` + `depend_on_ids` (never removes anything). Other models, and the "all fields"
+ * sentinel, pass through untouched.
+ */
+export function withWaitingAnnotationFields(model: string, fields: string[] | null | undefined): string[] | null {
+  const requested = fields ?? null;
+  if (model !== "project.task") return requested;
+  if (requested !== null && requested.length === 1 && requested[0] === ALL_FIELDS_SENTINEL) return requested;
+  const base = requested ?? MODEL_FIELD_PRESETS["project.task"];
+  return [...new Set([...base, ...WAITING_ANNOTATION_FIELDS])];
+}
+
+/**
+ * Explain a Waiting `project.task` read with its live open blockers.
+ *
+ * Costs nothing for a task that is not Waiting. For one that is, it reads the blockers' `state`
+ * (one call), plus one more only when the projection did not carry `depend_on_ids`. A failed read
+ * degrades to the "blockers unknown" wording rather than claiming the task has none.
+ */
+export async function annotateWaitingTask(
+  queue: OdooQueue,
+  conn: OdooConnection,
+  record: Record<string, unknown>
+): Promise<Record<string, unknown>> {
+  if (!isWaitingTaskRecord(record)) return record;
+
+  // null means "not in the projection" — distinct from an empty Blocked By list.
+  const readIds = (value: unknown): number[] | null => {
+    if (Array.isArray(value)) {
+      return value.filter((id): id is number => typeof id === "number" && Number.isInteger(id) && id > 0);
+    }
+    if (value === false || value === null) return [];
+    return null;
+  };
+
+  try {
+    let dependOnIds = readIds(record.depend_on_ids);
+    if (dependOnIds === null) {
+      const rows = (await queue.enqueue(conn, "project.task", "read", {
+        ids: [record.id],
+        fields: ["id", "depend_on_ids"]
+      })) as Record<string, unknown>[];
+      dependOnIds = Array.isArray(rows) && rows[0] ? readIds(rows[0].depend_on_ids) : null;
+      if (dependOnIds === null) return annotateWaitingDependency(record, undefined);
+    }
+
+    if (dependOnIds.length === 0) return annotateWaitingDependency(record, []);
+
+    const blockerRows = (await queue.enqueue(conn, "project.task", "read", {
+      ids: dependOnIds,
+      fields: ["id", "state", "name"]
+    })) as Record<string, unknown>[];
+    if (!Array.isArray(blockerRows)) return annotateWaitingDependency(record, undefined);
+
+    const byId = new Map<number, Record<string, unknown>>();
+    for (const row of blockerRows) {
+      if (row && typeof row === "object" && typeof row.id === "number") byId.set(row.id, row);
+    }
+    // Ids Odoo did not return stay unknown, which `isOpenBlockerState` treats as still open.
+    const blockers = dependOnIds.map((id) => ({
+      id,
+      state: byId.get(id)?.state,
+      name: byId.get(id)?.name
+    }));
+    return annotateWaitingDependency(record, blockers);
+  } catch {
+    return annotateWaitingDependency(record, undefined);
   }
 }
