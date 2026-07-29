@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { readGroupCompat } from "../aggregation";
 import { type CachedFieldMeta, type TtlCache, getFieldsCached, resolveXmlIdCached } from "../cache";
 import { normalizeRecord, normalizeRecords } from "../normalizer";
 import { OdooError, type OdooConnection } from "../odoo";
@@ -396,17 +397,17 @@ async function buildKeyAccountsScope(
   try {
     const hasBalanceField = "balance" in moveLineFieldsMeta;
     const aggregates = hasBalanceField ? ["balance:sum"] : ["debit:sum", "credit:sum"];
-    const rows = (await queue.enqueue(conn, "account.move.line", "read_group", {
+    const rows = await readGroupCompat(queue, conn, cache, "account.move.line", {
       domain: [
         ["account_id", "in", accountIds],
         ["date", "<=", dateTo],
         ["parent_state", "=", "posted"],
         ["company_id", "=", companyId]
       ],
-      fields: aggregates,
       groupby: ["account_id"],
+      aggregates,
       lazy: true
-    })) as Record<string, unknown>[];
+    });
     const normalized = normalizeRecords(rows, moveLineFieldsMeta);
     balances = hasBalanceField
       ? normalized
@@ -517,17 +518,17 @@ async function buildKeyAccountsReview(
   if ("credit" in moveLineFieldsMeta) aggregates.push("credit:sum");
   if (aggregates.length === 0) aggregates.push("balance:sum");
   try {
-    const balanceRows = (await queue.enqueue(conn, "account.move.line", "read_group", {
+    const balanceRows = await readGroupCompat(queue, conn, cache, "account.move.line", {
       domain: [
         ["account_id", "in", accountIds],
         ["date", "<=", dateTo],
         ["parent_state", "=", "posted"],
         ["company_id", "=", companyId]
       ],
-      fields: aggregates,
       groupby: ["account_id"],
+      aggregates,
       lazy: true
-    })) as Record<string, unknown>[];
+    });
     for (const row of balanceRows) {
       const acc = row.account_id;
       if (!Array.isArray(acc) || typeof acc[0] !== "number") continue;
@@ -1073,7 +1074,7 @@ export function registerReportLineTools(server: McpServer, getProps: () => Props
             const hasBalance = "balance" in mlFieldsMeta;
             const aggregates = hasBalance ? ["balance:sum"] : ["debit:sum", "credit:sum"];
             const tagFk = MOVE_LINE_TAX_TAG_FK_CANDIDATES.find((name) => name in mlFieldsMeta) ?? "tax_tag_ids";
-            const groupRows = (await queue.enqueue(conn, "account.move.line", "read_group", {
+            const groupRows = await readGroupCompat(queue, conn, cache, "account.move.line", {
               domain: [
                 [tagFk, "in", tagIds],
                 ["parent_state", "=", "posted"],
@@ -1081,10 +1082,10 @@ export function registerReportLineTools(server: McpServer, getProps: () => Props
                 ["date", "<=", date_to],
                 ["company_id", "=", companyId]
               ],
-              fields: aggregates,
               groupby: [],
+              aggregates,
               lazy: true
-            })) as Record<string, unknown>[];
+            });
             const g = groupRows[0] ?? {};
             const balance = hasBalance
               ? ((g.balance as number) ?? 0)

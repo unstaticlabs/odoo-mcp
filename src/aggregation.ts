@@ -1,5 +1,5 @@
 import type { CachedFieldMeta } from "./cache";
-import { getFieldsCached, type TtlCache } from "./cache";
+import { getFieldsCached, TTL_METADATA_MS, type TtlCache } from "./cache";
 import { normalizeRecords } from "./normalizer";
 import { OdooError } from "./odoo";
 import type { OdooConnection } from "./odoo";
@@ -334,19 +334,121 @@ export function groupRecordsInMemory(
   return result;
 }
 
+export type ReadGroupMethod = "formatted_read_group" | "read_group";
+
+export interface ReadGroupCompatArgs {
+  domain: unknown[];
+  groupby: string[];
+  aggregates: string[];
+  order?: string;
+  limit?: number;
+  /** Legacy read_group only; never sent to formatted_read_group. */
+  lazy?: boolean;
+}
+
+export interface NormalizedGroupRow {
+  [key: string]: unknown;
+}
+
+function readGroupMethodCacheKey(conn: OdooConnection): string {
+  return `read_group_method:${conn.db}`;
+}
+
+function isMethodMissingError(err: unknown): boolean {
+  if (!(err instanceof OdooError)) return false;
+  if (err.httpStatus === 404) return true;
+  if (err.code === "model_or_method_not_found") return true;
+  return /does not exist/i.test(err.details);
+}
+
+/** Map `field:agg` keys from formatted_read_group to bare field names. */
+export function normalizeAggregateRow(row: Record<string, unknown>, specs: string[]): Record<string, unknown> {
+  const out = { ...row };
+  for (const spec of specs) {
+    const bare = spec.split(":")[0];
+    if (out[spec] !== undefined && out[bare] === undefined) {
+      out[bare] = out[spec];
+    }
+  }
+  return out;
+}
+
+async function invokeReadGroupMethod(
+  queue: OdooQueue,
+  conn: OdooConnection,
+  model: string,
+  method: ReadGroupMethod,
+  args: ReadGroupCompatArgs
+): Promise<Record<string, unknown>[]> {
+  if (method === "formatted_read_group") {
+    const body: Record<string, unknown> = {
+      domain: args.domain,
+      groupby: args.groupby,
+      aggregates: args.aggregates
+    };
+    if (args.order !== undefined) body.order = args.order;
+    if (args.limit !== undefined) body.limit = args.limit;
+    return (await queue.enqueue(conn, model, "formatted_read_group", body)) as Record<string, unknown>[];
+  }
+
+  const body: Record<string, unknown> = {
+    domain: args.domain,
+    groupby: args.groupby,
+    fields: args.aggregates,
+    lazy: args.lazy ?? true
+  };
+  if (args.order !== undefined) body.orderby = args.order;
+  if (args.limit !== undefined) body.limit = args.limit;
+  return (await queue.enqueue(conn, model, "read_group", body)) as Record<string, unknown>[];
+}
+
+/**
+ * Odoo 19+ prefers `formatted_read_group`; ≤18 uses legacy `read_group`.
+ * Probes once per DB (cached), normalizes aggregate keys to bare field names.
+ */
+export async function readGroupCompat(
+  queue: OdooQueue,
+  conn: OdooConnection,
+  cache: TtlCache,
+  model: string,
+  args: ReadGroupCompatArgs
+): Promise<NormalizedGroupRow[]> {
+  const cacheKey = readGroupMethodCacheKey(conn);
+  const cachedMethod = cache.get<ReadGroupMethod>(cacheKey);
+  const normalize = (rows: Record<string, unknown>[]) => rows.map((row) => normalizeAggregateRow(row, args.aggregates));
+
+  if (cachedMethod) {
+    const rows = await invokeReadGroupMethod(queue, conn, model, cachedMethod, args);
+    return normalize(rows);
+  }
+
+  try {
+    const rows = await invokeReadGroupMethod(queue, conn, model, "formatted_read_group", args);
+    cache.set(cacheKey, "formatted_read_group", TTL_METADATA_MS);
+    return normalize(rows);
+  } catch (err) {
+    if (!isMethodMissingError(err)) throw err;
+  }
+
+  const rows = await invokeReadGroupMethod(queue, conn, model, "read_group", args);
+  cache.set(cacheKey, "read_group", TTL_METADATA_MS);
+  return normalize(rows);
+}
+
 export async function tryNativeReadGroup(
   queue: OdooQueue,
   conn: OdooConnection,
+  cache: TtlCache,
   params: AggregateRecordsInput
 ): Promise<Record<string, unknown>[]> {
-  const rows = (await queue.enqueue(conn, params.model, "read_group", {
+  return readGroupCompat(queue, conn, cache, params.model, {
     domain: params.domain,
-    fields: params.aggregates,
     groupby: params.groupby,
-    lazy: params.lazy,
-    ...(params.orderby ? { orderby: params.orderby } : {})
-  })) as Record<string, unknown>[];
-  return rows;
+    aggregates: params.aggregates,
+    order: params.orderby,
+    limit: params.limit,
+    lazy: params.lazy
+  });
 }
 
 function hasNativeOnlyAggregates(aggregates: ParsedAggregate[]): boolean {
@@ -465,7 +567,7 @@ export async function aggregateRecords(
   const { parsedGroupby, parsedAggregates } = validation;
 
   try {
-    const rawGroups = await tryNativeReadGroup(queue, conn, input);
+    const rawGroups = await tryNativeReadGroup(queue, conn, cache, input);
     const groups = normalizeRecords(rawGroups, fieldsMeta);
     return {
       groups,

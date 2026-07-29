@@ -51,6 +51,7 @@ export const READ_ONLY_ODOO_METHODS = new Set([
   "name_get",
   "name_search",
   "read_group",
+  "formatted_read_group",
   "browse",
   "exists",
   "check_access_rights"
