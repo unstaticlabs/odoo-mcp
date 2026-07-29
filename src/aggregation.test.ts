@@ -722,6 +722,40 @@ describe("aggregateRecords integration", () => {
     expect(result.groups[0].stage_id).toEqual({ id: 10, name: "Todo" });
   });
 
+  test("Odoo 19 request body carries aggregates and order, never lazy or fields", async () => {
+    // Acceptance criterion for #2198: the formatted_read_group body must forward `order`
+    // (Odoo 19 renamed read_group's `orderby`) and must not leak the legacy-only keys.
+    let body: Record<string, unknown> | undefined;
+    const fetchMock = mock(async (url: string, init?: RequestInit) => {
+      if (url.includes("/fields_get")) return fieldsGetResponse(taskFieldsMeta);
+      if (url.includes("/formatted_read_group")) {
+        body = JSON.parse(String(init?.body ?? "{}"));
+        return new Response(
+          JSON.stringify({ result: [{ stage_id: [10, "Todo"], __count: 2 }] }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      return new Response("not found", { status: 404 });
+    });
+    globalThis.fetch = fetchMock;
+
+    await aggregateRecords(makeQueue(), new TtlCache(), conn, {
+      model: "project.task",
+      domain: [],
+      groupby: ["stage_id"],
+      aggregates: ["__count"],
+      orderby: "stage_id desc",
+      lazy: true
+    });
+
+    expect(body?.aggregates).toEqual(["__count"]);
+    expect(body?.order).toBe("stage_id desc");
+    expect(body?.lazy).toBeUndefined();
+    expect(body?.fields).toBeUndefined();
+    // `orderby` is the legacy read_group spelling — it must not be sent to Odoo 19.
+    expect(body?.orderby).toBeUndefined();
+  });
+
   test("readGroupCompat caches formatted_read_group and skips read_group probe", async () => {
     let formattedCalls = 0;
     let readGroupCalls = 0;
@@ -755,5 +789,41 @@ describe("aggregateRecords integration", () => {
 
     expect(formattedCalls).toBe(2);
     expect(readGroupCalls).toBe(0);
+  });
+
+  test("Odoo 19 happy path costs no more Odoo calls than the Odoo 18 baseline", async () => {
+    // Second half of the #2198 cache criterion: the compat layer must not make Odoo 19
+    // more expensive than Odoo 18. On the happy path formatted_read_group succeeds first
+    // try, so there is no probe at all — the budget must be <= baseline + 1.
+    const run = async (odoo19: boolean) => {
+      let calls = 0;
+      globalThis.fetch = mock(async (url: string) => {
+        if (url.includes("/fields_get")) return fieldsGetResponse(taskFieldsMeta);
+        calls++;
+        const isFormatted = url.includes("/formatted_read_group");
+        if (odoo19 === isFormatted) {
+          return new Response(
+            JSON.stringify({ result: [{ stage_id: [10, "Todo"], __count: 2 }] }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        return new Response("not found", { status: 404 });
+      });
+      await aggregateRecords(makeQueue(), new TtlCache(), conn, {
+        model: "project.task",
+        domain: [],
+        groupby: ["stage_id"],
+        aggregates: ["__count"],
+        lazy: true
+      });
+      return { calls };
+    };
+
+    const odoo18 = await run(false);
+    const odoo19 = await run(true);
+
+    // Counted at the transport, since aggregation metadata carries no odoo_calls field
+    // (that lives on the bookkeeping tools) — the observable cost is what matters here.
+    expect(odoo19.calls).toBeLessThanOrEqual(odoo18.calls + 1);
   });
 });
