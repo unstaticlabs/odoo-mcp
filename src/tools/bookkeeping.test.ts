@@ -1057,7 +1057,10 @@ describe("bookkeeping.fetch_attachment", () => {
       method: "read",
       http_status: 403,
       details: "Access Denied by Odoo",
-      recoverable: false
+      recoverable: false,
+      refusing_layer: "odoo_acl",
+      next_step: "Use an Odoo user with the required access rights, or perform the action in the Odoo UI as that user.",
+      odoo_exception: "Access Denied by Odoo"
     });
     expect(result.content[0].text).not.toContain("secret-bookkeeping-key");
     expect(result.content[0].text).not.toContain("Bearer");

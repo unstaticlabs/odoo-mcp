@@ -80,38 +80,35 @@ describe("classifyPmWriteIntent — finance-keyword prose must not affect verdic
 });
 
 describe("classifyPmWriteIntent — structural deny paths", () => {
-  test("account.move write is financial_mutation with billing + bookkeeping guidance", () => {
+  test("account.move write is allowed as reversible configuration (no prefix deny)", () => {
     const result = classifyPmWriteIntent({
       model: "account.move",
       method: "write",
       args: { ids: [1], vals: { ref: "INV/001" } }
     });
-    expect(result.verdict).toBe("denied");
+    expect(result.verdict).toBe("allowed");
     expect(result.intent).toBe("financial_mutation");
-    expect(result.reason).toContain("billing.");
-    expect(result.reason).toContain("bookkeeping.plan_safe_write");
-    expect(result.policy_rule).toBe("sensitive_model_crud");
+    expect(result.risk_class).toBe("reversible_configuration");
   });
 
-  test("hr.expense write is financial_mutation with billing guidance", () => {
+  test("hr.expense write is allowed as reversible configuration (no prefix deny)", () => {
     const result = classifyPmWriteIntent({
       model: "hr.expense",
       method: "write",
       args: { ids: [394], vals: { date: "2026-07-04" } }
     });
-    expect(result.verdict).toBe("denied");
+    expect(result.verdict).toBe("allowed");
     expect(result.intent).toBe("financial_mutation");
-    expect(result.reason).toContain("billing.update_draft_expense");
-    expect(result.policy_rule).toBe("sensitive_model_crud");
+    expect(result.risk_class).toBe("reversible_configuration");
   });
 
-  test("hr.employee write is financial_mutation (any hr.* prefix)", () => {
+  test("hr.employee write is allowed (no longer refused solely by hr.* prefix)", () => {
     const result = classifyPmWriteIntent({
       model: "hr.employee",
       method: "write",
       args: { ids: [3], vals: { name: "Alice" } }
     });
-    expect(result).toMatchObject({ verdict: "denied", intent: "financial_mutation" });
+    expect(result).toMatchObject({ verdict: "allowed", intent: "financial_mutation" });
   });
 
   test("res.partner write with bank_ids is denied as financial field", () => {
@@ -224,38 +221,36 @@ describe("classifyPmWriteIntent — reversible lifecycle allowlist", () => {
     expect(result.risk_class).toBe("reversible_lifecycle");
   });
 
-  test("account.move action_post stays high-risk denied", () => {
+  test("account.move action_post requires confirmation (not flat high-risk deny)", () => {
     const result = classifyPmWriteIntent({
       model: "account.move",
       method: "action_post",
       args: { ids: [1] }
     });
     expect(result.verdict).toBe("denied");
-    expect(result.policy_rule).toBe("high_risk_method");
+    expect(result.policy_rule).toBe("irreversible_confirmation_required");
     expect(result.risk_class).toBe("irreversible_posting");
-    expect(result.next_step).toBeTruthy();
+    expect(result.next_step).toMatch(/confirmation/i);
   });
 
-  test("hr.expense write CRUD stays denied with sensitive_model_crud", () => {
+  test("hr.expense write CRUD is allowed as reversible configuration", () => {
     const result = classifyPmWriteIntent({
       model: "hr.expense",
       method: "write",
       args: { ids: [394], vals: { date: "2026-07-04" } }
     });
-    expect(result.verdict).toBe("denied");
-    expect(result.policy_rule).toBe("sensitive_model_crud");
-    expect(result.next_step).toContain("billing.update_draft_expense");
+    expect(result.verdict).toBe("allowed");
+    expect(result.risk_class).toBe("reversible_configuration");
   });
 
-  test("unknown sensitive method is denied with allowlist hint", () => {
+  test("unknown accounting method is allowed under Odoo authority", () => {
     const result = classifyPmWriteIntent({
       model: "hr.expense",
       method: "action_something_custom",
       args: { ids: [1] }
     });
-    expect(result.verdict).toBe("denied");
-    expect(result.policy_rule).toBe("sensitive_model_method_denied");
-    expect(result.reason).toContain("action_reset");
+    expect(result.verdict).toBe("allowed");
+    expect(result.risk_class).toBe("reversible_lifecycle");
   });
 });
 

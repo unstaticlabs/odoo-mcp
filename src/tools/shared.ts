@@ -6,6 +6,7 @@ import {
   type AggregationDiagnosisCode,
   type OdooConnection
 } from "../odoo";
+import { classifyRefusingLayer, nextStepForLayer } from "../policy";
 import type { OdooQueue } from "../odoo-queue";
 import { normalizeRecords } from "../normalizer";
 import type { Props } from "../server";
@@ -350,6 +351,11 @@ export interface ErrorEnvelope {
   recoverable: boolean;
   diagnosis?: AggregationDiagnosis | "unauthorized";
   message?: string;
+  refusing_layer?: string;
+  next_step?: string;
+  record_ids?: number[];
+  odoo_exception?: string;
+  partial_write?: boolean;
 }
 
 export type AggregationErrorEnvelope = ErrorEnvelope & {
@@ -371,6 +377,38 @@ export type WriteBlockedErrorEnvelope = ErrorEnvelope & {
   policy_rule?: string;
   risk_class?: string;
   next_step?: string;
+  /** Which authority refused: connector policy vs Odoo ACL / workflow / lock / hash / schema. */
+  refusing_layer?: string;
+  record_ids?: number[];
+  relevant_state?: Record<string, unknown>;
+  /** Original Odoo exception text when the refusal came from Odoo. */
+  odoo_exception?: string;
+  /** Whether some writes in a batch already landed before this refusal. */
+  partial_write?: boolean;
+};
+
+export type ConfirmationRequiredEnvelope = {
+  error: "confirmation_required";
+  intent: WriteBlockedIntent;
+  model: string;
+  method: string;
+  http_status: null;
+  details: string;
+  recoverable: true;
+  refusing_layer: "connector_policy";
+  policy_rule: "irreversible_confirmation_required";
+  risk_class?: string;
+  next_step: string;
+  confirmation_required: true;
+  confirmation_token?: string;
+  record_ids?: number[];
+  relevant_state?: Record<string, unknown>;
+  would_execute: {
+    model: string;
+    method: string;
+    ids?: number[];
+    kwargs?: Record<string, unknown>;
+  };
 };
 
 /** Connector safety rejection — returned before any Odoo call when a write fails the allowlist. */
@@ -383,6 +421,11 @@ export function mcpWriteBlockedError(
     policy_rule?: string;
     risk_class?: string;
     next_step?: string;
+    refusing_layer?: string;
+    record_ids?: number[];
+    relevant_state?: Record<string, unknown>;
+    odoo_exception?: string;
+    partial_write?: boolean;
     /** When true, the agent can retry after fixing inputs (e.g. missing write context). */
     recoverable?: boolean;
   }
@@ -395,10 +438,48 @@ export function mcpWriteBlockedError(
     http_status: null,
     details: verdict.reason ?? "Write blocked by connector safety layer.",
     recoverable: verdict.recoverable ?? false,
+    refusing_layer: verdict.refusing_layer ?? "connector_policy",
     ...(verdict.blocked_fields?.length ? { blocked_fields: verdict.blocked_fields } : {}),
     ...(verdict.policy_rule ? { policy_rule: verdict.policy_rule } : {}),
     ...(verdict.risk_class ? { risk_class: verdict.risk_class } : {}),
-    ...(verdict.next_step ? { next_step: verdict.next_step } : {})
+    ...(verdict.next_step ? { next_step: verdict.next_step } : {}),
+    ...(verdict.record_ids?.length ? { record_ids: verdict.record_ids } : {}),
+    ...(verdict.relevant_state ? { relevant_state: verdict.relevant_state } : {}),
+    ...(verdict.odoo_exception ? { odoo_exception: verdict.odoo_exception } : {}),
+    ...(verdict.partial_write != null ? { partial_write: verdict.partial_write } : {})
+  };
+  return { content: [{ type: "text" as const, text: JSON.stringify(envelope) }], isError: true as const };
+}
+
+/** Irreversible op preflight — issues a confirmation token; does not mutate. */
+export function mcpConfirmationRequired(args: {
+  model: string;
+  method: string;
+  details: string;
+  risk_class?: string;
+  next_step: string;
+  confirmation_token?: string;
+  record_ids?: number[];
+  relevant_state?: Record<string, unknown>;
+  would_execute: ConfirmationRequiredEnvelope["would_execute"];
+}) {
+  const envelope: ConfirmationRequiredEnvelope = {
+    error: "confirmation_required",
+    intent: "financial_mutation",
+    model: args.model,
+    method: args.method,
+    http_status: null,
+    details: args.details,
+    recoverable: true,
+    refusing_layer: "connector_policy",
+    policy_rule: "irreversible_confirmation_required",
+    next_step: args.next_step,
+    confirmation_required: true,
+    would_execute: args.would_execute,
+    ...(args.risk_class ? { risk_class: args.risk_class } : {}),
+    ...(args.confirmation_token ? { confirmation_token: args.confirmation_token } : {}),
+    ...(args.record_ids?.length ? { record_ids: args.record_ids } : {}),
+    ...(args.relevant_state ? { relevant_state: args.relevant_state } : {})
   };
   return { content: [{ type: "text" as const, text: JSON.stringify(envelope) }], isError: true as const };
 }
@@ -487,9 +568,25 @@ export function mcpAggregationError(diagnosis: AggregationDiagnosis, message: st
 }
 
 /** Machine-classifiable JSON error envelope for MCP tool results (isError:true). */
-export function mcpErrorFromException(err: unknown, context: ErrorContext = {}) {
+export function mcpErrorFromException(
+  err: unknown,
+  context: ErrorContext & { record_ids?: number[]; partial_write?: boolean } = {}
+) {
   const envelope = buildErrorEnvelope(err, context);
-  return { content: [{ type: "text" as const, text: JSON.stringify(envelope) }], isError: true as const };
+  const refusing_layer = classifyRefusingLayer(err);
+  const enriched: ErrorEnvelope = {
+    ...envelope,
+    refusing_layer,
+    next_step: nextStepForLayer(refusing_layer),
+    ...(err instanceof OdooError ? { odoo_exception: redactDetails(err.details) } : {}),
+    ...(context.record_ids?.length ? { record_ids: context.record_ids } : {}),
+    ...(context.partial_write != null ? { partial_write: context.partial_write } : {})
+  };
+  // Keep original Odoo details verbatim in `details` for ACL denials (acceptance: surfaced verbatim).
+  if (err instanceof OdooError) {
+    enriched.details = redactDetails(err.details);
+  }
+  return { content: [{ type: "text" as const, text: JSON.stringify(enriched) }], isError: true as const };
 }
 
 /** Pre-flight aggregation validation failure — returned before any read_group Odoo call. */
