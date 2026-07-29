@@ -101,10 +101,11 @@ can only do what their Odoo account permits.
 
 ### Project-management writes vs bookkeeping vs billing
 
-- **PM task notes, chatter, and activities** — prefer `projects.create_task` to lodge a card in a
-  known project; otherwise use `create_record`, `update_record`, `post_message`,
-  `batch_post_message`, or `call_model_method` on `project.task`, `project.project`, or `mail.activity`
-  with `res_model` ∈ `{project.task, project.project}`.
+- **PM task notes and history → the chatter.** Use `post_message` / `batch_post_message`
+  (or `projects.create_task` to lodge a new card). `update_record` / `batch_update` /
+  `call_model_method` are for changing the task's *own* fields (stage, assignee, dates,
+  tags) — not for recording what happened. Activities go via `create_record` /
+  `call_model_method` on `mail.activity` with `res_model` ∈ `{project.task, project.project}`.
 - **Operational text** may reference banking, B2C exports, VAT, payroll handoffs, deadlines — the
   connector classifies by **model + method + field names**, not free-text keywords.
 - **Draft vendor-bill / expense prep** — use `billing.update_draft_expense` /
@@ -128,6 +129,34 @@ can only do what their Odoo account permits.
   (four operations documented in [docs/bookkeeping.md](docs/bookkeeping.md)). It never handles PM
   models, draft bill/expense prep, or journal posting.
 - **Multi-task chatter** — see [docs/testing.md](docs/testing.md) § bulk chatter reads.
+
+### Chatter vs business fields
+
+The **chatter is the record's chronological, auditable journal**: entries are append-only,
+timestamped and attributed. Free-text fields (`description`, Terms & Conditions, Internal
+Notes, …) are **not versioned** — a write replaces the previous value, and nothing records
+that it ever existed.
+
+- Follow-up notes, explanations, decisions, justifications, analysis results, action
+  history → **`post_message` / `batch_post_message`**.
+- Business fields → only when the value is **durable, structuring data describing the
+  record's current state** (a scope statement, the contract terms actually in force).
+- **Never** use a non-versioned text field as a substitute for the chatter.
+- Before replacing existing text, confirm you are updating the business data itself, not
+  appending context. **When in doubt, post to the chatter** — it preserves history.
+
+**Correct** — log an observation without touching the record's data:
+
+    post_message({ model: "project.task", record_id: 42,
+      body: "Client confirmed the March deadline; VAT export rerun after the fix." })
+
+**Incorrect** — silently destroys whatever `description` held:
+
+    update_record({ model: "project.task", record_id: 42,
+      values: { description: "Client confirmed the March deadline; VAT export rerun." } })
+
+This is about *where notes live*, not *what is writable*: the PM-vs-bookkeeping fences,
+`billing.*` draft helpers and `bookkeeping.plan_safe_write` boundaries are unchanged.
 
 ### Write context (audit only)
 
@@ -272,6 +301,8 @@ block finance-keyword message bodies. Accounting chatter on invoices/journals is
 blocked on `account.move` / `hr.expense`; draft bill/expense prep uses `billing.*`, reversible
 lifecycle uses allowlisted `call_model_method` (see [docs/bookkeeping.md](docs/bookkeeping.md)), and
 tax-close mutations use `bookkeeping.plan_safe_write` — not generic `mail.message` reads.
+Reads use `expand_record` / `projects.list_chatter`; writes go through `post_message` /
+`batch_post_message` (see *Chatter vs business fields*).
 
 ## Resources
 

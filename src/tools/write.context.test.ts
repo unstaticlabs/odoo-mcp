@@ -475,3 +475,20 @@ describe("call_model_method — reversible lifecycle preflight", () => {
     expect(calls).toEqual(["read", "button_draft"]);
   });
 });
+
+describe("chatter vs business fields doctrine in tool descriptions", () => {
+  test("write tools state overwrite risk; chatter tools affirm journal role", () => {
+    const server = new McpServer({ name: "test", version: "0.0.0" });
+    registerWriteTools(server, () => props, dispatchQueue(() => true));
+    const registry = (server as unknown as { _registeredTools: Record<string, { description: string }> })
+      ._registeredTools;
+    for (const name of ["update_record", "batch_update", "call_model_method"]) {
+      expect(registry[name].description).toContain("chatter");
+      expect(registry[name].description).toContain("NOT versioned");
+    }
+    expect(registry.post_message.description).toContain("append-only");
+    expect(registry.batch_post_message.description).toContain("append-only");
+    // batch_update now carries the same PM routing note as its siblings
+    expect(registry.batch_update.description).toContain("bookkeeping.plan_safe_write");
+  });
+});
