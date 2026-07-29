@@ -1846,6 +1846,15 @@ function mockOdooRoutes(routes: Record<string, unknown>, log?: { url: string; bo
   });
 }
 
+/** Odoo ≤18: formatted_read_group missing → readGroupCompat falls back to legacy read_group. */
+function formattedReadGroup404(): Response {
+  return new Response("not found", { status: 404 });
+}
+
+function findLegacyReadGroupCall(log: { url: string; body: any }[], model = "project.task") {
+  return log.find((entry) => entry.url.endsWith(`/json/2/${model}/read_group`));
+}
+
 describe("aggregate_records tool callOdoo call shape", () => {
   afterEach(() => {
     globalThis.fetch = originalFetch;
@@ -1857,6 +1866,7 @@ describe("aggregate_records tool callOdoo call shape", () => {
     globalThis.fetch = mockOdooRoutes(
       {
         "project.task/fields_get": AGG_TASK_FIELDS_META,
+        "project.task/formatted_read_group": formattedReadGroup404(),
         "project.task/read_group": [{ stage_id: 1, __count: 3 }]
       },
       log
@@ -1874,9 +1884,10 @@ describe("aggregate_records tool callOdoo call shape", () => {
 
     expect(result.isError).toBeUndefined();
     expect(result.structuredContent?.groups).toEqual([{ stage_id: 1, __count: 3 }]);
-    expect(log.length).toBe(2);
+    expect(log.length).toBe(3);
     expect(log[0].url).toContain("/project.task/fields_get");
-    const readGroupCall = log[1];
+    expect(log[1].url).toContain("/project.task/formatted_read_group");
+    const readGroupCall = findLegacyReadGroupCall(log)!;
     expect(readGroupCall.url).toContain("/project.task/read_group");
     expect(readGroupCall.body).toEqual({
       domain: [["active", "=", true]],
@@ -1893,6 +1904,7 @@ describe("aggregate_records tool callOdoo call shape", () => {
     globalThis.fetch = mockOdooRoutes(
       {
         "project.task/fields_get": AGG_TASK_FIELDS_META,
+        "project.task/formatted_read_group": formattedReadGroup404(),
         "project.task/read_group": []
       },
       log
@@ -1907,7 +1919,7 @@ describe("aggregate_records tool callOdoo call shape", () => {
       lazy: false
     });
 
-    const readGroupCall = log.find((entry) => entry.url.includes("/read_group"));
+    const readGroupCall = findLegacyReadGroupCall(log);
     expect(readGroupCall).toBeDefined();
     expect(readGroupCall!.body).toEqual({ domain: [], fields: ["__count"], groupby: ["stage_id"], lazy: false });
     expect(readGroupCall!.body.orderby).toBeUndefined();
@@ -1923,6 +1935,9 @@ describe("aggregate_records tool callOdoo call shape", () => {
           status: 200,
           headers: { "Content-Type": "application/json" }
         });
+      }
+      if (url.includes("/formatted_read_group")) {
+        return new Response("not found", { status: 404 });
       }
       readGroupAttempts++;
       if (readGroupAttempts < 2) {
@@ -2028,6 +2043,7 @@ describe("aggregate_records pre-flight validation", () => {
     globalThis.fetch = mockOdooRoutes(
       {
         "project.task/fields_get": AGG_TASK_FIELDS_META,
+        "project.task/formatted_read_group": formattedReadGroup404(),
         "project.task/read_group": [{ stage_id: 1, amount_total: 100, __count: 3 }]
       },
       log
@@ -2044,7 +2060,7 @@ describe("aggregate_records pre-flight validation", () => {
     });
 
     expect(result.isError).toBeUndefined();
-    const readGroupCalls = log.filter((entry) => entry.url.includes("/read_group"));
+    const readGroupCalls = log.filter((entry) => entry.url.endsWith("/project.task/read_group"));
     expect(readGroupCalls.length).toBe(1);
     expect(readGroupCalls[0].body).toEqual({
       domain: [["active", "=", true]],
@@ -2079,6 +2095,7 @@ describe("aggregate_records pre-flight validation", () => {
     globalThis.fetch = mockOdooRoutes(
       {
         "project.task/fields_get": AGG_TASK_FIELDS_META,
+        "project.task/formatted_read_group": formattedReadGroup404(),
         "project.task/read_group": [{ stage_id: 1, __count: 2 }]
       },
       log

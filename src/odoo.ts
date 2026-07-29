@@ -49,7 +49,7 @@ export type AggregationDiagnosisCode =
 
 export type AggregationErrorContext = {
   model: string;
-  method: "read_group";
+  method: "read_group" | "formatted_read_group";
   httpStatus: number;
   /** Normalized lowercase details for pattern matching. */
   details: string;
@@ -114,7 +114,7 @@ export function classifyAggregationDiagnosis(
 ): AggregationDiagnosisCode | "unauthorized" | "permission_denied" {
   if (ctx.httpStatus === 401) return "unauthorized";
   if (ctx.httpStatus === 403) return "permission_denied";
-  if (ctx.httpStatus === 404 && ctx.method === "read_group") return "unsupported_model";
+  if (ctx.httpStatus === 404 && (ctx.method === "read_group" || ctx.method === "formatted_read_group")) return "unsupported_model";
   if (ctx.httpStatus === 400) {
     if (matchInvalidGroupby(ctx.details)) return "invalid_groupby";
     if (matchUnsupportedAggregate(ctx.details)) return "unsupported_aggregate";
@@ -126,11 +126,12 @@ export function classifyAggregationDiagnosis(
 /** Convenience wrapper that builds context from a thrown {@link OdooError}. */
 export function aggregationDiagnosisFromOdooError(
   err: OdooError,
-  ctx: { model: string }
+  ctx: { model: string; method?: "read_group" | "formatted_read_group" }
 ): AggregationDiagnosisCode | "unauthorized" | "permission_denied" {
+  const method = ctx.method ?? (err.method === "formatted_read_group" ? "formatted_read_group" : "read_group");
   return classifyAggregationDiagnosis({
     model: ctx.model,
-    method: "read_group",
+    method,
     httpStatus: err.httpStatus ?? 0,
     details: normalizeOdooDetails(err.details),
     odooCode: err.code

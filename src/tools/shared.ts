@@ -511,13 +511,15 @@ export function mcpAggregationPreflightError(
 
 function buildAggregationErrorEnvelope(
   err: unknown,
-  context: { model: string; method?: "read_group" }
+  context: { model: string; method?: "read_group" | "formatted_read_group" }
 ): AggregationErrorEnvelope {
   const method = context.method ?? "read_group";
   if (err instanceof OdooError) {
+    const resolvedMethod =
+      method === "read_group" && err.method === "formatted_read_group" ? "formatted_read_group" : method;
     const diagnosis = classifyAggregationDiagnosis({
       model: context.model,
-      method: "read_group",
+      method: resolvedMethod,
       httpStatus: err.httpStatus ?? 0,
       details: normalizeOdooDetails(err.details),
       odooCode: err.code
@@ -548,7 +550,7 @@ function buildAggregationErrorEnvelope(
 /** Aggregation-aware JSON error envelope with diagnosis codes for read_group failures. */
 export function mcpAggregationErrorFromException(
   err: unknown,
-  context: { model: string; method?: "read_group" }
+  context: { model: string; method?: "read_group" | "formatted_read_group" }
 ) {
   const envelope = buildAggregationErrorEnvelope(err, context);
   return { content: [{ type: "text" as const, text: JSON.stringify(envelope) }], isError: true as const };

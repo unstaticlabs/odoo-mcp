@@ -261,6 +261,14 @@ query with no grouped rows still defaults missing accounts to `0` and runs `comp
 > open-lines needed for a clean `ok`) that could not be fetched yield `unknown`. The tool
 > never judges whether a line *should* be reconciled.
 
+**Odoo version compatibility (balance aggregation).** Move-line balances use
+`readGroupCompat` ([`src/aggregation.ts`](../src/aggregation.ts)): Odoo **19+** calls
+`formatted_read_group` (aggregates keyed as `field:agg`, no `lazy`/`fields` body keys);
+Odoo **≤18** falls back to legacy `read_group`. The resolved method is cached per database
+(same TTL as metadata). When both APIs fail, `balance` / `debit` / `credit` are `null` and
+`severity` is `"unknown"` — same semantics as a single-method failure above. A successful
+query with no grouped rows still defaults missing accounts to `0` and runs `computeSeverity`.
+
 ### 4.3 `bookkeeping.explain_report_line`
 
 Explain **why** a tax-report line shows its value, from facts only — never guessing tax

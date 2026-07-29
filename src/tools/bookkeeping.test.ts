@@ -308,6 +308,37 @@ describe("bookkeeping.get_snapshot", () => {
     }
   });
 
+  test("Odoo 19 key_accounts scope uses formatted_read_group for balances", async () => {
+    const { fetchMock, calls } = buildFetchMock({
+      "account.move.line.read_group": {
+        status: 404,
+        body: { error: { message: "The method 'account.move.line.read_group' does not exist" } }
+      },
+      "account.move.line.formatted_read_group": {
+        status: 200,
+        body: [{ account_id: [500, "Key Account"], "balance:sum": 1000, __count: 5 }]
+      }
+    });
+    globalThis.fetch = fetchMock;
+    const handler = buildHandler(makeQueue(), new TtlCache());
+
+    const result = await handler({
+      company: "Acme Corp",
+      date_from: "2026-01-01",
+      date_to: "2026-03-31",
+      scopes: ["key_accounts"],
+      key_account_codes: ["4000"]
+    });
+
+    expect(result.isError).toBeUndefined();
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.warnings.some((w: string) => /balances\) unavailable/.test(w))).toBe(false);
+    const balanceRow = parsed.key_accounts.balances.records[0];
+    expect(balanceRow.balance).toBe(1000);
+    expect(calls.some((c) => c.method === "formatted_read_group")).toBe(true);
+    expect(calls.some((c) => c.method === "read_group")).toBe(false);
+  });
+
   test("missing account.return.type/account.return models produce warnings without failing the bundle", async () => {
     const { fetchMock } = buildFetchMock({
       "account.return.type.fields_get": {
@@ -677,6 +708,122 @@ describe("bookkeeping.review_key_accounts", () => {
     expect(delta.calls.some((c) => c.method === "fields_get")).toBe(false);
     expect(calls.length).toBeGreaterThan(0);
     expect(parsed.metadata.duration_seconds).toEqual(expect.any(Number));
+  });
+
+  const ODOO19_BALANCE_FIELDS: Record<string, CannedResponse> = {
+    "account.move.line.fields_get": {
+      status: 200,
+      body: {
+        id: { type: "integer" },
+        account_id: { type: "many2one", relation: "account.account" },
+        date: { type: "date" },
+        name: { type: "char" },
+        amount_residual: { type: "monetary" },
+        balance: { type: "monetary" },
+        debit: { type: "monetary" },
+        credit: { type: "monetary" },
+        move_id: { type: "many2one", relation: "account.move" },
+        partner_id: { type: "many2one", relation: "res.partner" },
+        journal_id: { type: "many2one", relation: "account.journal" },
+        reconciled: { type: "boolean" }
+      }
+    }
+  };
+
+  const ODOO19_READ_GROUP_MISSING: Record<string, CannedResponse> = {
+    "account.move.line.read_group": {
+      status: 404,
+      body: { error: { message: "The method 'account.move.line.read_group' does not exist" } }
+    }
+  };
+
+  const ODOO19_FORMATTED_BALANCE: Record<string, CannedResponse> = {
+    "account.move.line.formatted_read_group": {
+      status: 200,
+      body: [
+        {
+          account_id: [500, "Suspense"],
+          "balance:sum": 1000,
+          "debit:sum": 1200,
+          "credit:sum": 200,
+          __count: 5
+        }
+      ]
+    }
+  };
+
+  test("Odoo 19: formatted_read_group populates balances with normalized aggregate keys", async () => {
+    const { fetchMock, calls } = buildFetchMock({
+      ...SUSPENSE_ACCOUNT_OVERRIDE,
+      ...ODOO19_BALANCE_FIELDS,
+      ...ODOO19_READ_GROUP_MISSING,
+      ...ODOO19_FORMATTED_BALANCE
+    });
+    globalThis.fetch = fetchMock;
+    const handler = buildReviewHandler(makeQueue(), new TtlCache());
+
+    const result = await handler({ company: "Acme Corp", date_to: "2026-03-31", account_codes: ["471000"] });
+
+    expect(result.isError).toBeUndefined();
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.warnings.some((w: string) => /balances\) unavailable/.test(w))).toBe(false);
+    const account = parsed.accounts[0];
+    expect(account.balance).toBe(1000);
+    expect(account.debit).toBe(1200);
+    expect(account.credit).toBe(200);
+
+    const formattedCalls = calls.filter((c) => c.model === "account.move.line" && c.method === "formatted_read_group");
+    expect(formattedCalls.length).toBe(1);
+    expect(formattedCalls[0].body.aggregates).toEqual(["balance:sum", "debit:sum", "credit:sum"]);
+    expect(formattedCalls[0].body.fields).toBeUndefined();
+    expect(formattedCalls[0].body.lazy).toBeUndefined();
+    expect(calls.some((c) => c.model === "account.move.line" && c.method === "read_group")).toBe(false);
+  });
+
+  test("Odoo 19: capability cache avoids re-probing read_group on second call", async () => {
+    const { fetchMock, calls } = buildFetchMock({
+      ...SUSPENSE_ACCOUNT_OVERRIDE,
+      ...ODOO19_BALANCE_FIELDS,
+      ...ODOO19_READ_GROUP_MISSING,
+      ...ODOO19_FORMATTED_BALANCE
+    });
+    globalThis.fetch = fetchMock;
+    const cache = new TtlCache();
+    const handler = buildReviewHandler(makeQueue(), cache);
+
+    await handler({ company: "Acme Corp", date_to: "2026-03-31", account_codes: ["471000"] });
+    calls.length = 0;
+
+    await handler({ company: "Acme Corp", date_to: "2026-03-31", account_codes: ["471000"] });
+
+    const formattedCalls = calls.filter((c) => c.method === "formatted_read_group");
+    const readGroupCalls = calls.filter((c) => c.method === "read_group");
+    expect(formattedCalls.length).toBe(1);
+    expect(readGroupCalls.length).toBe(0);
+  });
+
+  test("both read_group methods missing yields null balances and severity unknown", async () => {
+    const { fetchMock } = buildFetchMock({
+      ...SUSPENSE_ACCOUNT_OVERRIDE,
+      ...ODOO19_READ_GROUP_MISSING,
+      "account.move.line.formatted_read_group": {
+        status: 404,
+        body: { error: { message: "The method 'account.move.line.formatted_read_group' does not exist" } }
+      }
+    });
+    globalThis.fetch = fetchMock;
+    const handler = buildReviewHandler(makeQueue(), new TtlCache());
+
+    const result = await handler({ company: "Acme Corp", date_to: "2026-03-31", account_codes: ["471000"] });
+
+    expect(result.isError).toBeUndefined();
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.warnings.some((w: string) => w.includes("account.move.line (balances)"))).toBe(true);
+    const account = parsed.accounts[0];
+    expect(account.balance).toBeNull();
+    expect(account.debit).toBeNull();
+    expect(account.credit).toBeNull();
+    expect(account.severity).toBe("unknown");
   });
 });
 
@@ -1247,6 +1394,14 @@ describe("bookkeeping.explain_report_line", () => {
           { id: 10, name: "+FR95" },
           { id: 11, name: "-FR96" }
         ]
+      },
+      "account.move.line.read_group": {
+        status: 404,
+        body: { error: { message: "The method 'account.move.line.read_group' does not exist" } }
+      },
+      "account.move.line.formatted_read_group": {
+        status: 200,
+        body: [{ "balance:sum": 1000, __count: 3 }]
       }
     });
     globalThis.fetch = fetchMock;
@@ -1259,9 +1414,11 @@ describe("bookkeeping.explain_report_line", () => {
     const expr = parsed.expressions[0];
     expect(expr.tax_tags).toEqual(["+FR95", "-FR96"]);
     expect(expr.tax_tag_balance).toBe(1000);
-    const readGroups = calls.filter((c) => c.model === "account.move.line" && c.method === "read_group");
-    expect(readGroups.length).toBe(1);
-    expect(readGroups[0].body.groupby).toEqual([]);
+    const groupCalls = calls.filter((c) => c.model === "account.move.line" && (c.method === "read_group" || c.method === "formatted_read_group"));
+    expect(groupCalls.length).toBe(1);
+    expect(groupCalls[0].method).toBe("formatted_read_group");
+    expect(groupCalls[0].body.groupby).toEqual([]);
+    expect(groupCalls[0].body.aggregates).toEqual(["balance:sum"]);
   });
 
   test("aggregation: builds a one-level-deep formula_trace listing the referenced line codes", async () => {

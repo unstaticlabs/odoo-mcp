@@ -22,7 +22,9 @@ import {
   validateAggregationRequest,
   bucketDateValue,
   groupRecordsInMemory,
-  aggregateRecords
+  aggregateRecords,
+  normalizeAggregateRow,
+  readGroupCompat
 } from "./aggregation";
 import { OdooError } from "./odoo";
 import { OdooQueue, callOdoo } from "./test-exports";
@@ -684,5 +686,74 @@ describe("aggregateRecords integration", () => {
         lazy: true
       })
     ).rejects.toBeInstanceOf(OdooError);
+  });
+
+  test("normalizeAggregateRow maps field:agg keys to bare names", () => {
+    const row = { account_id: [1, "A"], "balance:sum": 100, "debit:sum": 120, __count: 2 };
+    const normalized = normalizeAggregateRow(row, ["balance:sum", "debit:sum"]);
+    expect(normalized.balance).toBe(100);
+    expect(normalized.debit).toBe(120);
+    expect(normalized["balance:sum"]).toBe(100);
+  });
+
+  test("Odoo 19 formatted_read_group native path succeeds without fallback", async () => {
+    const fetchMock = mock(async (url: string) => {
+      if (url.includes("/fields_get")) return fieldsGetResponse(taskFieldsMeta);
+      if (url.includes("/formatted_read_group")) {
+        return new Response(
+          JSON.stringify({ result: [{ stage_id: [10, "Todo"], __count: 2 }] }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url.endsWith("/read_group")) return new Response("not found", { status: 404 });
+      return new Response("not found", { status: 404 });
+    });
+    globalThis.fetch = fetchMock;
+
+    const result = await aggregateRecords(makeQueue(), new TtlCache(), conn, {
+      model: "project.task",
+      domain: [],
+      groupby: ["stage_id"],
+      aggregates: ["__count"],
+      lazy: true
+    });
+
+    expect(result.metadata.fallback).toBe(false);
+    expect(result.groups[0].stage_id).toEqual({ id: 10, name: "Todo" });
+  });
+
+  test("readGroupCompat caches formatted_read_group and skips read_group probe", async () => {
+    let formattedCalls = 0;
+    let readGroupCalls = 0;
+    const fetchMock = mock(async (url: string) => {
+      if (url.includes("/formatted_read_group")) {
+        formattedCalls++;
+        return new Response(
+          JSON.stringify({ result: [{ stage_id: [10, "Todo"], "stage_id_count": 2, __count: 2 }] }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+      if (url.endsWith("/read_group")) {
+        readGroupCalls++;
+        return new Response("not found", { status: 404 });
+      }
+      return new Response("not found", { status: 404 });
+    });
+    globalThis.fetch = fetchMock;
+
+    const cache = new TtlCache();
+    const queue = makeQueue();
+    const args = {
+      domain: [] as unknown[],
+      groupby: ["stage_id"],
+      aggregates: ["__count"],
+      lazy: true
+    };
+
+    await readGroupCompat(queue, conn, cache, "project.task", args);
+    await readGroupCompat(queue, conn, cache, "project.task", args);
+
+    expect(formattedCalls).toBe(2);
+    expect(readGroupCalls).toBe(0);
   });
 });
