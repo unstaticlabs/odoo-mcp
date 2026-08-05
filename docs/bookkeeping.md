@@ -12,7 +12,7 @@ reads, normalize the shapes, and refuse to write until a human confirms.
 | Intent | Tool surface |
 |---|---|
 | Expense population **audit** (account/VAT/payment/attachments/duplicates/totals) | `billing.audit_expenses` (read-only) |
-| Draft vendor-bill / expense **preparatory** fields (draft-only) | `billing.update_draft_expense`, `billing.configure_draft_vendor_bill` |
+| Draft vendor-bill / expense **preparatory** fields (draft-only; expense amount via `total_amount` — `total_amount_currency` is audit-only) | `billing.update_draft_expense`, `billing.configure_draft_vendor_bill` |
 | Reversible expense / vendor-bill **lifecycle** (reset→edit→resubmit/reapprove) | `call_model_method` on allowlisted methods only (`list_model_actions` → `executable:true`), with required write `context` + compatible record `state`; a transition that leaves `posted` additionally needs `confirmation_token` |
 | Tax-close / report external value / return / lock-exception | `bookkeeping.plan_safe_write` (validate-only + human confirm) |
 | Reversible CRUD / lifecycle on `account.*` / `hr.*` / etc. | Allowed via generic write tools — Odoo ACLs/workflow/locks are authority (not model-prefix denial) |
@@ -26,6 +26,7 @@ Reversible CRUD on `hr.expense` / `hr.expense.sheet` / `account.move` is **not**
    `call_model_method` on an allowlisted reset method (`action_reset` /
    `action_reset_expense_sheets` / vendor-bill `button_draft`) on the full `/mcp` surface.
 2. `billing.update_draft_expense` / `billing.configure_draft_vendor_bill` — draft preparatory fields only.
+   Expense monetary prep uses `total_amount`; `total_amount_currency` is audit-only and refused on write.
 3. **Submit / approve** — `billing.submit_expense` / `billing.approve_expense`, or the equivalent
    allowlisted `call_model_method` call on `/mcp`.
 
