@@ -30,6 +30,26 @@ const PM_WRITE_ROUTING_NOTE =
   "Draft vendor-bill / expense prep helpers: billing.update_draft_expense / billing.configure_draft_vendor_bill. " +
   "Tax-close / report / return / lock-exception: bookkeeping.plan_safe_write.";
 
+/**
+ * Chatter is the versioned, chronological journal; text fields are not versioned and a write
+ * replaces their previous content outright. Agents keep reaching for `description` / terms /
+ * internal-notes fields to record follow-ups, which silently destroys the prior value and fakes
+ * an audit trail — this note is the only place the tool surface says otherwise.
+ */
+const CHATTER_VS_FIELDS_NOTE =
+  " Chatter vs fields: the chatter is the record's chronological, auditable journal. Follow-up notes, " +
+  "explanations, decisions, justifications, analysis results and action history MUST go through " +
+  "post_message / batch_post_message. Text fields (Description, Terms & Conditions, Internal Notes, …) " +
+  "are NOT versioned and a write REPLACES their current content — only write them when the value is " +
+  "durable, structuring business data describing the record's current state. Never use a text field as " +
+  "a substitute journal. Before replacing existing text, confirm you are updating the business data " +
+  "itself, not appending context; when in doubt, post to the chatter.";
+
+const CHATTER_JOURNAL_NOTE =
+  " This is the correct destination for follow-up notes, decisions, justifications, analysis results and " +
+  "action history: chatter entries are append-only and timestamped, unlike text fields such as " +
+  "Description / Terms & Conditions / Internal Notes, which a write overwrites without history.";
+
 function gateWrite(model: string, method: string, args: Record<string, unknown>) {
   if (!isMutatingOdooMethod(method)) return null;
   const verdict = assessWriteOperation({ model, method, args });
@@ -344,7 +364,10 @@ export function registerWriteTools(
     "post_message",
     {
       title: "Post Chatter Message",
-      description: "Write: post a message (chatter log/comment) to a single Odoo record." + PM_WRITE_ROUTING_NOTE,
+      description:
+        "Write: post a message (chatter log/comment) to a single Odoo record." +
+        PM_WRITE_ROUTING_NOTE +
+        CHATTER_JOURNAL_NOTE,
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
       inputSchema: {
         model: z.string(),
@@ -391,7 +414,8 @@ export function registerWriteTools(
       title: "Update Record",
       description:
         "Write: update fields on a single Odoo record by id. x2many fields need Odoo command tuples (e.g. [[6,0,ids]], [[4,id]], [[3,id]])." +
-        PM_WRITE_ROUTING_NOTE,
+        PM_WRITE_ROUTING_NOTE +
+        CHATTER_VS_FIELDS_NOTE,
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
       inputSchema: {
         model: z.string().min(1),
@@ -435,7 +459,9 @@ export function registerWriteTools(
       description:
         "Write: update multiple Odoo records of one model in one call. Each `updates` entry targets one " +
         "record_id with its own `values`. x2many fields need Odoo command tuples (e.g. [[6,0,ids]], [[4,id]], [[3,id]]). " +
-        "Fail-fast: a mid-loop error aborts remaining updates; already-applied writes are NOT rolled back.",
+        "Fail-fast: a mid-loop error aborts remaining updates; already-applied writes are NOT rolled back." +
+        PM_WRITE_ROUTING_NOTE +
+        CHATTER_VS_FIELDS_NOTE,
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
       inputSchema: {
         model: z.string().min(1),
@@ -498,7 +524,8 @@ export function registerWriteTools(
         "Write: post a chatter message to multiple Odoo records of one model. message_post is per-record. " +
         "Each `messages` entry posts to one record_id. Bodies are HTML-escaped unless body_is_html is true. " +
         "Fail-fast: a mid-loop error aborts remaining posts; already-posted messages are NOT rolled back." +
-        PM_WRITE_ROUTING_NOTE,
+        PM_WRITE_ROUTING_NOTE +
+        CHATTER_JOURNAL_NOTE,
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
       inputSchema: {
         model: z.string(),
@@ -610,7 +637,8 @@ export function registerWriteTools(
         "Escape hatch: call an arbitrary Odoo model method. Odoo's JSON-2 API has NO positional args — every body key is bound as a named kwarg (record-bound methods take a top-level `ids`). Pass record ids via `ids` and all other parameters via `kwargs`. " +
         "Action-based risk policy (not model-prefix denial): reversible configuration/lifecycle methods execute under Odoo ACLs; " +
         "irreversible posting/payment/reconcile/delete/lock require confirmation_token (omit token for preflight)." +
-        PM_WRITE_ROUTING_NOTE,
+        PM_WRITE_ROUTING_NOTE +
+        CHATTER_VS_FIELDS_NOTE,
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
       inputSchema: {
         model: z.string(),
