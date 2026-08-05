@@ -125,6 +125,61 @@ describe("classifyPmWriteIntent — structural deny paths", () => {
     expect(result.verdict).toBe("denied");
     expect(result.intent).toBe("financial_mutation");
     expect(result.blocked_fields).toContain("bank_ids");
+    expect(result.reason).not.toContain("bookkeeping.plan_safe_write");
+    expect(result.next_step).not.toContain("bookkeeping.plan_safe_write");
+  });
+
+  test("res.partner create/write with VAT identity fields is allowed", () => {
+    const create = classifyPmWriteIntent({
+      model: "res.partner",
+      method: "create",
+      args: {
+        vals_list: [
+          {
+            name: "SARL Fournisseur",
+            vat: "FR12345678901",
+            siret: "12345678900012",
+            company_registry: "123456789",
+            country_id: 75
+          }
+        ]
+      }
+    });
+    expect(create).toMatchObject({
+      verdict: "allowed",
+      intent: "financial_mutation",
+      policy_rule: "reversible_configuration"
+    });
+
+    const write = classifyPmWriteIntent({
+      model: "res.partner",
+      method: "write",
+      args: { ids: [5], vals: { vat: "FR12345678901", name: "SARL Fournisseur" } }
+    });
+    expect(write).toMatchObject({
+      verdict: "allowed",
+      intent: "financial_mutation",
+      policy_rule: "reversible_configuration"
+    });
+  });
+
+  test("res.partner write with property accounts / credit_limit stays denied", () => {
+    const payable = classifyPmWriteIntent({
+      model: "res.partner",
+      method: "write",
+      args: { ids: [5], vals: { property_account_payable_id: 42 } }
+    });
+    expect(payable.verdict).toBe("denied");
+    expect(payable.blocked_fields).toContain("property_account_payable_id");
+    expect(payable.reason).not.toContain("bookkeeping.plan_safe_write");
+
+    const limit = classifyPmWriteIntent({
+      model: "res.partner",
+      method: "write",
+      args: { ids: [5], vals: { credit_limit: 1000 } }
+    });
+    expect(limit.verdict).toBe("denied");
+    expect(limit.blocked_fields).toContain("credit_limit");
   });
 
   test("mail.activity create with res_model account.move is denied", () => {
