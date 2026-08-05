@@ -1575,6 +1575,62 @@ describe("write safety gate (connector)", () => {
     expect(result.isError).toBeUndefined();
     expect(queue.calls.some((c: any) => c.method === "create")).toBe(true);
   });
+
+  test("create_record for res.partner with VAT identity fields reaches Odoo", async () => {
+    const queue = makeStubQueue({ createId: 11 });
+    const agent = await buildAgentWithQueue(queue);
+    const handler = getToolHandler(agent, "create_record");
+
+    const result = await handler({
+      model: "res.partner",
+      values: {
+        name: "SARL Fournisseur",
+        vat: "FR12345678901",
+        siret: "12345678900012",
+        company_registry: "123456789",
+        country_id: 75
+      }
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(queue.calls.some((c: any) => c.method === "create")).toBe(true);
+  });
+
+  test("create_record for res.partner with bank_ids is write_blocked", async () => {
+    const queue = makeStubQueue({ createId: 12 });
+    const agent = await buildAgentWithQueue(queue);
+    const handler = getToolHandler(agent, "create_record");
+
+    const result = await handler({
+      model: "res.partner",
+      values: { name: "Acme", bank_ids: [[0, 0, [{ acc_number: "FR123" }]]] }
+    });
+
+    expect(result.isError).toBe(true);
+    expect(queue.calls.length).toBe(0);
+    const envelope = JSON.parse(result.content[0].text);
+    expect(envelope.error).toBe("write_blocked");
+    expect(envelope.intent).toBe("financial_mutation");
+    expect(envelope.blocked_fields).toContain("bank_ids");
+  });
+
+  test("update_record for res.partner with credit_limit is write_blocked", async () => {
+    const queue = makeStubQueue();
+    const agent = await buildAgentWithQueue(queue);
+    const handler = getToolHandler(agent, "update_record");
+
+    const result = await handler({
+      model: "res.partner",
+      record_id: 5,
+      values: { credit_limit: 1000 }
+    });
+
+    expect(result.isError).toBe(true);
+    expect(queue.calls.length).toBe(0);
+    const envelope = JSON.parse(result.content[0].text);
+    expect(envelope.error).toBe("write_blocked");
+    expect(envelope.blocked_fields).toContain("credit_limit");
+  });
 });
 
 describe("post_message tool callOdoo call shape", () => {

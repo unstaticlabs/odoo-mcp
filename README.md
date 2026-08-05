@@ -110,6 +110,11 @@ can only do what their Odoo account permits.
   connector classifies by **model + method + field names**, not free-text keywords.
 - **Draft vendor-bill / expense prep** — use `billing.update_draft_expense` /
   `billing.configure_draft_vendor_bill` (draft-only allowlisted fields; no validate/post).
+  For a **new French vendor**, create/update `res.partner` via generic `create_record` /
+  `update_record` with VAT/registry identity (`vat`, and often `siret` / `company_registry`,
+  plus name / `country_id` / contact), then set `partner_id` on the draft bill. Banks,
+  receivable/payable property accounts, payment terms, and credit/debit limits stay
+  MCP-blocked; partner identity is not a `bookkeeping.plan_safe_write` path.
 - **Reversible expense lifecycle** — prefer the dedicated tools `billing.reset_expense` /
   `billing.submit_expense` / `billing.approve_expense`. They are the **only** lifecycle path on
   `/accounting/mcp`, which ships no generic write tools. On the full `/mcp` surface the same

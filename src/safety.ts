@@ -801,9 +801,6 @@ const PARTNER_FINANCIAL_FIELD_DENYLIST = new Set([
   "property_account_receivable_id",
   "property_account_payable_id",
   "property_payment_term_id",
-  "vat",
-  "siret",
-  "company_registry",
   "credit_limit",
   "debit_limit",
   "trust",
@@ -844,9 +841,6 @@ export const FINANCIAL_FIELD_PATTERNS: readonly RegExp[] = [
 ];
 
 const PM_LIFECYCLE_METHODS = new Set(["unlink", "action_feedback"]);
-
-const BOOKKEEPING_DENY_REASON =
-  "Use bookkeeping.plan_safe_write for validated accounting/tax operations (tax/report/return/lock-exception).";
 
 function pmAllowed(): PmWriteIntentResult {
   return { verdict: "allowed", intent: "project_management" };
@@ -991,12 +985,14 @@ function classifyResPartner(method: string, args: Record<string, unknown>): PmWr
   if (blocked.length > 0) {
     return pmDenied(
       "financial_mutation",
-      `res.partner write touches financial fields: ${blocked.join(", ")}. ${BOOKKEEPING_DENY_REASON}`,
+      `res.partner write touches financial fields: ${blocked.join(", ")}. ` +
+        "Banks, property accounts, payment terms, credit/debit limits, trust, and partner ranks " +
+        "cannot be set via MCP; omit them or update in the Odoo UI / with a human.",
       blocked,
       {
         policy_rule: "sensitive_model_method_denied",
         risk_class: "reversible_configuration",
-        next_step: "Omit financial fields, or update partners in the Odoo UI / with a human."
+        next_step: "Omit denied fields, or update the partner in the Odoo UI / with a human."
       }
     );
   }
