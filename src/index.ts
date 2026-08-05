@@ -8,7 +8,13 @@ import { oauthDefaultHandler } from "./oauth";
 export { McpAgent, AccountingAgent, ProjectsAgent };
 
 const ACCESS_TOKEN_TTL_SECONDS = 60 * 60; // 1 hour
-const REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60; // 30 days
+// The provider sets a grant's expiry once at authorization and never extends it
+// on refresh, so this is a hard wall from the initial connect — after it, every
+// client of that grant must re-run the OAuth flow.
+const REFRESH_TOKEN_TTL_SECONDS = 365 * 24 * 60 * 60; // 1 year
+// Must comfortably outlive grants: refresh requires the DCR client record, and
+// the library default (90 days) would kill year-long grants at day 90.
+const CLIENT_REGISTRATION_TTL_SECONDS = 2 * 365 * 24 * 60 * 60; // 2 years
 
 /**
  * One endpoint per tool surface, all sharing the same OAuth front door and the
@@ -53,6 +59,7 @@ export const oauthProvider = new OAuthProvider<Env>({
   clientRegistrationEndpoint: "/register",
   accessTokenTTL: ACCESS_TOKEN_TTL_SECONDS,
   refreshTokenTTL: REFRESH_TOKEN_TTL_SECONDS,
+  clientRegistrationTTL: CLIENT_REGISTRATION_TTL_SECONDS,
   scopesSupported: ["odoo"]
 });
 

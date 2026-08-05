@@ -139,7 +139,12 @@ How it works:
    flow with a clear, redacted error.
 4. On success the credentials become the grant's `props` and the standard code
    exchange completes at `/token`. Access tokens expire after **1 hour**;
-   refresh tokens (30 days) let ChatGPT renew silently.
+   refresh tokens let ChatGPT renew silently for up to **1 year** after the
+   initial connect. That year is a hard wall, not a sliding window: the
+   provider fixes the grant's expiry at authorization time and never extends
+   it on refresh, so after it the client must re-run this flow. (Client
+   registrations from `/register` live 2 years so they outlast the grants
+   that reference them.)
 5. On each token-authenticated `/mcp` request, the provider resolves the token
    back to the stored credentials and injects them as the **same `Props`
    object** the header path builds. Everything downstream — `McpAgent`, every
@@ -168,7 +173,7 @@ sequenceDiagram
     W-->>B: redirect with authorization code
     B-->>G: code returns to ChatGPT
     G->>W: POST /token (code exchange)
-    W-->>G: access token (1 h) + refresh token (30 d)
+    W-->>G: access token (1 h) + refresh token (1 y, fixed at connect)
 ```
 
 ### Stored-credential security

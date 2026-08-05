@@ -395,7 +395,7 @@ new connectors are unaffected.
 
 Your credentials are stored end-to-end encrypted in Workers KV and resolved per request —
 tools behave exactly as on the header path, limited by your own Odoo permissions. Token
-lifetime is 1 h (refresh 30 days). Revocation: delete the `grant:*` key via
+lifetime is 1 h (refresh 1 year, fixed at connect time — re-authorize after that). Revocation: delete the `grant:*` key via
 `npx wrangler kv key list/delete --binding OAUTH_KV --remote` (details in
 [docs/product/auth.md](docs/product/auth.md)).
 

@@ -71,7 +71,7 @@ URL — no static headers — so the shim was built. What shipped:
 - Credentials are stored **end-to-end encrypted** as grant props in a new
   `OAUTH_KV` namespace; token-authenticated `/mcp` requests resolve back to
   the exact same `Props` object the header path builds. Access tokens live
-  1 hour, refresh tokens 30 days. See [`auth.md`](./auth.md) for the security
+  1 hour, refresh tokens 1 year. See [`auth.md`](./auth.md) for the security
   model and revocation.
 - The raw header path is untouched: any `/mcp` request with an `X-Odoo-*`
   header bypasses the shim entirely. Tools remain auth-path-agnostic.
