@@ -224,6 +224,8 @@ describe("projects.create_task — Waiting is derived, not set", () => {
       ._registeredTools;
     expect(tools["projects.create_task"].description).toContain("depend_on_ids");
     expect(tools["projects.create_task"].description).toContain("04_waiting_normal");
+    expect(tools["projects.create_task"].description).toContain("stage_id");
+    expect(tools["projects.create_task"].description).toMatch(/deferred|On Hold/i);
   });
 });
 

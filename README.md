@@ -185,7 +185,29 @@ The connector enforces this:
    (`projects.create_task`, `create_record`, `update_record`, `batch_update`, `call_model_method`)
    with `policy_rule: "waiting_state_forbidden"`. No Odoo call is made.
 2. **To express blocking, set `depend_on_ids`** and let Odoo compute Waiting.
-3. **To defer work, use stage, assignees, activities or dates** — and keep an ordinary open state.
+3. **To voluntarily defer / park work, move the card via `stage_id`** to the board's On Hold
+   (or equivalent park column) and keep an ordinary open `state` — do **not** set Waiting.
+   Optional supporting signals: assignees, activities, or dates. Waiting stays Odoo-derived;
+   the UI On Hold column plus an open state (e.g. In Progress / Changes Requested) is the
+   intentional deferral signal.
+
+   **Incorrect** (writes Waiting — refused, zero Odoo write):
+
+   ```
+   update_record({ model: "project.task", record_id: …,
+     values: { stage_id: <On Hold>, state: "04_waiting_normal", … } })
+   ```
+
+   → `write_blocked` / `connector_policy` / `waiting_state_forbidden` (`recoverable: true`).
+
+   **Correct** (park via stage only):
+
+   ```
+   update_record({ model: "project.task", record_id: …,
+     values: { stage_id: <On Hold> } })
+   ```
+
+   → stage moves; open `state` is unchanged.
 4. **In Progress requires no open blockers.** Setting `state = "01_in_progress"` while open
    `depend_on_ids` remain is refused with `policy_rule: "in_progress_blocked_by_dependencies"` and
    the blocker ids in `relevant_state`; Odoo would recompute Waiting and the write would be a
