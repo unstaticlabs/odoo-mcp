@@ -32,6 +32,18 @@ const PM_WRITE_ROUTING_NOTE =
   "Tax-close / report / return / lock-exception: bookkeeping.plan_safe_write.";
 
 /**
+ * Waiting (`04_waiting_normal`) is Odoo-derived from open Blocked By; agents discover only
+ * tool schemas + README. Without this note, generic writes look like free-form `state` edits
+ * and clients park tasks by writing Waiting (refused) instead of stage_id + ordinary open state.
+ */
+const TASK_WAITING_DEFERRAL_NOTE =
+  " project.task Waiting (`state=04_waiting_normal`) is derived from open Blocked By (`depend_on_ids`) — never write it. " +
+  "To block: set `depend_on_ids` and let Odoo compute Waiting. " +
+  "To voluntarily defer / park: set `stage_id` to the board's On Hold (or equivalent park column) and keep an ordinary " +
+  "open `state` (omit Waiting; leave the prior open state or another open non-Waiting value). " +
+  "Optional supporting signals: assignees, activities, dates.";
+
+/**
  * Chatter is the versioned, chronological journal; text fields are not versioned and a write
  * replaces their previous content outright. Agents keep reaching for `description` / terms /
  * internal-notes fields to record follow-ups, which silently destroys the prior value and fakes
@@ -316,7 +328,8 @@ export function registerWriteTools(
         "Write: create a single Odoo record of the given model. When the model is project.task, the response carries a " +
         "trace_token (src-…) that is also stamped into the task's chatter — you MUST surface that token verbatim in your " +
         "visible reply to the user so the conversation can be found again from the Odoo task." +
-        PM_WRITE_ROUTING_NOTE,
+        PM_WRITE_ROUTING_NOTE +
+        TASK_WAITING_DEFERRAL_NOTE,
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
       inputSchema: {
         model: z.string().min(1),
@@ -453,6 +466,7 @@ export function registerWriteTools(
       description:
         "Write: update fields on a single Odoo record by id. x2many fields need Odoo command tuples (e.g. [[6,0,ids]], [[4,id]], [[3,id]])." +
         PM_WRITE_ROUTING_NOTE +
+        TASK_WAITING_DEFERRAL_NOTE +
         CHATTER_VS_FIELDS_NOTE,
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
       inputSchema: {
@@ -501,6 +515,7 @@ export function registerWriteTools(
         "record_id with its own `values`. x2many fields need Odoo command tuples (e.g. [[6,0,ids]], [[4,id]], [[3,id]]). " +
         "Fail-fast: a mid-loop error aborts remaining updates; already-applied writes are NOT rolled back." +
         PM_WRITE_ROUTING_NOTE +
+        TASK_WAITING_DEFERRAL_NOTE +
         CHATTER_VS_FIELDS_NOTE,
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
       inputSchema: {
@@ -680,6 +695,7 @@ export function registerWriteTools(
         "Action-based risk policy (not model-prefix denial): reversible configuration/lifecycle methods execute under Odoo ACLs; " +
         "irreversible posting/payment/reconcile/delete/lock require confirmation_token (omit token for preflight)." +
         PM_WRITE_ROUTING_NOTE +
+        TASK_WAITING_DEFERRAL_NOTE +
         CHATTER_VS_FIELDS_NOTE,
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
       inputSchema: {

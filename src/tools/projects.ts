@@ -355,6 +355,8 @@ export function registerProjectsTools(
         "that token verbatim in your visible reply so the conversation can be found again from the Odoo task. " +
         "Waiting is derived, never set: Odoo computes `state=04_waiting_normal` from open Blocked By " +
         "dependencies, so express blocking via `depend_on_ids` and never write that state yourself. " +
+        "For deferred work at create time, pass the park `stage_id` (On Hold or equivalent) and keep an ordinary " +
+        "open state — never set Waiting; express real blockers only via `depend_on_ids`. " +
         "For generic models use create_record; for connector bugs use feedback.submit.",
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
       inputSchema: {
