@@ -76,6 +76,7 @@ The server never logs, stores, or echoes your key.
 | `billing.submit_expense` | write | `record_ids` (1–50 positive ints), `context` (**required**) — `hr.expense` draft → submitted |
 | `billing.approve_expense` | write | `record_ids` (1–50 positive ints), `context` (**required**) — `hr.expense` submitted → approved; refuses when Odoo's `can_approve` is false. Never posts or pays |
 | `billing.configure_draft_vendor_bill` | write | `record_id` (positive int), `values` (allowlisted draft `account.move` `in_invoice` header: `partner_id`, dates, `ref`, `fiscal_position_id`, `currency_id`, `narration`, `payment_reference`, plus `invoice_line_ids`), `context` (optional) — draft vendor bills only; reset via `call_model_method` `button_draft` |
+| `billing.attach_source_pdf` | write | `bill_id` (positive int), `source_attachment_id` (positive int), `page_from`/`page_to` (positive ints, optional — 1-based inclusive; omit both to copy the whole PDF), `max_bytes` (positive int, default `10485760`), `name` (1–255 chars, optional), `context` (**required**) — copies or page-extracts a source PDF in-Worker onto a draft `in_invoice` as a new `ir.attachment`. Draft vendor bills only; never posts, never touches the source, not generic attachment CRUD |
 | `feedback.submit` | write | `title` (5–120 chars), `message` (20–4000 chars; concrete details, no secrets), `category` (`bug` \| `documentation_gap` \| `missing_feature` \| `dx_friction`), `tool_name` (string, optional) — files an `[agent-feedback]` card in the maintainers' tracker; see [Agent feedback](#agent-feedback) |
 
 **`aggregate_records` validation.** Before calling Odoo `read_group`, the server validates `groupby` and
@@ -110,6 +111,8 @@ can only do what their Odoo account permits.
   connector classifies by **model + method + field names**, not free-text keywords.
 - **Draft vendor-bill / expense prep** — use `billing.update_draft_expense` /
   `billing.configure_draft_vendor_bill` (draft-only allowlisted fields; no validate/post).
+  When one supplier PDF holds several vendors' invoices, `billing.attach_source_pdf` copies or
+  page-extracts it onto each draft bill in-Worker — no generic `ir.attachment` CRUD needed.
   For a **new French vendor**, create/update `res.partner` via generic `create_record` /
   `update_record` with VAT/registry identity (`vat`, and often `siret` / `company_registry`,
   plus name / `country_id` / contact), then set `partner_id` on the draft bill. Banks,
