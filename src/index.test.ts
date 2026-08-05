@@ -3906,6 +3906,38 @@ describe("expand_record", () => {
     expect(result.isError).toBeUndefined();
   });
 
+  test("attachment search_read uses a 3-tuple res_id domain", async () => {
+    const agent = await buildWriteToolAgent();
+    const log: { url: string; body: any }[] = [];
+    globalThis.fetch = mockOdoo(
+      {
+        "project.task/fields_get": BASE_FIELDS_META,
+        "project.task/search_read": [{ id: 42, name: "Task A" }],
+        "ir.attachment/search_read": []
+      },
+      log
+    );
+
+    const handler = getToolHandler(agent, "expand_record");
+    const result = await handler({
+      model: "project.task",
+      record_id: 42,
+      relations: [],
+      include_chatter: false,
+      include_attachments: true,
+      relation_limit: 10
+    });
+    const body = JSON.parse(result.content[0].text);
+
+    const attCall = log.find((entry) => entry.url.endsWith("/ir.attachment/search_read"));
+    expect(attCall?.body.domain).toEqual([
+      ["res_model", "=", "project.task"],
+      ["res_id", "=", 42]
+    ]);
+    expect(body.attachments).toEqual([]);
+    expect(result.isError).toBeUndefined();
+  });
+
   test("explicit relations expansion fetches the comodel and normalizes rows", async () => {
     const agent = await buildWriteToolAgent();
     const fieldsMeta = { ...BASE_FIELDS_META, tag_ids: { type: "many2many", string: "Tags", relation: "test.tag", store: true } };
