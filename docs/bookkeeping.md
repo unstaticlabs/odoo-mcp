@@ -26,6 +26,8 @@ Reversible CRUD on `hr.expense` / `hr.expense.sheet` / `account.move` is **not**
    `call_model_method` on an allowlisted reset method (`action_reset` /
    `action_reset_expense_sheets` / vendor-bill `button_draft`) on the full `/mcp` surface.
 2. `billing.update_draft_expense` / `billing.configure_draft_vendor_bill` — draft preparatory fields only.
+   Vendor-bill header prep includes `currency_id` (foreign-currency drafts can be set here rather than
+   requiring generic `update_record` on `account.move`).
 3. **Submit / approve** — `billing.submit_expense` / `billing.approve_expense`, or the equivalent
    allowlisted `call_model_method` call on `/mcp`.
 
