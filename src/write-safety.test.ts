@@ -351,3 +351,36 @@ describe("isMutatingOdooMethod", () => {
     expect(isMutatingOdooMethod("message_post")).toBe(true);
   });
 });
+
+describe("assessWriteOperation — project.task Waiting state", () => {
+  test("surfaces waiting_state_forbidden with a depend_on_ids next_step", () => {
+    const verdict = assessWriteOperation({
+      model: "project.task",
+      method: "write",
+      args: { ids: [42], vals: { state: "04_waiting_normal" } }
+    });
+    expect(verdict.allowed).toBe(false);
+    expect(verdict.intent).toBe("project_management");
+    expect(verdict.policy_rule).toBe("waiting_state_forbidden");
+    expect(verdict.next_step).toContain("depend_on_ids");
+    expect(verdict.recoverable).toBe(true);
+  });
+
+  test("the PM compat fallback does not rescue a Waiting write", () => {
+    const verdict = assessWriteOperation({
+      model: "project.task",
+      method: "create",
+      args: { vals_list: [{ name: "x", project_id: 4, state: "04_waiting_normal" }] }
+    });
+    expect(verdict.allowed).toBe(false);
+  });
+
+  test("stage-only write on a Waiting task stays allowed", () => {
+    const verdict = assessWriteOperation({
+      model: "project.task",
+      method: "write",
+      args: { ids: [42], vals: { stage_id: 7 } }
+    });
+    expect(verdict).toEqual(PM_ALLOWED_VERDICT);
+  });
+});

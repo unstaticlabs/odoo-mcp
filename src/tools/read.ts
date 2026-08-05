@@ -7,6 +7,7 @@ import { CURATED_MODEL_ACTIONS, type CuratedAction } from "./actions-map";
 import {
   CORE_MODEL_ALLOWLIST,
   NAMED_FIELD_PRESET_VALUES,
+  annotateWaitingTask,
   browseRecords,
   countRecords,
   decodeBrowseCursor,
@@ -19,6 +20,7 @@ import {
   requireConnection,
   searchRecords,
   searchRecordsCompact,
+  withWaitingAnnotationFields,
   zCompactReadEnvelope,
   zOdooRecord,
   zOdooRecords,
@@ -424,7 +426,10 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
         "showing where the record sits (e.g. draft, confirmed, posted, done, cancelled). By convention, records " +
         "where this field is `'draft'` are unconfirmed and generally safe to edit or remove via `update_record`/" +
         "`delete_record`; records past `draft` are higher risk — Odoo may block the write or it may trigger real " +
-        "side effects (linked accounting entries, downstream automations), so check this field before mutating.",
+        "side effects (linked accounting entries, downstream automations), so check this field before mutating. " +
+        "For `project.task`, `state` and `depend_on_ids` are always projected and a task in Waiting " +
+        "(`04_waiting_normal`) is annotated with `_waiting_derived`, `_open_blocker_ids` and `_waiting_explanation` — " +
+        "Odoo computes Waiting from open Blocked By dependencies, so it is not a status to write.",
       annotations: { readOnlyHint: true, openWorldHint: false },
       inputSchema: {
         model: z.string(),
@@ -440,13 +445,14 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
       if (!model || !model.trim()) return mcpError("model must be a non-empty string");
       if (!Number.isInteger(record_id) || record_id <= 0) return mcpError("record_id must be a positive integer");
       try {
+        const conn = requireConnection(getProps());
         const warnings: string[] = [];
         const { rows, fieldsReport } = await searchRecords(
           queue,
-          requireConnection(getProps()),
+          conn,
           model,
           [["id", "=", record_id]],
-          fields,
+          withWaitingAnnotationFields(model, fields),
           1,
           undefined,
           undefined,
@@ -464,7 +470,10 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
             JSON.stringify([], null, 2)
           );
         }
-        const record = rows[0] as Record<string, unknown>;
+        const record =
+          model === "project.task"
+            ? await annotateWaitingTask(queue, conn, rows[0] as Record<string, unknown>)
+            : (rows[0] as Record<string, unknown>);
         const workflowStatus = deriveWorkflowStatus(record);
         const result = workflowStatus != null ? { ...record, _workflow_status: workflowStatus } : record;
         return mcpStructured(

@@ -73,6 +73,83 @@ export function deriveWorkflowStatus(record: Record<string, unknown>): string | 
   return null;
 }
 
+/**
+ * Odoo 19 `project.task.state` vocabulary for the Waiting guard.
+ *
+ * Waiting is **computed** by Odoo from `stage_id` + open `depend_on_ids` (Blocked By) — it is not a
+ * status an agent may write. The strings and the open/closed test live here because this is the one
+ * pure leaf module both sides of the guard can import: the write gate
+ * (`project-task-state-gate.ts`, via `safety.ts`) and the read annotation (`tools/shared.ts`).
+ */
+export const PROJECT_TASK_WAITING_STATE = "04_waiting_normal";
+export const PROJECT_TASK_IN_PROGRESS_STATE = "01_in_progress";
+
+/**
+ * Blocker states that no longer hold a successor back. Anything else — including a state we do not
+ * recognise — counts as open, so an unreadable or unexpected blocker fails closed.
+ */
+export const OPEN_BLOCKER_EXEMPT_STATES: ReadonlySet<string> = new Set([
+  "03_approved",
+  "1_done",
+  "1_canceled"
+]);
+
+/** True when a Blocked By dependency in this state still holds its successor in Waiting. */
+export function isOpenBlockerState(state: unknown): boolean {
+  if (typeof state !== "string" || !state.trim()) return true;
+  return !OPEN_BLOCKER_EXEMPT_STATES.has(state.trim());
+}
+
+/** True when a raw project.task row is in Odoo's computed Waiting state. */
+export function isWaitingTaskRecord(record: Record<string, unknown> | null | undefined): boolean {
+  return record?.state === PROJECT_TASK_WAITING_STATE;
+}
+
+const WAITING_DERIVATION_NOTE =
+  "Waiting is derived by Odoo from open Blocked By dependencies (depend_on_ids) — stage, assignees, " +
+  "activities and dates never put a task in Waiting.";
+
+export type WaitingBlocker = { id: number; state?: unknown; name?: unknown };
+
+/**
+ * Attach the dependency-derived explanation to a Waiting task read.
+ *
+ * `blockers` is the live read of `depend_on_ids`; pass `undefined` when it could not be fetched, so
+ * the annotation says "unknown" rather than claiming there are no blockers. Non-Waiting records are
+ * returned untouched.
+ */
+export function annotateWaitingDependency(
+  record: Record<string, unknown>,
+  blockers?: WaitingBlocker[]
+): Record<string, unknown> {
+  if (!isWaitingTaskRecord(record)) return record;
+
+  if (!blockers) {
+    return {
+      ...record,
+      _waiting_derived: true,
+      _waiting_explanation:
+        `${WAITING_DERIVATION_NOTE} The blocking tasks could not be read here — read depend_on_ids and ` +
+        "each blocker's state to see what is holding this task."
+    };
+  }
+
+  const openBlockerIds = blockers.filter((b) => isOpenBlockerState(b.state)).map((b) => b.id);
+  const explanation =
+    openBlockerIds.length > 0
+      ? `${WAITING_DERIVATION_NOTE} Open blockers: ${openBlockerIds.join(", ")}. Close or approve them ` +
+        "(03_approved / 1_done / 1_canceled), or remove them from depend_on_ids, and Odoo recomputes the state."
+      : `${WAITING_DERIVATION_NOTE} This task has no open blockers, so the Waiting state is stale — write ` +
+        "state=01_in_progress to return it to an ordinary open state.";
+
+  return {
+    ...record,
+    _waiting_derived: true,
+    _open_blocker_ids: openBlockerIds,
+    _waiting_explanation: explanation
+  };
+}
+
 export function normalizeRecords(
   records: Record<string, unknown>[],
   fieldsMeta?: FieldsMeta,

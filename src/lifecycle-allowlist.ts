@@ -28,7 +28,10 @@ export type PolicyRule =
   | "lifecycle_ids_invalid"
   | "lifecycle_guard_failed"
   | "lifecycle_move_type_incompatible"
-  | "sensitive_model_method_denied";
+  | "sensitive_model_method_denied"
+  // project.task Waiting is computed by Odoo 19 from open Blocked By dependencies — see project-task-state-gate.ts.
+  | "waiting_state_forbidden"
+  | "in_progress_blocked_by_dependencies";
 
 /** Coarse risk class for operator/agent routing. */
 export type RiskClass =

@@ -157,6 +157,76 @@ describe("projects.create_task", () => {
   });
 });
 
+describe("projects.create_task — Waiting is derived, not set", () => {
+  test("state=04_waiting_normal returns write_blocked and never reaches Odoo", async () => {
+    const calls: string[] = [];
+    const queue = dispatchQueue((_model, method) => {
+      calls.push(method);
+      return [1];
+    });
+    const { handler } = buildProjectsServer(queue);
+
+    const result = await handler("projects.create_task")({
+      name: "Blocked work",
+      project_id: 4,
+      values: { state: "04_waiting_normal" }
+    });
+
+    expect(result.isError).toBe(true);
+    const body = JSON.parse(result.content[0].text);
+    expect(body.error).toBe("write_blocked");
+    expect(body.model).toBe("project.task");
+    expect(body.policy_rule).toBe("waiting_state_forbidden");
+    expect(body.next_step).toContain("depend_on_ids");
+    expect(body.recoverable).toBe(true);
+    expect(calls).toEqual([]);
+  });
+
+  test("state=01_in_progress with an open blocker is refused with the blocker ids", async () => {
+    const calls: { method: string; args: Record<string, unknown> }[] = [];
+    const queue = dispatchQueue((_model, method, args) => {
+      calls.push({ method, args });
+      if (method === "read") return [{ id: 9, state: "01_in_progress" }];
+      return [1];
+    });
+    const { handler } = buildProjectsServer(queue);
+
+    const result = await handler("projects.create_task")({
+      name: "Start now",
+      project_id: 4,
+      values: { state: "01_in_progress", depend_on_ids: [[6, 0, [9]]] }
+    });
+
+    expect(result.isError).toBe(true);
+    const body = JSON.parse(result.content[0].text);
+    expect(body.policy_rule).toBe("in_progress_blocked_by_dependencies");
+    expect(body.relevant_state).toEqual({ open_blocker_ids: [9], depend_on_ids: [9] });
+    expect(calls.map((c) => c.method)).toEqual(["read"]);
+  });
+
+  test("state=01_in_progress without blockers creates normally", async () => {
+    const queue = dispatchQueue((_model, method) => (method === "create" ? [77] : 1));
+    const { handler } = buildProjectsServer(queue);
+
+    const result = await handler("projects.create_task")({
+      name: "Start now",
+      project_id: 4,
+      values: { state: "01_in_progress" }
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(result.structuredContent?.id).toBe(77);
+  });
+
+  test("the tool description tells agents Waiting is derived from depend_on_ids", () => {
+    const { server } = buildProjectsServer(dispatchQueue(() => []));
+    const tools = (server as unknown as { _registeredTools: Record<string, { description: string }> })
+      ._registeredTools;
+    expect(tools["projects.create_task"].description).toContain("depend_on_ids");
+    expect(tools["projects.create_task"].description).toContain("04_waiting_normal");
+  });
+});
+
 describe("projects read tools", () => {
   test("list_projects searches project.project", async () => {
     const calls: { model: string; method: string; args: Record<string, unknown> }[] = [];
@@ -183,6 +253,80 @@ describe("projects read tools", () => {
 
     expect(result.isError).toBeUndefined();
     expect(result.structuredContent?.record).toBeNull();
+  });
+
+  test("get_task projects state + depend_on_ids so Waiting can be explained", async () => {
+    const calls: { model: string; method: string; args: Record<string, unknown> }[] = [];
+    const queue = dispatchQueue((model, method, args) => {
+      calls.push({ model, method, args });
+      return [{ id: 42, name: "Ordinary", state: "01_in_progress", depend_on_ids: [] }];
+    });
+    const { handler } = buildProjectsServer(queue);
+
+    const result = await handler("projects.get_task")({ task_id: 42 });
+
+    expect(calls[0].args.fields).toEqual(["id", "name", "stage_id", "project_id", "state", "depend_on_ids"]);
+    // Not Waiting → no annotation, and no follow-up read.
+    expect(result.structuredContent?.record).not.toHaveProperty("_waiting_derived");
+    expect(calls).toHaveLength(1);
+  });
+
+  test("get_task annotates a Waiting task with its open blockers", async () => {
+    const queue = dispatchQueue((_model, method, args) => {
+      if (method === "search_read") {
+        return [{ id: 42, name: "Successor", state: "04_waiting_normal", depend_on_ids: [9, 10] }];
+      }
+      expect(args.ids).toEqual([9, 10]);
+      return [
+        { id: 9, state: "01_in_progress", name: "Still open" },
+        { id: 10, state: "1_done", name: "Finished" }
+      ];
+    });
+    const { handler } = buildProjectsServer(queue);
+
+    const result = await handler("projects.get_task")({ task_id: 42 });
+
+    const record = result.structuredContent?.record as Record<string, unknown>;
+    expect(record._waiting_derived).toBe(true);
+    expect(record._open_blocker_ids).toEqual([9]);
+    expect(String(record._waiting_explanation)).toContain("depend_on_ids");
+    expect(String(record._waiting_explanation)).toContain("9");
+    expect(record._workflow_status).toBe("04_waiting_normal");
+  });
+
+  test("get_task calls a Waiting task with no open blockers stale", async () => {
+    const queue = dispatchQueue((_model, method) => {
+      if (method === "search_read") {
+        return [{ id: 42, name: "Wedged", state: "04_waiting_normal", depend_on_ids: [] }];
+      }
+      return [];
+    });
+    const { handler } = buildProjectsServer(queue);
+
+    const result = await handler("projects.get_task")({ task_id: 42 });
+
+    const record = result.structuredContent?.record as Record<string, unknown>;
+    expect(record._open_blocker_ids).toEqual([]);
+    expect(String(record._waiting_explanation)).toContain("stale");
+    expect(String(record._waiting_explanation)).toContain("01_in_progress");
+  });
+
+  test("get_task degrades to 'blockers unknown' when the blocker read fails", async () => {
+    const queue = dispatchQueue((_model, method) => {
+      if (method === "search_read") {
+        return [{ id: 42, name: "Successor", state: "04_waiting_normal", depend_on_ids: [9] }];
+      }
+      throw new Error("odoo down");
+    });
+    const { handler } = buildProjectsServer(queue);
+
+    const result = await handler("projects.get_task")({ task_id: 42 });
+
+    const record = result.structuredContent?.record as Record<string, unknown>;
+    expect(result.isError).toBeUndefined();
+    expect(record._waiting_derived).toBe(true);
+    expect(record).not.toHaveProperty("_open_blocker_ids");
+    expect(String(record._waiting_explanation)).toContain("could not be read");
   });
 
   test("list_stages scopes by project_id", async () => {

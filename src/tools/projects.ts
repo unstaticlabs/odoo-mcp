@@ -13,8 +13,10 @@ import type { TtlCache } from "../cache";
 import { deriveWorkflowStatus } from "../normalizer";
 import type { OdooQueue } from "../odoo-queue";
 import type { Props } from "../server";
+import { preflightProjectTaskStateWrite } from "../project-task-state-gate";
 import { assessWriteOperation } from "../write-safety";
 import {
+  annotateWaitingTask,
   DEFAULT_TASK_FIELDS,
   fetchRecordChatter,
   logWriteContext,
@@ -28,6 +30,7 @@ import {
   searchRecords,
   zOdooRecord,
   zOdooRecords,
+  withWaitingAnnotationFields,
   zWarnings,
   zWriteContext
 } from "./shared";
@@ -150,7 +153,9 @@ export function registerProjectsTools(
       title: "Get Project Task",
       description:
         "Read-only: fetch a single project.task by id. Includes `_workflow_status` when derivable " +
-        "(typically from stage_id / state).",
+        "(typically from stage_id / state). `state` and `depend_on_ids` are always projected: a task in " +
+        "Waiting (`04_waiting_normal`) is annotated with `_waiting_derived`, `_open_blocker_ids` and " +
+        "`_waiting_explanation`, because Odoo computes Waiting from open Blocked By dependencies.",
       annotations: { readOnlyHint: true, openWorldHint: false },
       inputSchema: {
         task_id: z.number().int().positive(),
@@ -165,13 +170,14 @@ export function registerProjectsTools(
     },
     async ({ task_id, fields }) => {
       try {
+        const conn = requireConnection(getProps());
         const warnings: string[] = [];
         const { rows, fieldsReport } = await searchRecords(
           queue,
-          requireConnection(getProps()),
+          conn,
           "project.task",
           [["id", "=", task_id]],
-          fields ?? null,
+          withWaitingAnnotationFields("project.task", fields ?? null),
           1,
           undefined,
           undefined,
@@ -189,7 +195,7 @@ export function registerProjectsTools(
             JSON.stringify(null)
           );
         }
-        const record = rows[0] as Record<string, unknown>;
+        const record = await annotateWaitingTask(queue, conn, rows[0] as Record<string, unknown>);
         const workflowStatus = deriveWorkflowStatus(record);
         const result = workflowStatus != null ? { ...record, _workflow_status: workflowStatus } : record;
         return mcpStructured(
@@ -347,6 +353,8 @@ export function registerProjectsTools(
         "Constrained by the caller's Odoo permissions — a read-only API key is refused by Odoo. " +
         "The response carries a trace_token (src-…) stamped into the task's chatter — you MUST surface " +
         "that token verbatim in your visible reply so the conversation can be found again from the Odoo task. " +
+        "Waiting is derived, never set: Odoo computes `state=04_waiting_normal` from open Blocked By " +
+        "dependencies, so express blocking via `depend_on_ids` and never write that state yourself. " +
         "For generic models use create_record; for connector bugs use feedback.submit.",
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
       inputSchema: {
@@ -399,6 +407,15 @@ export function registerProjectsTools(
       if (!blocked.allowed) {
         return mcpWriteBlockedError({ model: "project.task", method: "create" }, blocked);
       }
+
+      // create_task does not route through guardMutation, so the stateful state gate is explicit here.
+      const statePreflight = await preflightProjectTaskStateWrite({
+        method: "create",
+        args: { vals_list: [vals] },
+        queue,
+        getProps
+      });
+      if (!statePreflight.ok) return statePreflight.response;
 
       const props = getProps();
       let conn: ReturnType<typeof requireConnection>;
