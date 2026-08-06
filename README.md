@@ -71,7 +71,7 @@ The server never logs, stores, or echoes your key.
 | `bookkeeping.preview_returns` | read | `company` (positive int), `from`/`to` (string), `return_type_xmlids` (string[] min 1) — which `account.return` cards should exist; blank periodicity → `configuration_issues` |
 | `bookkeeping.plan_safe_write` | validate-only | `operation` (enum: `create_or_update_report_external_value`, `create_manual_tax_return`, `update_return_type_periodicity`, `create_lock_exception`), `company` (string), `values` (object) — dry-run write plan + HMAC confirmation token; never writes |
 | `billing.audit_expenses` | read | `state` / `product_id` / `analytic_account_id` (optional; analytic post-filters `analytic_distribution` keys), `date_from`/`date_to`, `company_id`, `limit` (1–100, default 50), `offset`, `order` — population audit with account/taxes/payment_mode/attachments, in-page duplicate candidates, and totals |
-| `billing.update_draft_expense` | write | `record_id` (positive int), `values` (allowlisted draft `hr.expense` prep fields: date/name/description/product/account/analytics/qty/price/tax/reference), `context` (optional) — draft-only; lifecycle via `billing.reset_expense` / `billing.submit_expense` / `billing.approve_expense` |
+| `billing.update_draft_expense` | write | `record_id` (positive int), `values` (allowlisted draft `hr.expense` prep fields: date/name/description/product/account/analytics/qty/price/**total_amount**/tax/reference; `total_amount_currency` is not writable), `context` (optional) — draft-only; lifecycle via `billing.reset_expense` / `billing.submit_expense` / `billing.approve_expense` |
 | `billing.reset_expense` | write | `record_ids` (1–50 positive ints), `context` (**required**) — `hr.expense` submitted/approved/refused → draft. All-or-nothing; validated against live state and `can_reset` first |
 | `billing.submit_expense` | write | `record_ids` (1–50 positive ints), `context` (**required**) — `hr.expense` draft → submitted |
 | `billing.approve_expense` | write | `record_ids` (1–50 positive ints), `context` (**required**) — `hr.expense` submitted → approved; refuses when Odoo's `can_approve` is false. Never posts or pays |
@@ -110,6 +110,7 @@ can only do what their Odoo account permits.
   connector classifies by **model + method + field names**, not free-text keywords.
 - **Draft vendor-bill / expense prep** — use `billing.update_draft_expense` /
   `billing.configure_draft_vendor_bill` (draft-only allowlisted fields; no validate/post).
+  Expense monetary prep uses `total_amount`; `total_amount_currency` is audit-only and refused on write.
   For a **new French vendor**, create/update `res.partner` via generic `create_record` /
   `update_record` with VAT/registry identity (`vat`, and often `siret` / `company_registry`,
   plus name / `country_id` / contact), then set `partner_id` on the draft bill. Banks,
