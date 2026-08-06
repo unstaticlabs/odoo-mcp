@@ -14,6 +14,7 @@ reads, normalize the shapes, and refuse to write until a human confirms.
 | Expense population **audit** (account/VAT/payment/attachments/duplicates/totals) | `billing.audit_expenses` (read-only) |
 | Create / update **VAT-complete vendor** (`res.partner` identity: `vat`, `siret`, `company_registry`, plus name / `country_id` / contact) | Generic `create_record` / `update_record` — then attach via `billing.configure_draft_vendor_bill` (`partner_id`, draft-only). Partner identity is **not** a `bookkeeping.plan_safe_write` concern; banks / property accounts / credit limits remain MCP-denied |
 | Draft vendor-bill / expense **preparatory** fields (draft-only; expense amount via `total_amount` — `total_amount_currency` is audit-only) | `billing.update_draft_expense`, `billing.configure_draft_vendor_bill` |
+| **Attach / page-split a source PDF** onto a draft vendor bill (composite supplier PDFs) | `billing.attach_source_pdf` (draft `in_invoice` only; extract or copy in-Worker). Not generic `ir.attachment` CRUD |
 | Reversible expense / vendor-bill **lifecycle** (reset→edit→resubmit/reapprove) | `call_model_method` on allowlisted methods only (`list_model_actions` → `executable:true`), with required write `context` + compatible record `state`; a transition that leaves `posted` additionally needs `confirmation_token` |
 | Tax-close / report external value / return / lock-exception | `bookkeeping.plan_safe_write` (validate-only + human confirm) |
 | Reversible CRUD / lifecycle on `account.*` / `hr.*` / etc. | Allowed via generic write tools — Odoo ACLs/workflow/locks are authority (not model-prefix denial) |
@@ -473,6 +474,84 @@ Fetch an `ir.attachment`'s metadata and, unless it is a URL-type attachment or e
 ```
 
 > A `type: "url"` attachment returns `{ name, mimetype, file_size, url }` with no `base64`.
+
+#### Composite source PDFs → `billing.attach_source_pdf`
+
+One supplier PDF often holds several vendors' invoices (the Amazon monthly export is the
+canonical case). Each of those invoices becomes its own draft vendor bill, and each bill
+wants its own source document — but `/accounting/mcp` ships no `create_record`, and generic
+`ir.attachment` CRUD is deliberately not the answer.
+
+`billing.attach_source_pdf` closes that loop: it reads the composite attachment, slices an
+inclusive page range **in the Worker** (via `pdf-lib`, no OCR / rasterization / text
+extraction), and creates a new `ir.attachment` linked to a draft vendor bill. The source
+attachment is never modified or deleted, and the move itself is never written — Odoo may
+adopt the new file as `message_main_attachment_id` on its own; the tool does not set it.
+
+| Field | Type | Required | Default | Notes |
+|---|---|---|---|---|
+| `bill_id` | int (positive) | yes | — | `account.move`, must be `state=draft` **and** `move_type=in_invoice` |
+| `source_attachment_id` | int (positive) | yes | — | existing stored (non-URL) PDF attachment |
+| `page_from` / `page_to` | int (positive) | no | — | 1-based **inclusive**; supply both to extract, omit both to copy the whole PDF |
+| `max_bytes` | int (positive) | no | `10485760` (10 MiB) | checked against `file_size`, the decoded source, and the produced PDF |
+| `name` | string (1–255) | no | derived | defaults to `<source>-p<from>-<to>.pdf`, or `<source>-copy.pdf` for a full copy |
+| `context` | string (1–500) | **yes** | — | audit-only write context, logged server-side; never sent to Odoo |
+
+Typical composite workflow:
+
+1. `bookkeeping.list_source_documents` → find the composite attachment on the first bill.
+2. Create the second draft bill (Odoo UI, or `create_record` on the full `/mcp` surface).
+3. `billing.attach_source_pdf` with the page range belonging to that vendor.
+4. `billing.configure_draft_vendor_bill` → partner, dates, `ref`, lines, `currency_id`.
+
+**Input**
+
+```json
+{
+  "bill_id": 9647,
+  "source_attachment_id": 555,
+  "page_from": 2,
+  "page_to": 3,
+  "context": "splitting the Amazon composite PDF onto bill 9647"
+}
+```
+
+**Output**
+
+```json
+{
+  "ok": true,
+  "attachment_id": 7042,
+  "bill_id": 9647,
+  "res_model": "account.move",
+  "res_id": 9647,
+  "name": "amazon-invoices-p2-3.pdf",
+  "mimetype": "application/pdf",
+  "mode": "page_extract",
+  "page_from": 2,
+  "page_to": 3,
+  "source_attachment_id": 555,
+  "source_page_count": 5
+}
+```
+
+Refusals come back as billing deny envelopes (`isError: true`, `intent:
+"financial_mutation"`) with a typed `error`:
+
+| `error` | When |
+|---|---|
+| `not_found` | the bill or the source attachment does not exist |
+| `draft_required` | the bill is posted/cancelled — reset it with `call_model_method` `button_draft` first |
+| `vendor_bill_required` | the move is not an `in_invoice` (customer invoices, refunds, expenses are out of scope) |
+| `url_attachment` | the source is `type: "url"` and stores no bytes |
+| `not_pdf` | the decoded content carries no `%PDF` header (the stored `mimetype` is advisory only) |
+| `oversize` | `file_size`, the decoded source, or the produced PDF exceeds `max_bytes` |
+| `invalid_page_range` | only one of `page_from`/`page_to` given, inverted, or past the last page (the envelope reports the real page count) |
+| `pdf_error` | the attachment stores no content, or the bytes will not parse |
+
+`mode: "full_copy"` reproduces the source bytes verbatim; `source_page_count` is `null` in
+that case only when those bytes would not parse (e.g. an encrypted PDF), since a byte copy
+still succeeds. Never posts, validates, reconciles, or deletes.
 
 ### 4.7 `bookkeeping.preview_returns`
 

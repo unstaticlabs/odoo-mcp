@@ -586,6 +586,8 @@ describe("endpoint tool surfaces", () => {
     expect(names.has("bookkeeping.plan_safe_write")).toBe(true);
     expect(names.has("billing.audit_expenses")).toBe(true);
     expect(names.has("billing.configure_draft_vendor_bill")).toBe(true);
+    // Draft-bill source-PDF attach ships on the accounting surface without opening generic CRUD.
+    expect(names.has("billing.attach_source_pdf")).toBe(true);
     expect(names.has("feedback.submit")).toBe(true);
     // Purity: no raw CRUD, no other domains — the point of the split.
     expect(names.has("search_records")).toBe(false);
@@ -2802,6 +2804,7 @@ describe("tool metadata (title/annotations)", () => {
       "call_model_method",
       "billing.update_draft_expense",
       "billing.configure_draft_vendor_bill",
+      "billing.attach_source_pdf",
       "projects.create_task",
       "feedback.submit"
     ];

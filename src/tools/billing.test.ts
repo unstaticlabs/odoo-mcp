@@ -2,9 +2,12 @@ import { describe, expect, mock, test } from "bun:test";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { OdooQueue } from "../odoo-queue";
 import { classifyPmWriteIntent } from "../safety";
+import { PDFDocument } from "pdf-lib";
+import { base64ToBytes, bytesToBase64, countPdfPages } from "../pdf-pages";
 import {
   blockedInvoiceLineFields,
   buildExpenseAuditDomain,
+  deriveSourcePdfName,
   expenseMatchesAnalyticAccounts,
   flagExpenseDuplicates,
   isDraftRecord,
@@ -64,17 +67,21 @@ function buildBillingHandlers(queue: OdooQueue) {
     updateExpense: validatedToolHandler(server, "billing.update_draft_expense") as (args: unknown) => Promise<ToolResult>,
     configureBill: validatedToolHandler(server, "billing.configure_draft_vendor_bill") as (
       args: unknown
+    ) => Promise<ToolResult>,
+    attachSourcePdf: validatedToolHandler(server, "billing.attach_source_pdf") as (
+      args: unknown
     ) => Promise<ToolResult>
   };
 }
 
 describe("registerBillingWriteTools", () => {
-  test("registers both billing write tools", () => {
+  test("registers the billing write tools", () => {
     const server = new McpServer({ name: "test", version: "0.0.0" });
     registerBillingWriteTools(server, () => props, dispatchQueue(() => null));
     const registry = (server as unknown as { _registeredTools: Record<string, unknown> })._registeredTools;
     expect(registry["billing.update_draft_expense"]).toBeDefined();
     expect(registry["billing.configure_draft_vendor_bill"]).toBeDefined();
+    expect(registry["billing.attach_source_pdf"]).toBeDefined();
   });
 });
 
@@ -660,6 +667,310 @@ describe("billing.configure_draft_vendor_bill", () => {
     expect(result.isError).toBe(true);
     const envelope = JSON.parse(result.content[0].text);
     expect(envelope.blocked_fields).toContain("state");
+  });
+});
+
+describe("billing.attach_source_pdf", () => {
+  /** Page n is 200+n wide, so extracted pages can be traced back to their source page. */
+  async function makePdf(pageCount: number): Promise<Uint8Array> {
+    const doc = await PDFDocument.create();
+    for (let i = 1; i <= pageCount; i++) doc.addPage([200 + i, 200]);
+    return doc.save();
+  }
+
+  let compositePdf: Uint8Array | undefined;
+  /** The Amazon-composite stand-in: one 5-page PDF holding several vendors' invoices. */
+  async function compositeBase64(): Promise<string> {
+    compositePdf ??= await makePdf(5);
+    return bytesToBase64(compositePdf);
+  }
+
+  type Call = { model: string; method: string; args: Record<string, unknown> };
+
+  /**
+   * Stands up the three reads (bill header, attachment meta, attachment content) plus the
+   * create that the tool performs, and records every call so tests can assert nothing else
+   * — no `write`, no `action_post` — ever reaches Odoo.
+   */
+  function attachQueue(opts: {
+    bill?: Record<string, unknown> | null;
+    meta?: Record<string, unknown> | null;
+    datas?: unknown;
+    createdId?: number;
+  }) {
+    const calls: Call[] = [];
+    const queue = dispatchQueue((model, method, args) => {
+      calls.push({ model, method, args });
+      if (model === "account.move" && method === "read") {
+        return opts.bill === null ? [] : [opts.bill ?? { id: 9647, state: "draft", move_type: "in_invoice" }];
+      }
+      if (model === "ir.attachment" && method === "read") {
+        const fields = (args.fields as string[]) ?? [];
+        if (fields.includes("datas")) return [{ id: 555, datas: opts.datas }];
+        return opts.meta === null
+          ? []
+          : [opts.meta ?? { id: 555, name: "amazon-invoices.pdf", mimetype: "application/pdf", file_size: 4096, type: "binary", url: false }];
+      }
+      if (model === "ir.attachment" && method === "create") return [opts.createdId ?? 7001];
+      return null;
+    });
+    return { queue, calls };
+  }
+
+  const baseArgs = {
+    bill_id: 9647,
+    source_attachment_id: 555,
+    context: "user asked to split the Amazon composite PDF onto bill 9647"
+  };
+
+  test("registers as a write tool with a Write: description", () => {
+    const server = new McpServer({ name: "test", version: "0.0.0" });
+    registerBillingWriteTools(server, () => props, dispatchQueue(() => null));
+    const tool = (server as any)._registeredTools["billing.attach_source_pdf"];
+    expect(tool.annotations.readOnlyHint).toBe(false);
+    expect(tool.annotations.destructiveHint).toBe(false);
+    expect(tool.annotations.openWorldHint).toBe(false);
+    expect(String(tool.description).startsWith("Write:")).toBe(true);
+  });
+
+  test("context is required and must be non-empty", () => {
+    const server = new McpServer({ name: "test", version: "0.0.0" });
+    registerBillingWriteTools(server, () => props, dispatchQueue(() => null));
+    const shape = (server as any)._registeredTools["billing.attach_source_pdf"].inputSchema.shape;
+    expect(shape.context.safeParse("split composite PDF").success).toBe(true);
+    expect(shape.context.safeParse("").success).toBe(false);
+    expect(shape.context.safeParse(undefined).success).toBe(false);
+    // Page bounds are enforced by the schema too, so out-of-band values never reach the handler.
+    expect(shape.page_from.safeParse(0).success).toBe(false);
+    expect(shape.page_to.safeParse(1.5).success).toBe(false);
+  });
+
+  test("page extract creates a linked ir.attachment carrying only that range", async () => {
+    const { queue, calls } = attachQueue({ datas: await compositeBase64(), createdId: 7042 });
+    const { attachSourcePdf } = buildBillingHandlers(queue);
+    const result = await attachSourcePdf({ ...baseArgs, page_from: 2, page_to: 3 });
+
+    expect(result.isError).toBeUndefined();
+    expect(result.structuredContent).toEqual({
+      ok: true,
+      attachment_id: 7042,
+      bill_id: 9647,
+      res_model: "account.move",
+      res_id: 9647,
+      name: "amazon-invoices-p2-3.pdf",
+      mimetype: "application/pdf",
+      mode: "page_extract",
+      page_from: 2,
+      page_to: 3,
+      source_attachment_id: 555,
+      source_page_count: 5
+    });
+
+    const create = calls.find((c) => c.method === "create")!;
+    const vals = (create.args.vals_list as Record<string, unknown>[])[0];
+    expect(create.model).toBe("ir.attachment");
+    expect(vals).toMatchObject({
+      name: "amazon-invoices-p2-3.pdf",
+      type: "binary",
+      mimetype: "application/pdf",
+      res_model: "account.move",
+      res_id: 9647
+    });
+
+    // The stored bytes really are a 2-page PDF holding source pages 2 and 3.
+    const created = base64ToBytes(vals.datas as string);
+    expect(await countPdfPages(created)).toBe(2);
+    const pages = (await PDFDocument.load(created)).getPages().map((p) => Math.round(p.getWidth()) - 200);
+    expect(pages).toEqual([2, 3]);
+  });
+
+  test("omitting the page range copies the whole PDF byte-for-byte", async () => {
+    const base64 = await compositeBase64();
+    const { queue, calls } = attachQueue({ datas: base64 });
+    const { attachSourcePdf } = buildBillingHandlers(queue);
+    const result = await attachSourcePdf(baseArgs);
+
+    expect(result.isError).toBeUndefined();
+    expect(result.structuredContent).toMatchObject({
+      ok: true,
+      attachment_id: 7001,
+      mode: "full_copy",
+      page_from: null,
+      page_to: null,
+      name: "amazon-invoices-copy.pdf",
+      source_page_count: 5
+    });
+
+    const vals = (calls.find((c) => c.method === "create")!.args.vals_list as Record<string, unknown>[])[0];
+    expect(base64ToBytes(vals.datas as string)).toEqual(compositePdf!);
+  });
+
+  test("an explicit name overrides the derived one", async () => {
+    const { queue, calls } = attachQueue({ datas: await compositeBase64() });
+    const { attachSourcePdf } = buildBillingHandlers(queue);
+    const result = await attachSourcePdf({ ...baseArgs, page_from: 1, page_to: 1, name: "ACME invoice.pdf" });
+
+    expect(result.structuredContent?.name).toBe("ACME invoice.pdf");
+    const vals = (calls.find((c) => c.method === "create")!.args.vals_list as Record<string, unknown>[])[0];
+    expect(vals.name).toBe("ACME invoice.pdf");
+  });
+
+  test("every Odoo call is queued, and the move is only ever read", async () => {
+    const { queue, calls } = attachQueue({ datas: await compositeBase64() });
+    const { attachSourcePdf } = buildBillingHandlers(queue);
+    await attachSourcePdf({ ...baseArgs, page_from: 1, page_to: 2 });
+
+    expect((queue.enqueue as any).mock.calls.length).toBe(calls.length);
+    expect(calls.map((c) => `${c.model}.${c.method}`)).toEqual([
+      "account.move.read",
+      "ir.attachment.read",
+      "ir.attachment.read",
+      "ir.attachment.create"
+    ]);
+    for (const call of calls) {
+      if (call.model === "account.move") expect(call.method).toBe("read");
+      expect(["read", "create"]).toContain(call.method);
+    }
+  });
+
+  describe("refusals", () => {
+    async function refuse(args: Record<string, unknown>, opts: Parameters<typeof attachQueue>[0]) {
+      const { queue, calls } = attachQueue(opts);
+      const { attachSourcePdf } = buildBillingHandlers(queue);
+      const result = await attachSourcePdf({ ...baseArgs, ...args });
+      expect(result.isError).toBe(true);
+      return { envelope: JSON.parse(result.content[0].text), calls };
+    }
+
+    test("posted bill", async () => {
+      const { envelope, calls } = await refuse({}, { bill: { id: 9647, state: "posted", move_type: "in_invoice" } });
+      expect(envelope.error).toBe("draft_required");
+      expect(envelope.intent).toBe("financial_mutation");
+      expect(calls.map((c) => `${c.model}.${c.method}`)).toEqual(["account.move.read"]);
+    });
+
+    test("customer invoice", async () => {
+      const { envelope, calls } = await refuse({}, { bill: { id: 9647, state: "draft", move_type: "out_invoice" } });
+      expect(envelope.error).toBe("vendor_bill_required");
+      expect(calls.map((c) => `${c.model}.${c.method}`)).toEqual(["account.move.read"]);
+    });
+
+    test("missing bill", async () => {
+      const { envelope, calls } = await refuse({}, { bill: null });
+      expect(envelope.error).toBe("not_found");
+      expect(envelope.model).toBe("account.move");
+      expect(calls.length).toBe(1);
+    });
+
+    test("missing source attachment", async () => {
+      const { envelope, calls } = await refuse({}, { meta: null });
+      expect(envelope.error).toBe("not_found");
+      expect(envelope.model).toBe("ir.attachment");
+      expect(calls.some((c) => c.method === "create")).toBe(false);
+    });
+
+    test("url-type source", async () => {
+      const { envelope, calls } = await refuse(
+        {},
+        { meta: { id: 555, name: "remote.pdf", mimetype: "application/pdf", file_size: false, type: "url", url: "https://example.com/x.pdf" } }
+      );
+      expect(envelope.error).toBe("url_attachment");
+      // No content read: a URL attachment has no bytes to fetch.
+      expect(calls.map((c) => `${c.model}.${c.method}`)).toEqual(["account.move.read", "ir.attachment.read"]);
+    });
+
+    test("oversize source is refused before the content read", async () => {
+      const { envelope, calls } = await refuse(
+        { max_bytes: 1024 },
+        { meta: { id: 555, name: "big.pdf", mimetype: "application/pdf", file_size: 20971520, type: "binary", url: false } }
+      );
+      expect(envelope.error).toBe("oversize");
+      expect(envelope.details).toContain("1.37x");
+      expect(calls.map((c) => `${c.model}.${c.method}`)).toEqual(["account.move.read", "ir.attachment.read"]);
+    });
+
+    test("non-PDF content, however it is labelled", async () => {
+      const { envelope, calls } = await refuse(
+        {},
+        {
+          meta: { id: 555, name: "scan.pdf", mimetype: "application/pdf", file_size: 12, type: "binary", url: false },
+          datas: bytesToBase64(new TextEncoder().encode("<html>nope</html>"))
+        }
+      );
+      expect(envelope.error).toBe("not_pdf");
+      expect(calls.some((c) => c.method === "create")).toBe(false);
+    });
+
+    test("empty stored content", async () => {
+      const { envelope, calls } = await refuse({}, { datas: false });
+      expect(envelope.error).toBe("pdf_error");
+      expect(calls.some((c) => c.method === "create")).toBe(false);
+    });
+
+    test("half-specified page range, before any Odoo call", async () => {
+      const { envelope, calls } = await refuse({ page_from: 2 }, {});
+      expect(envelope.error).toBe("invalid_page_range");
+      expect(envelope.details).toContain("No Odoo call was made");
+      expect(calls).toEqual([]);
+    });
+
+    test("inverted page range, before any Odoo call", async () => {
+      const { envelope, calls } = await refuse({ page_from: 4, page_to: 2 }, {});
+      expect(envelope.error).toBe("invalid_page_range");
+      expect(calls).toEqual([]);
+    });
+
+    test("page range past the end reports the real page count", async () => {
+      const { envelope, calls } = await refuse(
+        { page_from: 4, page_to: 9 },
+        { datas: await compositeBase64() }
+      );
+      expect(envelope.error).toBe("invalid_page_range");
+      expect(envelope.details).toContain("5 page(s)");
+      expect(calls.some((c) => c.method === "create")).toBe(false);
+    });
+
+    test("unparseable PDF bytes", async () => {
+      const { envelope, calls } = await refuse(
+        { page_from: 1, page_to: 1 },
+        { datas: bytesToBase64(new TextEncoder().encode("%PDF-1.4 truncated")) }
+      );
+      expect(envelope.error).toBe("pdf_error");
+      expect(calls.some((c) => c.method === "create")).toBe(false);
+    });
+
+    test("source that decodes larger than max_bytes despite an understated file_size", async () => {
+      const { envelope, calls } = await refuse(
+        { max_bytes: 512 },
+        {
+          meta: { id: 555, name: "sneaky.pdf", mimetype: "application/pdf", file_size: 10, type: "binary", url: false },
+          datas: await compositeBase64()
+        }
+      );
+      expect(envelope.error).toBe("oversize");
+      expect(calls.some((c) => c.method === "create")).toBe(false);
+    });
+  });
+});
+
+describe("deriveSourcePdfName", () => {
+  test("strips the source extension and records the page range", () => {
+    expect(deriveSourcePdfName("amazon-invoices.PDF", 555, { page_from: 2, page_to: 3 })).toBe(
+      "amazon-invoices-p2-3.pdf"
+    );
+    expect(deriveSourcePdfName("amazon-invoices.pdf", 555, null)).toBe("amazon-invoices-copy.pdf");
+  });
+
+  test("falls back to the attachment id when Odoo has no usable name", () => {
+    expect(deriveSourcePdfName(false, 555, null)).toBe("attachment-555-copy.pdf");
+    expect(deriveSourcePdfName("   ", 555, null)).toBe("attachment-555-copy.pdf");
+    expect(deriveSourcePdfName(".pdf", 555, null)).toBe("attachment-555-copy.pdf");
+  });
+
+  test("stays inside Odoo's 255-char name column", () => {
+    const name = deriveSourcePdfName(`${"x".repeat(400)}.pdf`, 555, { page_from: 10, page_to: 12 });
+    expect(name.length).toBe(255);
+    expect(name.endsWith("-p10-12.pdf")).toBe(true);
   });
 });
 
