@@ -109,6 +109,7 @@ export const DRAFT_VENDOR_BILL_FIELDS = new Set([
   "invoice_date_due",
   "ref",
   "fiscal_position_id",
+  "currency_id",
   "narration",
   "payment_reference",
   "invoice_line_ids"
@@ -654,19 +655,26 @@ export function registerBillingWriteTools(
   getProps: () => Props | undefined,
   queue: OdooQueue
 ) {
+  const draftExpenseFieldList = [...DRAFT_EXPENSE_FIELDS].join(", ");
+  const draftExpenseValuesDescribe =
+    `Allowlisted preparatory keys only: ${draftExpenseFieldList}. ` +
+    "Use total_amount for monetary corrections; total_amount_currency is audit/read-only and not writable.";
+
   server.registerTool(
     "billing.update_draft_expense",
     {
       title: "Update Draft Expense",
       description:
-        "Write: update preparatory fields on a draft hr.expense only. Refuses non-draft records and " +
-        "lifecycle/payment fields. Does not validate, post, or delete. For reset→edit→resubmit/reapprove " +
-        "hygiene use call_model_method on allowlisted methods (action_reset / action_submit / action_approve) " +
+        "Write: update preparatory fields on a draft hr.expense only. Allowlisted fields: " +
+        `${draftExpenseFieldList}. Use total_amount for monetary corrections; total_amount_currency is ` +
+        "not writable (audit/read-only). Refuses non-draft records and lifecycle/payment fields. " +
+        "Does not validate, post, or delete. For reset→edit→resubmit/reapprove hygiene use " +
+        "call_model_method on allowlisted methods (action_reset / action_submit / action_approve) " +
         "with write context and a compatible record state (see list_model_actions executable:true).",
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
       inputSchema: {
         record_id: z.number().int().positive(),
-        values: z.record(z.string(), z.unknown()),
+        values: z.record(z.string(), z.unknown()).describe(draftExpenseValuesDescribe),
         context: zWriteContext
       },
       outputSchema: {
@@ -745,8 +753,8 @@ export function registerBillingWriteTools(
     {
       title: "Configure Draft Vendor Bill",
       description:
-        "Write: update preparatory header/line fields on a draft vendor bill (account.move with " +
-        "move_type=in_invoice) only. Refuses posted moves, other move types, and lifecycle/payment fields. " +
+        "Write: update preparatory header/line fields (including currency_id) on a draft vendor bill " +
+        "(account.move with move_type=in_invoice) only. Refuses posted moves, other move types, and lifecycle/payment fields. " +
         "Does not validate, post, reconcile, send, or delete. To reset a posted/cancel vendor bill to draft, " +
         "use call_model_method button_draft with write context (in_invoice / in_refund only; see list_model_actions).",
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },

@@ -110,6 +110,23 @@ describe("assessWriteOperation — financial mutations use action risk, not pref
     });
     expect(allowed.allowed).toBe(true);
 
+    const vatAllowed = assessWriteOperation({
+      model: "res.partner",
+      method: "write",
+      args: {
+        ids: [5],
+        vals: {
+          name: "SARL Fournisseur",
+          vat: "FR12345678901",
+          siret: "12345678900012",
+          company_registry: "123456789",
+          country_id: 75
+        }
+      }
+    });
+    expect(vatAllowed.allowed).toBe(true);
+    expect(vatAllowed.policy_rule).toBe("reversible_configuration");
+
     const blocked = assessWriteOperation({
       model: "res.partner",
       method: "write",
@@ -117,6 +134,16 @@ describe("assessWriteOperation — financial mutations use action risk, not pref
     });
     expect(blocked.allowed).toBe(false);
     expect(blocked.intent).toBe("financial_mutation");
+    expect(blocked.blocked_fields).toContain("bank_ids");
+    expect(blocked.reason).not.toContain("bookkeeping.plan_safe_write");
+
+    const limitBlocked = assessWriteOperation({
+      model: "res.partner",
+      method: "write",
+      args: { ids: [5], vals: { credit_limit: 1000 } }
+    });
+    expect(limitBlocked.allowed).toBe(false);
+    expect(limitBlocked.blocked_fields).toContain("credit_limit");
   });
 
   test("project.task write with sale_line_id is blocked", () => {

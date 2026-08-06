@@ -387,6 +387,15 @@ describe("billing allowlist helpers", () => {
     expect(blocked).toContain("payment_state");
   });
 
+  test("currency_id is allowlisted on vendor bills", () => {
+    const { allowed, blocked } = partitionAllowlistedValues(
+      { currency_id: 125, payment_state: "paid" },
+      DRAFT_VENDOR_BILL_FIELDS
+    );
+    expect(allowed).toEqual({ currency_id: 125 });
+    expect(blocked).toContain("payment_state");
+  });
+
   test("isDraftRecord uses state and derived workflow status", () => {
     expect(isDraftRecord({ state: "draft" })).toBe(true);
     expect(isDraftRecord({ state: "approved" })).toBe(false);
@@ -449,6 +458,48 @@ describe("billing.update_draft_expense", () => {
     expect(envelope.error).toBe("write_blocked");
     expect(envelope.blocked_fields).toContain("state");
   });
+
+  test("total_amount_currency is refused with allowlist guidance and no write", async () => {
+    const calls: string[] = [];
+    const queue = dispatchQueue((model, method) => {
+      calls.push(`${model}.${method}`);
+      if (method === "read") return [{ id: 42, state: "draft" }];
+      return null;
+    });
+    const { updateExpense } = buildBillingHandlers(queue);
+    const result = await updateExpense({
+      record_id: 42,
+      values: { total_amount_currency: 28.61 }
+    });
+
+    expect(result.isError).toBe(true);
+    const envelope = JSON.parse(result.content[0].text);
+    expect(envelope.error).toBe("write_blocked");
+    expect(envelope.blocked_fields).toContain("total_amount_currency");
+    expect(String(envelope.details)).toContain("total_amount_currency");
+    expect(String(envelope.details)).toContain("Allowed:");
+    expect(String(envelope.details)).toContain("total_amount");
+    expect(calls).toEqual(["hr.expense.read"]);
+  });
+
+  test("total_amount write on draft expense succeeds", async () => {
+    const calls: { model: string; method: string; args: Record<string, unknown> }[] = [];
+    const queue = dispatchQueue((model, method, args) => {
+      calls.push({ model, method, args });
+      if (method === "read") return [{ id: 42, state: "draft" }];
+      if (method === "write") return true;
+      return null;
+    });
+    const { updateExpense } = buildBillingHandlers(queue);
+    const result = await updateExpense({ record_id: 42, values: { total_amount: 28.61 } });
+
+    expect(result.isError).toBeUndefined();
+    expect(result.structuredContent).toEqual({ ok: true, record_id: 42, state: "draft" });
+    expect(calls).toEqual([
+      { model: "hr.expense", method: "read", args: { ids: [42], fields: ["id", "state"] } },
+      { model: "hr.expense", method: "write", args: { ids: [42], vals: { total_amount: 28.61 } } }
+    ]);
+  });
 });
 
 describe("billing.configure_draft_vendor_bill", () => {
@@ -501,6 +552,68 @@ describe("billing.configure_draft_vendor_bill", () => {
       partner_id: 10,
       ref: "VB-9647",
       fiscal_position_id: 3
+    });
+  });
+
+  test("draft in_invoice configure with currency_id succeeds", async () => {
+    const calls: { model: string; method: string; args: Record<string, unknown> }[] = [];
+    const queue = dispatchQueue((model, method, args) => {
+      calls.push({ model, method, args });
+      if (method === "read") return [{ id: 9647, state: "draft", move_type: "in_invoice" }];
+      if (method === "write") return true;
+      return null;
+    });
+    const { configureBill } = buildBillingHandlers(queue);
+    const result = await configureBill({
+      record_id: 9647,
+      values: { ...billValues, currency_id: 125 }
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(result.structuredContent).toEqual({
+      ok: true,
+      record_id: 9647,
+      state: "draft",
+      move_type: "in_invoice"
+    });
+    expect(calls[1].args.vals).toMatchObject({
+      partner_id: 10,
+      ref: "VB-9647",
+      currency_id: 125
+    });
+  });
+
+  test("reproduction #9694-style payload with currency_id succeeds", async () => {
+    const calls: { model: string; method: string; args: Record<string, unknown> }[] = [];
+    const queue = dispatchQueue((model, method, args) => {
+      calls.push({ model, method, args });
+      if (method === "read") return [{ id: 9694, state: "draft", move_type: "in_invoice" }];
+      if (method === "write") return true;
+      return null;
+    });
+    const { configureBill } = buildBillingHandlers(queue);
+    const result = await configureBill({
+      record_id: 9694,
+      values: {
+        partner_id: 72,
+        invoice_date: "2026-08-01",
+        date: "2026-08-01",
+        ref: "FR79467970",
+        payment_reference: "FR79467970",
+        currency_id: 125,
+        invoice_line_ids: [[0, 0, { name: "Service", quantity: 1, price_unit: 50 }]]
+      }
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(result.structuredContent?.ok).toBe(true);
+    expect(calls[1].args.vals).toMatchObject({
+      partner_id: 72,
+      invoice_date: "2026-08-01",
+      date: "2026-08-01",
+      ref: "FR79467970",
+      payment_reference: "FR79467970",
+      currency_id: 125
     });
   });
 

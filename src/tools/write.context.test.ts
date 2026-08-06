@@ -492,3 +492,19 @@ describe("chatter vs business fields doctrine in tool descriptions", () => {
     expect(registry.batch_update.description).toContain("bookkeeping.plan_safe_write");
   });
 });
+
+describe("Waiting vs voluntary deferral doctrine in tool descriptions", () => {
+  test("generic write tools tell agents Waiting is derived and deferral uses stage_id", () => {
+    const server = new McpServer({ name: "test", version: "0.0.0" });
+    registerWriteTools(server, () => props, dispatchQueue(() => true));
+    const registry = (server as unknown as { _registeredTools: Record<string, { description: string }> })
+      ._registeredTools;
+    for (const name of ["create_record", "update_record", "batch_update", "call_model_method"]) {
+      const desc = registry[name].description;
+      expect(desc).toContain("04_waiting_normal");
+      expect(desc).toContain("depend_on_ids");
+      expect(desc).toContain("stage_id");
+      expect(desc).toMatch(/defer|On Hold/i);
+    }
+  });
+});
