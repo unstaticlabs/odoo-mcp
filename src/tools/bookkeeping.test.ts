@@ -1200,16 +1200,47 @@ describe("isDocumentsUnavailableError", () => {
     });
   }
 
-  test("true for a missing model, ACL denial, or an unauthorized session", () => {
+  test("true for a missing model or an ACL denial on documents.document", () => {
     expect(isDocumentsUnavailableError(odooError({ code: "model_or_method_not_found", httpStatus: 404 }))).toBe(true);
     expect(isDocumentsUnavailableError(odooError({ code: "permission_denied", httpStatus: 403 }))).toBe(true);
-    expect(isDocumentsUnavailableError(odooError({ code: "unauthorized", httpStatus: 401 }))).toBe(true);
   });
 
-  test("true for message-level missing-model / AccessError phrasing on a non-404 status", () => {
+  test("true for message-level missing-model / AccessError phrasing that names Documents", () => {
     expect(isDocumentsUnavailableError(odooError({ details: "Object documents.document doesn't exist" }))).toBe(true);
-    expect(isDocumentsUnavailableError(odooError({ details: "AccessError: sorry" }))).toBe(true);
-    expect(isDocumentsUnavailableError(odooError({ details: "You are not allowed to access 'Document' records" }))).toBe(true);
+    expect(isDocumentsUnavailableError(odooError({ details: "Invalid model name 'documents.document'" }))).toBe(true);
+    expect(
+      isDocumentsUnavailableError(odooError({ details: "AccessError: You are not allowed to access 'Document' records" }))
+    ).toBe(true);
+    expect(isDocumentsUnavailableError(odooError({ details: "You are not allowed to access 'Documents' records" }))).toBe(true);
+  });
+
+  test("false for an unauthorized session: bad credentials must not read as a missing Documents app", () => {
+    expect(isDocumentsUnavailableError(odooError({ code: "unauthorized", httpStatus: 401 }))).toBe(false);
+    expect(
+      isDocumentsUnavailableError(
+        odooError({ code: "unauthorized", httpStatus: 401, details: "Access denied to documents.document" })
+      )
+    ).toBe(false);
+  });
+
+  test("false for missing-model / ACL phrasing that does not name the Documents model", () => {
+    expect(isDocumentsUnavailableError(odooError({ details: "Object account.return doesn't exist" }))).toBe(false);
+    expect(isDocumentsUnavailableError(odooError({ details: "You are not allowed to access 'Journal Entry' records" }))).toBe(
+      false
+    );
+    // A field this Odoo version does not have is a schema mismatch, not a missing app: it must not
+    // be swallowed into an empty document list.
+    expect(
+      isDocumentsUnavailableError(odooError({ details: "Invalid field 'checksum' does not exist on model 'documents.document'" }))
+    ).toBe(false);
+  });
+
+  test("false when the failing call was against another model entirely", () => {
+    expect(
+      isDocumentsUnavailableError(
+        odooError({ model: "account.move", code: "permission_denied", httpStatus: 403, details: "AccessError" })
+      )
+    ).toBe(false);
   });
 
   test("false for transient and caller-fixable failures, and for non-Odoo errors", () => {
@@ -1438,6 +1469,40 @@ describe("bookkeeping.search_source_documents", () => {
     expect(envelope.model).toBe("documents.document");
     expect(envelope.method).toBe("search_read");
     expect(result.content[0].text).not.toContain("secret-bookkeeping-key");
+  });
+
+  test("expired credentials surface as an unauthorized error, never as an empty document list", async () => {
+    const agent = makeAgent();
+    globalThis.fetch = mock(
+      async () => new Response(JSON.stringify({ error: { message: "Access denied" } }), { status: 401 })
+    );
+
+    const handler = getToolHandler(agent, "bookkeeping.search_source_documents");
+    const result = await handler({ folder_id: 3, limit: 80 });
+
+    expect(result.isError).toBe(true);
+    const envelope = JSON.parse(result.content[0].text);
+    expect(envelope.error).toBe("unauthorized");
+    expect(result.content[0].text).not.toContain(DOCUMENTS_UNAVAILABLE_WARNING);
+    expect(result.content[0].text).not.toContain("secret-bookkeeping-key");
+  });
+
+  test("an unknown field on this Odoo version errors out instead of degrading to an empty list", async () => {
+    const agent = makeAgent();
+    globalThis.fetch = mock(
+      async () =>
+        new Response(JSON.stringify({ error: { message: "Invalid field 'checksum' does not exist on model 'documents.document'" } }), {
+          status: 400
+        })
+    );
+
+    const handler = getToolHandler(agent, "bookkeeping.search_source_documents");
+    const result = await handler({ limit: 80 });
+
+    expect(result.isError).toBe(true);
+    const envelope = JSON.parse(result.content[0].text);
+    expect(envelope.error).toBe("invalid_request");
+    expect(result.content[0].text).not.toContain(DOCUMENTS_UNAVAILABLE_WARNING);
   });
 
   test("is registered read-only and leaves list_source_documents untouched", () => {

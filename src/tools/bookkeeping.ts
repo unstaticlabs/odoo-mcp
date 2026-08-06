@@ -1327,21 +1327,43 @@ export function normalizeSourceDocument(
 }
 
 /**
- * Exported for unit testing. True when a failure means "this Odoo has no readable Documents app"
- * — the module is not installed (404 / "doesn't exist") or ACLs/record rules deny the model —
- * as opposed to a transient or caller-fixable error, which must still surface as a tool error.
+ * "Object documents.document doesn't exist" / "Invalid model name 'documents.document'" — Odoo can
+ * report a missing model in the payload of an HTTP 200/400 answer instead of a 404. The model name
+ * and the "missing" phrasing must be adjacent: "Invalid field 'checksum' does not exist on model
+ * 'documents.document'" is a schema mismatch, not a missing app, and must stay a hard error.
+ */
+const DOCUMENTS_MODEL_MISSING =
+  /(?:object|model)\s+['"`]?documents\.document['"`]?\s*(?:doesn't|does not)\s+exist|invalid model name\s*:?\s*['"`]?documents\.document/i;
+
+/** Odoo's ACL wording, e.g. "You are not allowed to access 'Document' records" / "AccessError". */
+const ACCESS_DENIED_PHRASE = /accesserror|not allowed to access|no access rights|access denied/i;
+
+/** The Documents model, named technically or by the display name Odoo quotes in AccessError text. */
+const DOCUMENTS_MODEL_NAMED = /documents\.(?:document|tag)|['"`«‘“]documents?['"`»’”]/i;
+
+/**
+ * Exported for unit testing. True only when a failure means "this Odoo has no readable Documents
+ * app" — the module is not installed (404 / "Object documents.document doesn't exist") or ACLs deny
+ * the Documents model. Everything else must still surface as a tool error: an empty `documents: []`
+ * is indistinguishable from "the audit found nothing", so it may never stand in for a failure the
+ * caller could fix or retry.
  */
 export function isDocumentsUnavailableError(err: unknown): boolean {
   if (!(err instanceof OdooError)) return false;
-  if (err.code === "model_or_method_not_found" || err.code === "permission_denied" || err.code === "unauthorized") return true;
+  // 401 is bad or expired credentials, never a missing app: degrading it would let a broken session
+  // read as "no source documents exist".
+  if (err.code === "unauthorized") return false;
+  // Only a failure of the Documents call itself can prove the Documents app is unusable.
+  if (err.model !== "documents.document") return false;
+  if (err.code === "model_or_method_not_found") return true; // 404: model not registered
+  if (err.code === "permission_denied") return true; // 403: ACLs/record rules deny the model
 
-  const details = err.details.toLowerCase();
+  // Otherwise fall back to the message, which must name the Documents model — a bare "doesn't exist"
+  // or "not allowed to access" is far likelier to be an unrelated failure (unknown field, denied
+  // related record) that would silently become an empty audit result.
   return (
-    details.includes("doesn't exist") ||
-    details.includes("does not exist") ||
-    details.includes("accesserror") ||
-    details.includes("not allowed to access") ||
-    details.includes("no access rights")
+    DOCUMENTS_MODEL_MISSING.test(err.details) ||
+    (ACCESS_DENIED_PHRASE.test(err.details) && DOCUMENTS_MODEL_NAMED.test(err.details))
   );
 }
 

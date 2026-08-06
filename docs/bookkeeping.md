@@ -439,8 +439,12 @@ reach the repository still gets a usable answer:
 }
 ```
 
-Transient or caller-fixable failures (timeout, rate limit, an invalid domain) are *not*
-swallowed — those still surface as the standard error envelope with `isError: true`.
+Degradation is deliberately narrow: only a missing `documents.document` model or an ACL
+denial **on that model** produces the warning. Everything else — a rejected session (401),
+timeout, rate limit, invalid domain, or a field this Odoo version does not expose — still
+surfaces as the standard error envelope with `isError: true`, because an empty
+`documents: []` is indistinguishable from "the audit found nothing" and must never stand in
+for a failure the caller could fix or retry.
 
 ### 4.6 `bookkeeping.fetch_attachment`
 
