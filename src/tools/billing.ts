@@ -109,6 +109,7 @@ export const DRAFT_VENDOR_BILL_FIELDS = new Set([
   "invoice_date_due",
   "ref",
   "fiscal_position_id",
+  "currency_id",
   "narration",
   "payment_reference",
   "invoice_line_ids"
@@ -752,8 +753,8 @@ export function registerBillingWriteTools(
     {
       title: "Configure Draft Vendor Bill",
       description:
-        "Write: update preparatory header/line fields on a draft vendor bill (account.move with " +
-        "move_type=in_invoice) only. Refuses posted moves, other move types, and lifecycle/payment fields. " +
+        "Write: update preparatory header/line fields (including currency_id) on a draft vendor bill " +
+        "(account.move with move_type=in_invoice) only. Refuses posted moves, other move types, and lifecycle/payment fields. " +
         "Does not validate, post, reconcile, send, or delete. To reset a posted/cancel vendor bill to draft, " +
         "use call_model_method button_draft with write context (in_invoice / in_refund only; see list_model_actions).",
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },

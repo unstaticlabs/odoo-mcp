@@ -659,7 +659,7 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
             const rows = (await queue.enqueue(conn, "ir.attachment", "search_read", {
               domain: [
                 ["res_model", "=", model],
-                ["res_id", record_id]
+                ["res_id", "=", record_id]
               ],
               fields: ["name", "mimetype", "file_size", "create_date"]
             })) as Record<string, unknown>[];

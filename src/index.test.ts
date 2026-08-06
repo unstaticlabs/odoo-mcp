@@ -1575,6 +1575,62 @@ describe("write safety gate (connector)", () => {
     expect(result.isError).toBeUndefined();
     expect(queue.calls.some((c: any) => c.method === "create")).toBe(true);
   });
+
+  test("create_record for res.partner with VAT identity fields reaches Odoo", async () => {
+    const queue = makeStubQueue({ createId: 11 });
+    const agent = await buildAgentWithQueue(queue);
+    const handler = getToolHandler(agent, "create_record");
+
+    const result = await handler({
+      model: "res.partner",
+      values: {
+        name: "SARL Fournisseur",
+        vat: "FR12345678901",
+        siret: "12345678900012",
+        company_registry: "123456789",
+        country_id: 75
+      }
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(queue.calls.some((c: any) => c.method === "create")).toBe(true);
+  });
+
+  test("create_record for res.partner with bank_ids is write_blocked", async () => {
+    const queue = makeStubQueue({ createId: 12 });
+    const agent = await buildAgentWithQueue(queue);
+    const handler = getToolHandler(agent, "create_record");
+
+    const result = await handler({
+      model: "res.partner",
+      values: { name: "Acme", bank_ids: [[0, 0, [{ acc_number: "FR123" }]]] }
+    });
+
+    expect(result.isError).toBe(true);
+    expect(queue.calls.length).toBe(0);
+    const envelope = JSON.parse(result.content[0].text);
+    expect(envelope.error).toBe("write_blocked");
+    expect(envelope.intent).toBe("financial_mutation");
+    expect(envelope.blocked_fields).toContain("bank_ids");
+  });
+
+  test("update_record for res.partner with credit_limit is write_blocked", async () => {
+    const queue = makeStubQueue();
+    const agent = await buildAgentWithQueue(queue);
+    const handler = getToolHandler(agent, "update_record");
+
+    const result = await handler({
+      model: "res.partner",
+      record_id: 5,
+      values: { credit_limit: 1000 }
+    });
+
+    expect(result.isError).toBe(true);
+    expect(queue.calls.length).toBe(0);
+    const envelope = JSON.parse(result.content[0].text);
+    expect(envelope.error).toBe("write_blocked");
+    expect(envelope.blocked_fields).toContain("credit_limit");
+  });
 });
 
 describe("post_message tool callOdoo call shape", () => {
@@ -3847,6 +3903,38 @@ describe("expand_record", () => {
     expect(body.chatter).toEqual([{ date: "2024-01-01", author_id: { id: 7, name: "Alice" }, body: "hi", message_type: "comment" }]);
     expect(body.attachments).toEqual([{ name: "file.pdf", mimetype: "application/pdf", file_size: 123, create_date: "2024-01-01" }]);
     expect(body.record).toEqual({ id: 42, name: "Task A" });
+    expect(result.isError).toBeUndefined();
+  });
+
+  test("attachment search_read uses a 3-tuple res_id domain", async () => {
+    const agent = await buildWriteToolAgent();
+    const log: { url: string; body: any }[] = [];
+    globalThis.fetch = mockOdoo(
+      {
+        "project.task/fields_get": BASE_FIELDS_META,
+        "project.task/search_read": [{ id: 42, name: "Task A" }],
+        "ir.attachment/search_read": []
+      },
+      log
+    );
+
+    const handler = getToolHandler(agent, "expand_record");
+    const result = await handler({
+      model: "project.task",
+      record_id: 42,
+      relations: [],
+      include_chatter: false,
+      include_attachments: true,
+      relation_limit: 10
+    });
+    const body = JSON.parse(result.content[0].text);
+
+    const attCall = log.find((entry) => entry.url.endsWith("/ir.attachment/search_read"));
+    expect(attCall?.body.domain).toEqual([
+      ["res_model", "=", "project.task"],
+      ["res_id", "=", 42]
+    ]);
+    expect(body.attachments).toEqual([]);
     expect(result.isError).toBeUndefined();
   });
 
