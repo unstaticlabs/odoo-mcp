@@ -19,13 +19,16 @@ import {
 } from "../safety";
 import type { Props } from "../server";
 import {
+  logWriteContext,
   mcpError,
   mcpErrorFromException,
   mcpStructured,
+  mcpWriteBlockedError,
   redactDetails,
   requireConnection,
   zOdooRecords,
   zRecordContainer,
+  zRequiredWriteContext,
   zWarnings
 } from "./shared";
 
@@ -1208,9 +1211,10 @@ function tagAttachment(
 // ---- Documents repository search (card ODOO2232) ----
 
 /**
- * `documents.document` fields read by `bookkeeping.search_source_documents`.
- * `datas` (the base64 payload) is deliberately absent — this tool returns metadata only;
- * callers fetch bytes through `bookkeeping.fetch_attachment` once they have picked a document.
+ * `documents.document` fields read by `bookkeeping.search_source_documents` and
+ * `bookkeeping.link_source_document`. `datas` (the base64 payload) is deliberately absent —
+ * metadata only; callers fetch bytes through `bookkeeping.fetch_attachment` once they have
+ * picked a document.
  */
 export const DOCUMENT_SEARCH_FIELDS = [
   "id",
@@ -1368,6 +1372,68 @@ export function isDocumentsUnavailableError(err: unknown): boolean {
 }
 
 const zRelationRef = z.object({ id: z.number().int(), name: z.string() }).nullable();
+
+/** Normalized `documents.document` row shared by search + link tools. */
+const zSourceDocument = z.object({
+  id: z.number().int(),
+  name: z.string(),
+  folder: zRelationRef,
+  tags: z.array(z.object({ id: z.number().int(), name: z.string() })),
+  owner: zRelationRef,
+  res_model: z.string().nullable(),
+  res_id: z.number().int().nullable(),
+  create_date: z.string().nullable(),
+  write_date: z.string().nullable(),
+  mimetype: z.string().nullable(),
+  file_size: z.number().nullable(),
+  checksum: z.string().nullable(),
+  attachment: zRelationRef
+});
+
+/** Business records that `bookkeeping.link_source_document` may point a document at. */
+const LINKABLE_TARGET_MODELS = ["account.move", "project.task"] as const;
+
+const DOCUMENTS_PRECONDITION_MESSAGE =
+  "Odoo Documents app (documents.document) is required to link source documents, but it is not " +
+  "installed on this database or ACLs deny it. Install/enable the Documents app and grant the " +
+  "connecting user read+write access on documents.document, then retry. No write was made.";
+
+/**
+ * Hard refusal when the Documents app is missing or denied — never a soft-degrade, never a
+ * traceback-only failure. Odoo detail text is redacted into the log only.
+ */
+function documentsPreconditionError(err: unknown) {
+  console.warn(
+    `documents.document unavailable: ${redactDetails(err instanceof Error ? err.message : String(err))}`
+  );
+  const envelope = {
+    error: "documents_app_unavailable",
+    model: "documents.document",
+    method: "write",
+    http_status: null,
+    details: DOCUMENTS_PRECONDITION_MESSAGE,
+    recoverable: false,
+    refusing_layer: "connector_policy",
+    next_step: "Install the Odoo Documents app or grant documents.document access, then retry."
+  };
+  return { content: [{ type: "text" as const, text: JSON.stringify(envelope) }], isError: true as const };
+}
+
+function linkSourceDocumentError(
+  error: string,
+  details: string,
+  context: { model: string; method?: string } = { model: "documents.document", method: "write" }
+) {
+  const envelope = {
+    error,
+    model: context.model,
+    method: context.method ?? "write",
+    http_status: null,
+    details,
+    recoverable: false
+  };
+  return { content: [{ type: "text" as const, text: JSON.stringify(envelope) }], isError: true as const };
+}
 
 export function registerSourceDocumentTools(server: McpServer, getProps: () => Props | undefined, queue: OdooQueue) {
   server.registerTool(
@@ -1538,23 +1604,7 @@ export function registerSourceDocumentTools(server: McpServer, getProps: () => P
       },
       outputSchema: {
         documents: z
-          .array(
-            z.object({
-              id: z.number().int(),
-              name: z.string(),
-              folder: zRelationRef,
-              tags: z.array(z.object({ id: z.number().int(), name: z.string() })),
-              owner: zRelationRef,
-              res_model: z.string().nullable(),
-              res_id: z.number().int().nullable(),
-              create_date: z.string().nullable(),
-              write_date: z.string().nullable(),
-              mimetype: z.string().nullable(),
-              file_size: z.number().nullable(),
-              checksum: z.string().nullable(),
-              attachment: zRelationRef
-            })
-          )
+          .array(zSourceDocument)
           .describe("Normalized documents.document rows, newest first. Binary content (datas) is never included."),
         warnings: zWarnings.optional()
       }
@@ -1605,6 +1655,189 @@ export function registerSourceDocumentTools(server: McpServer, getProps: () => P
         return mcpStructured({ documents, warnings });
       } catch (err) {
         return mcpErrorFromException(err, { model: "documents.document", method: "search_read" });
+      }
+    }
+  );
+
+  server.registerTool(
+    "bookkeeping.link_source_document",
+    {
+      title: "Link Source Document To Record",
+      description:
+        "Write-only: link an existing Odoo Documents file (documents.document) to an account.move or project.task " +
+        "by setting the document's res_model/res_id related-record fields. The file is never copied, no ir.attachment " +
+        "is created or modified, and no ledger state changes. Requires the Documents app. For copying/page-splitting " +
+        "PDF bytes onto a draft vendor bill use billing.attach_source_pdf; to find the document id or verify existing " +
+        "links use bookkeeping.search_source_documents.",
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+      inputSchema: {
+        document_id: z
+          .number()
+          .int()
+          .positive()
+          .describe(
+            "documents.document id of the already-filed source document (find it with bookkeeping.search_source_documents)"
+          ),
+        target_model: z
+          .enum(LINKABLE_TARGET_MODELS)
+          .describe("Business record model to link the document to"),
+        target_id: z.number().int().positive().describe("Business record id (account.move or project.task)"),
+        context: zRequiredWriteContext
+      },
+      outputSchema: {
+        ok: z.boolean(),
+        changed: z
+          .boolean()
+          .describe("false when the document already pointed at this exact record and no Odoo write was issued"),
+        document: zSourceDocument.describe(
+          "Re-read documents.document row after the write — re-readable evidence of the link"
+        ),
+        previous_link: z
+          .object({ res_model: z.string().nullable(), res_id: z.number().int().nullable() })
+          .describe("The document's related-record fields before this call"),
+        warnings: zWarnings,
+        metadata: zCallMetadata
+      }
+    },
+    async ({ document_id, target_model, target_id, context }) => {
+      const before = queue.snapshot();
+      logWriteContext("bookkeeping.link_source_document", "documents.document", context);
+      try {
+        // Defense-in-depth: schema already enforces this, but MCP callers can bypass validation.
+        if (
+          !(LINKABLE_TARGET_MODELS as readonly string[]).includes(target_model) ||
+          !Number.isInteger(target_id) ||
+          target_id <= 0
+        ) {
+          return mcpWriteBlockedError(
+            { model: "documents.document", method: "write" },
+            {
+              intent: "financial_mutation",
+              reason:
+                `target_model must be one of ${LINKABLE_TARGET_MODELS.join(" | ")} and target_id must be a positive integer. ` +
+                "No Odoo call was made.",
+              refusing_layer: "connector_policy",
+              recoverable: true
+            }
+          );
+        }
+
+        const conn = requireConnection(getProps());
+        const warnings: string[] = [];
+
+        // PRE-READ — also the Documents-availability probe.
+        let preRows: Array<Record<string, unknown>>;
+        try {
+          preRows = (await queue.enqueue(conn, "documents.document", "read", {
+            ids: [document_id],
+            fields: DOCUMENT_SEARCH_FIELDS
+          })) as Array<Record<string, unknown>>;
+        } catch (err) {
+          if (isDocumentsUnavailableError(err)) return documentsPreconditionError(err);
+          throw err;
+        }
+        if (!preRows[0]) {
+          return linkSourceDocumentError(
+            "document_not_found",
+            `documents.document id ${document_id} was not found (or record rules hide it). No write was made.`
+          );
+        }
+
+        // TARGET EXISTENCE CHECK — dangling-link prevention; target-side ACL stays an ordinary error.
+        let targetRows: Array<Record<string, unknown>>;
+        try {
+          targetRows = (await queue.enqueue(conn, target_model, "read", {
+            ids: [target_id],
+            fields: ["id"]
+          })) as Array<Record<string, unknown>>;
+        } catch (err) {
+          return mcpErrorFromException(err, { model: target_model, method: "read" });
+        }
+        if (!targetRows[0]) {
+          return linkSourceDocumentError(
+            "target_not_found",
+            `${target_model} id ${target_id} was not found (or record rules hide it). No write was made.`,
+            { model: target_model, method: "read" }
+          );
+        }
+
+        const previous_link = {
+          res_model: toScalar(preRows[0].res_model, isStringValue),
+          res_id: toScalar(preRows[0].res_id, isNumberValue)
+        };
+
+        let changed = false;
+        if (previous_link.res_model === target_model && previous_link.res_id === target_id) {
+          warnings.push(
+            `documents.document ${document_id} was already linked to ${target_model},${target_id}; no write was issued.`
+          );
+        } else {
+          if (previous_link.res_model !== null) {
+            warnings.push(
+              `Relinked documents.document ${document_id} from ${previous_link.res_model},${previous_link.res_id} ` +
+                `to ${target_model},${target_id}; the previous link no longer exists.`
+            );
+          }
+          try {
+            await queue.enqueue(conn, "documents.document", "write", {
+              ids: [document_id],
+              vals: { res_model: target_model, res_id: target_id }
+            });
+          } catch (err) {
+            if (isDocumentsUnavailableError(err)) return documentsPreconditionError(err);
+            return mcpErrorFromException(err, { model: "documents.document", method: "write" });
+          }
+          changed = true;
+        }
+
+        // READ-BACK evidence — fresh call, not the pre-read row.
+        let readBackRows: Array<Record<string, unknown>>;
+        try {
+          readBackRows = (await queue.enqueue(conn, "documents.document", "read", {
+            ids: [document_id],
+            fields: DOCUMENT_SEARCH_FIELDS
+          })) as Array<Record<string, unknown>>;
+        } catch (err) {
+          if (isDocumentsUnavailableError(err)) return documentsPreconditionError(err);
+          throw err;
+        }
+        const readBackRow = readBackRows[0];
+        if (!readBackRow) {
+          return linkSourceDocumentError(
+            "document_not_found",
+            `documents.document id ${document_id} was not found after write (or record rules hide it).`
+          );
+        }
+
+        const tagIds = [
+          ...new Set(
+            (Array.isArray(readBackRow.tag_ids) ? readBackRow.tag_ids : []).filter(isNumberValue)
+          )
+        ];
+        const tagNames = new Map<number, string>();
+        if (tagIds.length > 0) {
+          try {
+            const tagRows = (await queue.enqueue(conn, "documents.tag", "read", {
+              ids: tagIds,
+              fields: ["id", "name"]
+            })) as Array<Record<string, unknown>>;
+            for (const tag of tagRows) {
+              if (typeof tag.id === "number" && typeof tag.name === "string") tagNames.set(tag.id, tag.name);
+            }
+          } catch (err) {
+            const message = redactDetails(err instanceof Error ? err.message : String(err));
+            console.warn(`documents.tag read failed: ${message}`);
+            warnings.push(`documents.tag names could not be resolved (${message}); tags are reported by id only.`);
+          }
+        }
+
+        const document = normalizeSourceDocument(readBackRow, tagNames);
+        const { odoo_calls, total_duration_ms } = queue.delta(before);
+        const metadata = { odoo_calls, cache_hits: 0, duration_seconds: total_duration_ms / 1000 };
+
+        return mcpStructured({ ok: true, changed, document, previous_link, warnings, metadata });
+      } catch (err) {
+        return mcpErrorFromException(err, { model: "documents.document", method: "write" });
       }
     }
   );
