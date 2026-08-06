@@ -171,7 +171,7 @@ freshest (60 s) because they move as journal entries post.
 
 ## 4. Tool reference
 
-All seven tools are read-only or validate-only (none writes to Odoo). Field types below are
+All eight tools are read-only or validate-only (none writes to Odoo). Field types below are
 the Zod input schema in `src/tools/bookkeeping.ts`.
 
 ### 4.1 `bookkeeping.get_snapshot`
@@ -366,7 +366,92 @@ as `original_source`, `official_pdf`, or `other`.
 }
 ```
 
-### 4.5 `bookkeeping.fetch_attachment`
+### 4.5 `bookkeeping.search_source_documents`
+
+Search the Odoo **Documents** repository (`documents.document`) — the app where scanned
+invoices, receipts and statements are filed — by filename, folder, tags, owner, upload
+window, or linked record. Complements §4.4: `list_source_documents` answers *"what is
+attached to this journal entry?"*, this one answers *"where is that PDF, and is it filed
+against anything?"*.
+
+Metadata only: the binary payload (`datas`) is never read. Take `attachment.id` from a
+result and pass it to §4.6 `fetch_attachment` when you actually need the bytes.
+
+| Field | Type | Required | Default | Notes |
+|---|---|---|---|---|
+| `filename` | string | no | — | case-insensitive substring (`ilike`) on `name` |
+| `folder_id` | int (positive) | no | — | Documents folder id |
+| `tag_ids` | int[] (positive) | no | — | matches documents carrying **any** of these tags (`in`) |
+| `owner_id` | int (positive) | no | — | `res.users` id of the document owner |
+| `date_from` | string | no | — | `create_date >=` (ISO date or `YYYY-MM-DD HH:MM:SS`) |
+| `date_to` | string | no | — | `create_date <=` |
+| `res_model` | string | no | — | linked model, e.g. `account.move`, `project.task` |
+| `res_id` | int (positive) | no | — | linked record id |
+| `limit` | int | no | `80` | 1–200 |
+
+Every supplied filter is ANDed; omitting all of them searches the whole repository (capped
+by `limit`). Results are ordered `create_date desc, id desc`, so repeated calls page
+deterministically.
+
+**Cost.** One `search_read` on `documents.document`, plus at most **one** batched
+`documents.tag` read to resolve tag names for the whole result set — never one call per
+document. A tag id the read does not return (deleted or unreadable) is reported as
+`{ id, name: "<id>" }` rather than dropped.
+
+**Input**
+
+```json
+{ "filename": "facture", "res_model": "account.move", "date_from": "2026-01-01", "limit": 25 }
+```
+
+**Output (abridged)**
+
+```json
+{
+  "documents": [
+    {
+      "id": 11,
+      "name": "facture.pdf",
+      "folder": { "id": 3, "name": "Invoices" },
+      "tags": [{ "id": 7, "name": "Vendor Bill" }],
+      "owner": { "id": 2, "name": "Mitchell Admin" },
+      "res_model": "account.move",
+      "res_id": 42,
+      "create_date": "2026-01-15 09:00:00",
+      "write_date": "2026-01-16 10:00:00",
+      "mimetype": "application/pdf",
+      "file_size": 51234,
+      "checksum": "abc123",
+      "attachment": { "id": 77, "name": "facture.pdf" }
+    }
+  ],
+  "warnings": []
+}
+```
+
+Many2one fields are normalized to `{ id, name }`, and Odoo's `false` becomes `null`
+throughout.
+
+**Graceful degradation.** Odoo Documents is a separate (Enterprise) app, so it may simply
+not be there. When `documents.document` is missing or ACLs/record rules deny it, the tool
+returns an empty list plus a warning instead of an error envelope — an audit that cannot
+reach the repository still gets a usable answer:
+
+```json
+{
+  "documents": [],
+  "warnings": ["Odoo Documents module (documents.document) is not installed or access was denied by ACLs."]
+}
+```
+
+Degradation is deliberately narrow: only a missing `documents.document` model or an ACL
+denial **on that model** produces the warning. Everything else — a rejected session (401),
+timeout, rate limit, invalid domain, or a field this Odoo version does not expose — still
+surfaces as the standard error envelope with `isError: true`, because an empty
+`documents: []` is indistinguishable from "the audit found nothing" and must never stand in
+for a failure the caller could fix or retry.
+
+### 4.6 `bookkeeping.fetch_attachment`
 
 Fetch an `ir.attachment`'s metadata and, unless it is a URL-type attachment or exceeds
 `max_bytes`, its base64-encoded content.
@@ -468,7 +553,7 @@ Refusals come back as billing deny envelopes (`isError: true`, `intent:
 that case only when those bytes would not parse (e.g. an encrypted PDF), since a byte copy
 still succeeds. Never posts, validates, reconciles, or deletes.
 
-### 4.6 `bookkeeping.preview_returns`
+### 4.7 `bookkeeping.preview_returns`
 
 > **Naming note:** the task brief referred to this tool as `return_type_preview`. The
 > **registered name in code is `bookkeeping.preview_returns`** — that is what this document
@@ -511,7 +596,7 @@ unrecognized, it reports a `configuration_issues` entry instead of guessing peri
 }
 ```
 
-### 4.7 `bookkeeping.plan_safe_write`
+### 4.8 `bookkeeping.plan_safe_write`
 
 **Validate-only — NEVER writes to Odoo.** Runs read-only checks (company/field existence,
 record state, period consistency, duplicates, lock dates) for a proposed bookkeeping write
