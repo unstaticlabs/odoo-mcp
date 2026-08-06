@@ -6,11 +6,20 @@ import type { Props } from "../server";
 import { getReversibleLifecycleRule } from "../lifecycle-allowlist";
 import { runLifecycleAction } from "../lifecycle-gate";
 import {
+  PdfPagesError,
+  base64ToBytes,
+  bytesToBase64,
+  countPdfPages,
+  extractPdfPages,
+  looksLikePdf
+} from "../pdf-pages";
+import {
   logWriteContext,
   mcpError,
   mcpErrorFromException,
   mcpStructured,
   mcpWriteBlockedError,
+  redactDetails,
   requireConnection,
   zRequiredWriteContext,
   zWarnings,
@@ -202,6 +211,31 @@ export function isDraftRecord(record: Record<string, unknown>): boolean {
   const status = deriveWorkflowStatus(record);
   if (status != null) return status === "draft";
   return record.state === "draft";
+}
+
+/**
+ * Default byte cap for `billing.attach_source_pdf`, matching `bookkeeping.fetch_attachment`:
+ * base64 inflates a payload ~1.37x, so this is the size we are willing to hold in Worker memory.
+ */
+export const SOURCE_PDF_MAX_BYTES = 10485760;
+
+const ATTACHMENT_NAME_MAX = 255;
+
+/**
+ * Default file name for the attachment `billing.attach_source_pdf` creates: the source's own
+ * name, minus its `.pdf` extension, plus a suffix recording what was taken from it. Odoo allows
+ * duplicate attachment names, so this is provenance for humans, not a uniqueness key.
+ * Exported for unit testing.
+ */
+export function deriveSourcePdfName(
+  sourceName: unknown,
+  sourceAttachmentId: number,
+  range: { page_from: number; page_to: number } | null
+): string {
+  const raw = typeof sourceName === "string" ? sourceName.trim() : "";
+  const stem = raw.replace(/\.pdf$/i, "").trim() || `attachment-${sourceAttachmentId}`;
+  const suffix = range ? `-p${range.page_from}-${range.page_to}.pdf` : "-copy.pdf";
+  return `${stem.slice(0, ATTACHMENT_NAME_MAX - suffix.length)}${suffix}`;
 }
 
 function billingBlocked(
@@ -849,6 +883,293 @@ export function registerBillingWriteTools(
         return mcpStructured({ ok: true, record_id, state, move_type: moveType });
       } catch (err) {
         return mcpErrorFromException(err, { model, method: "write" });
+      }
+    }
+  );
+
+  server.registerTool(
+    "billing.attach_source_pdf",
+    {
+      title: "Attach Source PDF To Draft Vendor Bill",
+      description:
+        "Write: copy — or extract a page range out of — an existing PDF ir.attachment and link the result to a " +
+        "draft vendor bill (account.move with move_type=in_invoice, state=draft) as a new attachment. Built for " +
+        "composite source documents (one supplier PDF holding several vendors' invoices): page-split it per bill " +
+        "without leaving the connector. Omit page_from/page_to to copy the whole PDF. The source attachment is " +
+        "never modified or deleted, the move is never written, and nothing is validated, posted or reconciled. " +
+        "This is not generic ir.attachment CRUD: it only ever creates a PDF attachment on a draft vendor bill.",
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+      inputSchema: {
+        bill_id: z.number().int().positive().describe("Draft account.move (move_type=in_invoice) to attach to"),
+        source_attachment_id: z.number().int().positive().describe("Existing binary PDF ir.attachment to read"),
+        page_from: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe("1-based inclusive first page; set together with page_to to extract a range"),
+        page_to: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe("1-based inclusive last page; must be ≥ page_from. Omit both to copy the whole PDF"),
+        max_bytes: z
+          .number()
+          .int()
+          .positive()
+          .default(SOURCE_PDF_MAX_BYTES)
+          .describe("Refuse sources (and outputs) larger than this, before decoding into Worker memory"),
+        name: z
+          .string()
+          .min(1)
+          .max(255)
+          .optional()
+          .describe("File name for the new attachment; defaults to the source name plus a page suffix"),
+        context: zRequiredWriteContext
+      },
+      outputSchema: {
+        ok: z.boolean(),
+        attachment_id: z.number().int().describe("id of the newly created ir.attachment"),
+        bill_id: z.number().int(),
+        res_model: z.literal("account.move"),
+        res_id: z.number().int(),
+        name: z.string(),
+        mimetype: z.literal("application/pdf"),
+        mode: z.enum(["page_extract", "full_copy"]),
+        page_from: z.number().int().nullable(),
+        page_to: z.number().int().nullable(),
+        source_attachment_id: z.number().int(),
+        source_page_count: z
+          .number()
+          .int()
+          .nullable()
+          .describe("Pages in the source PDF; null when a full copy was made from bytes that would not parse")
+      }
+    },
+    async ({ bill_id, source_attachment_id, page_from, page_to, max_bytes = SOURCE_PDF_MAX_BYTES, name, context }) => {
+      const model = "ir.attachment";
+      const billModel = "account.move";
+      logWriteContext("billing.attach_source_pdf", model, context);
+
+      // Page args are self-contained — check them before spending an Odoo round-trip.
+      if ((page_from === undefined) !== (page_to === undefined)) {
+        return billingBlocked(
+          { model, method: "create" },
+          {
+            error: "invalid_page_range",
+            reason:
+              "page_from and page_to must be supplied together (omit both to copy the whole PDF). " +
+              "No Odoo call was made."
+          }
+        );
+      }
+      if (page_from !== undefined && page_to !== undefined && page_from > page_to) {
+        return billingBlocked(
+          { model, method: "create" },
+          {
+            error: "invalid_page_range",
+            reason: `Inverted page range: page_from (${page_from}) must be ≤ page_to (${page_to}). No Odoo call was made.`
+          }
+        );
+      }
+      const range = page_from !== undefined && page_to !== undefined ? { page_from, page_to } : null;
+
+      try {
+        const conn = requireConnection(getProps());
+
+        // 1. The bill must be a draft vendor bill — same gate as billing.configure_draft_vendor_bill.
+        const billRows = await queue.enqueue(conn, billModel, "read", {
+          ids: [bill_id],
+          fields: ["id", "state", "move_type"]
+        });
+        const bill = firstRecord(billRows);
+        if (!bill) {
+          return billingBlocked(
+            { model: billModel, method: "read" },
+            { error: "not_found", reason: `account.move id ${bill_id} was not found.` }
+          );
+        }
+        if (!isDraftRecord(bill)) {
+          const current = deriveWorkflowStatus(bill) ?? String(bill.state ?? "unknown");
+          return billingBlocked(
+            { model: billModel, method: "read" },
+            {
+              error: "draft_required",
+              reason:
+                `account.move ${bill_id} is not draft (current state: ${current}). ` +
+                "billing.attach_source_pdf only attaches to draft vendor bills. " +
+                "If the bill is posted/cancel, call_model_method button_draft (vendor bills only, with write context) first; " +
+                "post/reconcile remain blocked on generic MCP tools."
+            }
+          );
+        }
+        const moveType = typeof bill.move_type === "string" ? bill.move_type : String(bill.move_type ?? "");
+        if (moveType !== "in_invoice") {
+          return billingBlocked(
+            { model: billModel, method: "read" },
+            {
+              error: "vendor_bill_required",
+              reason:
+                `account.move ${bill_id} has move_type=${moveType || "unknown"}; ` +
+                "this slice only attaches source PDFs to draft vendor bills (move_type=in_invoice)."
+            }
+          );
+        }
+
+        // 2. Source metadata first, so an oversize or contentless attachment is refused before the fetch.
+        const metaRows = await queue.enqueue(conn, model, "read", {
+          ids: [source_attachment_id],
+          fields: ["id", "name", "mimetype", "file_size", "type", "url"]
+        });
+        const meta = firstRecord(metaRows);
+        if (!meta) {
+          return billingBlocked(
+            { model, method: "read" },
+            { error: "not_found", reason: `ir.attachment id ${source_attachment_id} was not found.` }
+          );
+        }
+        if (meta.type === "url") {
+          return billingBlocked(
+            { model, method: "create" },
+            {
+              error: "url_attachment",
+              reason:
+                `ir.attachment ${source_attachment_id} is a URL attachment (type=url), so it stores no bytes ` +
+                "to copy or page-extract. Upload the PDF to Odoo as a stored attachment first."
+            }
+          );
+        }
+        const fileSize = numberOrNull(meta.file_size);
+        if (fileSize !== null && fileSize > max_bytes) {
+          return billingBlocked(
+            { model, method: "read" },
+            {
+              error: "oversize",
+              reason:
+                `ir.attachment ${source_attachment_id} is ${fileSize} bytes, exceeding max_bytes (${max_bytes}). ` +
+                "Base64 encoding inflates the payload ~1.37x against Worker memory limits, so it was not fetched. " +
+                "Raise max_bytes if you really need this file."
+            }
+          );
+        }
+
+        const dataRows = await queue.enqueue(conn, model, "read", {
+          ids: [source_attachment_id],
+          fields: ["datas"]
+        });
+        const datas = firstRecord(dataRows)?.datas;
+        if (typeof datas !== "string" || datas.length === 0) {
+          return billingBlocked(
+            { model, method: "read" },
+            {
+              error: "pdf_error",
+              reason: `ir.attachment ${source_attachment_id} returned no stored content (datas is empty); there is nothing to copy.`
+            }
+          );
+        }
+
+        // 3. Decode and slice in-Worker. PdfPagesError carries the envelope code to surface.
+        let outputBytes: Uint8Array;
+        let sourcePageCount: number | null;
+        try {
+          const sourceBytes = base64ToBytes(datas);
+          if (sourceBytes.length > max_bytes) {
+            return billingBlocked(
+              { model, method: "read" },
+              {
+                error: "oversize",
+                reason:
+                  `ir.attachment ${source_attachment_id} decodes to ${sourceBytes.length} bytes, exceeding ` +
+                  `max_bytes (${max_bytes}). Raise max_bytes if you really need this file.`
+              }
+            );
+          }
+          // The stored mimetype is whatever the uploader's browser guessed; the header decides.
+          if (!looksLikePdf(sourceBytes)) {
+            return billingBlocked(
+              { model, method: "create" },
+              {
+                error: "not_pdf",
+                reason:
+                  `ir.attachment ${source_attachment_id} (mimetype=${scalarOrNull(meta.mimetype) ?? "unset"}) has no ` +
+                  "%PDF header. billing.attach_source_pdf only copies or page-extracts PDFs."
+              }
+            );
+          }
+
+          if (range) {
+            const extracted = await extractPdfPages(sourceBytes, range.page_from, range.page_to);
+            outputBytes = extracted.bytes;
+            sourcePageCount = extracted.sourcePageCount;
+          } else {
+            // Byte-for-byte copy — parse only to report the page count, and tolerate a parse
+            // failure (e.g. an encrypted PDF) rather than refuse a copy we can already make.
+            outputBytes = sourceBytes;
+            sourcePageCount = await countPdfPages(sourceBytes).catch(() => null);
+          }
+        } catch (err) {
+          if (err instanceof PdfPagesError) {
+            return billingBlocked(
+              { model, method: "create" },
+              {
+                error: err.code,
+                reason:
+                  redactDetails(err.message) +
+                  (err.pageCount !== null ? ` The source PDF has ${err.pageCount} page(s).` : "")
+              }
+            );
+          }
+          throw err;
+        }
+
+        if (outputBytes.length > max_bytes) {
+          return billingBlocked(
+            { model, method: "create" },
+            {
+              error: "oversize",
+              reason:
+                `The PDF produced for pages ${range?.page_from}-${range?.page_to} is ${outputBytes.length} bytes, ` +
+                `exceeding max_bytes (${max_bytes}). Raise max_bytes or extract a narrower range.`
+            }
+          );
+        }
+
+        // 4. Link the result. Odoo may auto-adopt it as message_main_attachment_id; we never write the move.
+        const attachmentName = name ?? deriveSourcePdfName(meta.name, source_attachment_id, range);
+        const created = await queue.enqueue(conn, model, "create", {
+          vals_list: [
+            {
+              name: attachmentName,
+              type: "binary",
+              mimetype: "application/pdf",
+              datas: bytesToBase64(outputBytes),
+              res_model: billModel,
+              res_id: bill_id
+            }
+          ]
+        });
+        const attachment_id = Array.isArray(created) ? created[0] : created;
+        if (typeof attachment_id !== "number" || !Number.isInteger(attachment_id) || attachment_id <= 0) {
+          return mcpError("Odoo create returned no ir.attachment id");
+        }
+
+        return mcpStructured({
+          ok: true,
+          attachment_id,
+          bill_id,
+          res_model: "account.move" as const,
+          res_id: bill_id,
+          name: attachmentName,
+          mimetype: "application/pdf" as const,
+          mode: range ? ("page_extract" as const) : ("full_copy" as const),
+          page_from: range?.page_from ?? null,
+          page_to: range?.page_to ?? null,
+          source_attachment_id,
+          source_page_count: sourcePageCount
+        });
+      } catch (err) {
+        return mcpErrorFromException(err, { model, method: "create" });
       }
     }
   );
