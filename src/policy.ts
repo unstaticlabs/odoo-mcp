@@ -289,6 +289,43 @@ export function classifyRefusingLayer(err: unknown): RefusingLayer {
   return "odoo_validation";
 }
 
+/**
+ * Field names Odoo's own error text points at, so a refusal envelope can name the rejected field
+ * instead of leaving the agent to parse prose. Deliberately conservative — each pattern quotes or
+ * delimits the field, and a message that names none yields none. Never invent a field name.
+ */
+const REJECTED_FIELD_PATTERNS: readonly RegExp[] = [
+  // Quoted: Invalid field 'parent_idd' on model 'product.category'
+  /(?:invalid|unknown) (?:field|value for field) ['"`]([a-z_][a-z0-9_.]*)['"`]/gi,
+  // Model-qualified and unquoted: Invalid field product.category.parent_idd in leaf …
+  // A dot is required so English prose ("invalid field name in domain") never reads as a field name.
+  /(?:invalid|unknown) field ([a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*)+)/gi,
+  /(?:field|column) ['"`]([a-z_][a-z0-9_.]*)['"`] (?:does not exist|is not a valid field|of relation)/gi,
+  /wrong value for ['"`]?([a-z_][a-z0-9_.]*)['"`]?\s*:/gi,
+  /null value in column ['"`]([a-z_][a-z0-9_]*)['"`]/gi
+];
+
+/**
+ * Best-effort field names extracted from an Odoo failure message, dotted model prefixes stripped
+ * (`product.category.foo` → `foo`). Empty when nothing is confidently extractable.
+ */
+export function extractRejectedFields(details: string): string[] {
+  if (!details) return [];
+  const normalized = normalizeOdooDetails(details);
+  const found = new Set<string>();
+  for (const pattern of REJECTED_FIELD_PATTERNS) {
+    // Patterns carry /g, so reset lastIndex — the same RegExp objects are reused across calls.
+    pattern.lastIndex = 0;
+    for (const match of normalized.matchAll(pattern)) {
+      const raw = match[1];
+      if (!raw) continue;
+      const field = raw.replace(/\.$/, "").split(".").pop();
+      if (field && /^[a-z_][a-z0-9_]*$/.test(field)) found.add(field);
+    }
+  }
+  return [...found];
+}
+
 /** Default next_step when a refusing layer is known but the caller did not supply one. */
 export function nextStepForLayer(layer: RefusingLayer): string {
   switch (layer) {
