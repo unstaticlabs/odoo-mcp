@@ -1,16 +1,21 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { TtlCache } from "../cache";
-import { callOdoo } from "../odoo";
+import { OdooError, callOdoo } from "../odoo";
 import { OdooQueue } from "../odoo-queue";
 import {
+  DOCUMENTS_UNAVAILABLE_WARNING,
+  DOCUMENT_SEARCH_FIELDS,
   SUSPENSE_ACCOUNT_CODES,
+  buildSourceDocumentDomain,
   computeDeadline,
   computeSeverity,
   diffExpectedReturns,
   generatePeriods,
+  isDocumentsUnavailableError,
   isSuspenseAccount,
   normalizePeriodicity,
+  normalizeSourceDocument,
   registerBookkeepingTools,
   registerReturnPreviewTools,
   registerSourceDocumentTools, registerReportLineTools } from "./bookkeeping";
@@ -1064,6 +1069,385 @@ describe("bookkeeping.fetch_attachment", () => {
     });
     expect(result.content[0].text).not.toContain("secret-bookkeeping-key");
     expect(result.content[0].text).not.toContain("Bearer");
+  });
+});
+
+// ---- Documents repository search tests (card ODOO2232) ----
+
+describe("buildSourceDocumentDomain", () => {
+  test("no filters yields an empty domain (whole repository)", () => {
+    expect(buildSourceDocumentDomain({})).toEqual([]);
+  });
+
+  test("maps every filter onto its documented leaf, implicitly ANDed", () => {
+    expect(
+      buildSourceDocumentDomain({
+        filename: "facture",
+        folder_id: 3,
+        tag_ids: [7, 8],
+        owner_id: 2,
+        date_from: "2026-01-01",
+        date_to: "2026-03-31 23:59:59",
+        res_model: "account.move",
+        res_id: 42
+      })
+    ).toEqual([
+      ["name", "ilike", "facture"],
+      ["folder_id", "=", 3],
+      ["tag_ids", "in", [7, 8]],
+      ["owner_id", "=", 2],
+      ["create_date", ">=", "2026-01-01"],
+      ["create_date", "<=", "2026-03-31 23:59:59"],
+      ["res_model", "=", "account.move"],
+      ["res_id", "=", 42]
+    ]);
+  });
+
+  test("empty filename and empty tag list contribute no leaves", () => {
+    expect(buildSourceDocumentDomain({ filename: "", tag_ids: [], folder_id: 5 })).toEqual([["folder_id", "=", 5]]);
+  });
+});
+
+describe("normalizeSourceDocument", () => {
+  test("many2one tuples become { id, name }, Odoo false becomes null, tag ids resolve via the lookup", () => {
+    const normalized = normalizeSourceDocument(
+      {
+        id: 11,
+        name: "facture.pdf",
+        folder_id: [3, "Invoices"],
+        tag_ids: [7, 8],
+        owner_id: [2, "Mitchell Admin"],
+        res_model: "account.move",
+        res_id: 42,
+        create_date: "2026-01-15 09:00:00",
+        write_date: "2026-01-16 10:00:00",
+        mimetype: "application/pdf",
+        file_size: 51234,
+        checksum: "abc123",
+        attachment_id: [77, "facture.pdf"]
+      },
+      new Map([
+        [7, "Vendor Bill"],
+        [8, "2026"]
+      ])
+    );
+
+    expect(normalized).toEqual({
+      id: 11,
+      name: "facture.pdf",
+      folder: { id: 3, name: "Invoices" },
+      tags: [
+        { id: 7, name: "Vendor Bill" },
+        { id: 8, name: "2026" }
+      ],
+      owner: { id: 2, name: "Mitchell Admin" },
+      res_model: "account.move",
+      res_id: 42,
+      create_date: "2026-01-15 09:00:00",
+      write_date: "2026-01-16 10:00:00",
+      mimetype: "application/pdf",
+      file_size: 51234,
+      checksum: "abc123",
+      attachment: { id: 77, name: "facture.pdf" }
+    });
+  });
+
+  test("unset relations/scalars sanitize to null and unresolved tags fall back to their id", () => {
+    const normalized = normalizeSourceDocument({
+      id: 12,
+      name: "orphan.txt",
+      folder_id: false,
+      tag_ids: [9],
+      owner_id: false,
+      res_model: false,
+      res_id: false,
+      create_date: false,
+      write_date: false,
+      mimetype: false,
+      file_size: false,
+      checksum: false,
+      attachment_id: false
+    });
+
+    expect(normalized).toEqual({
+      id: 12,
+      name: "orphan.txt",
+      folder: null,
+      tags: [{ id: 9, name: "9" }],
+      owner: null,
+      res_model: null,
+      res_id: null,
+      create_date: null,
+      write_date: null,
+      mimetype: null,
+      file_size: null,
+      checksum: null,
+      attachment: null
+    });
+  });
+});
+
+describe("isDocumentsUnavailableError", () => {
+  function odooError(overrides: Partial<ConstructorParameters<typeof OdooError>[0]>) {
+    return new OdooError({
+      message: "boom",
+      code: "unknown",
+      httpStatus: 400,
+      model: "documents.document",
+      method: "search_read",
+      details: "boom",
+      ...overrides
+    });
+  }
+
+  test("true for a missing model, ACL denial, or an unauthorized session", () => {
+    expect(isDocumentsUnavailableError(odooError({ code: "model_or_method_not_found", httpStatus: 404 }))).toBe(true);
+    expect(isDocumentsUnavailableError(odooError({ code: "permission_denied", httpStatus: 403 }))).toBe(true);
+    expect(isDocumentsUnavailableError(odooError({ code: "unauthorized", httpStatus: 401 }))).toBe(true);
+  });
+
+  test("true for message-level missing-model / AccessError phrasing on a non-404 status", () => {
+    expect(isDocumentsUnavailableError(odooError({ details: "Object documents.document doesn't exist" }))).toBe(true);
+    expect(isDocumentsUnavailableError(odooError({ details: "AccessError: sorry" }))).toBe(true);
+    expect(isDocumentsUnavailableError(odooError({ details: "You are not allowed to access 'Document' records" }))).toBe(true);
+  });
+
+  test("false for transient and caller-fixable failures, and for non-Odoo errors", () => {
+    expect(isDocumentsUnavailableError(odooError({ code: "timeout", httpStatus: null }))).toBe(false);
+    expect(isDocumentsUnavailableError(odooError({ code: "rate_limited", httpStatus: 429 }))).toBe(false);
+    expect(isDocumentsUnavailableError(odooError({ code: "invalid_request", details: "Invalid domain leaf" }))).toBe(false);
+    expect(isDocumentsUnavailableError(new Error("Object documents.document doesn't exist"))).toBe(false);
+  });
+});
+
+describe("bookkeeping.search_source_documents", () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  test("sends the mapped domain, metadata-only fields, limit and deterministic order", async () => {
+    const agent = makeAgent();
+    const fetchCalls: { url: string; body: any }[] = [];
+    globalThis.fetch = mock(async (url: string, init: any) => {
+      fetchCalls.push({ url, body: JSON.parse(init.body) });
+      return jsonResponse([]);
+    });
+
+    const handler = getToolHandler(agent, "bookkeeping.search_source_documents");
+    const result = await handler({ filename: "facture", folder_id: 3, res_model: "account.move", res_id: 42, limit: 25 });
+
+    expect(result.isError).toBeUndefined();
+    expect(fetchCalls.length).toBe(1);
+    expect(fetchCalls[0].url).toContain("/documents.document/search_read");
+    expect(fetchCalls[0].body.domain).toEqual([
+      ["name", "ilike", "facture"],
+      ["folder_id", "=", 3],
+      ["res_model", "=", "account.move"],
+      ["res_id", "=", 42]
+    ]);
+    expect(fetchCalls[0].body.limit).toBe(25);
+    expect(fetchCalls[0].body.order).toBe("create_date desc, id desc");
+    expect(fetchCalls[0].body.fields).toEqual(DOCUMENT_SEARCH_FIELDS);
+    expect(fetchCalls[0].body.fields).not.toContain("datas");
+
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload).toEqual({ documents: [], warnings: [] });
+  });
+
+  test("falls back to the default limit of 80 when the caller omits it", async () => {
+    const agent = makeAgent();
+    const bodies: any[] = [];
+    globalThis.fetch = mock(async (_url: string, init: any) => {
+      bodies.push(JSON.parse(init.body));
+      return jsonResponse([]);
+    });
+
+    const handler = getToolHandler(agent, "bookkeeping.search_source_documents");
+    await handler({});
+
+    expect(bodies[0].limit).toBe(80);
+    expect(bodies[0].domain).toEqual([]);
+  });
+
+  test("date_from/date_to bound create_date and normalize the returned rows", async () => {
+    const agent = makeAgent();
+    const fetchCalls: { url: string; body: any }[] = [];
+    globalThis.fetch = mock(async (url: string, init: any) => {
+      fetchCalls.push({ url, body: JSON.parse(init.body) });
+      if (url.endsWith("/documents.tag/read")) return jsonResponse([{ id: 7, name: "Vendor Bill" }]);
+      return jsonResponse([
+        {
+          id: 11,
+          name: "facture.pdf",
+          folder_id: [3, "Invoices"],
+          tag_ids: [7],
+          owner_id: [2, "Mitchell Admin"],
+          res_model: "account.move",
+          res_id: 42,
+          create_date: "2026-01-15 09:00:00",
+          write_date: "2026-01-16 10:00:00",
+          mimetype: "application/pdf",
+          file_size: 51234,
+          checksum: "abc123",
+          attachment_id: [77, "facture.pdf"]
+        }
+      ]);
+    });
+
+    const handler = getToolHandler(agent, "bookkeeping.search_source_documents");
+    const result = await handler({ date_from: "2026-01-01", date_to: "2026-01-31", tag_ids: [7], owner_id: 2, limit: 80 });
+
+    expect(result.isError).toBeUndefined();
+    expect(fetchCalls[0].body.domain).toEqual([
+      ["tag_ids", "in", [7]],
+      ["owner_id", "=", 2],
+      ["create_date", ">=", "2026-01-01"],
+      ["create_date", "<=", "2026-01-31"]
+    ]);
+    // Tag names cost exactly one extra batched read, never one per document.
+    expect(fetchCalls.length).toBe(2);
+    expect(fetchCalls[1].url).toContain("/documents.tag/read");
+    expect(fetchCalls[1].body.ids).toEqual([7]);
+
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.documents).toEqual([
+      {
+        id: 11,
+        name: "facture.pdf",
+        folder: { id: 3, name: "Invoices" },
+        tags: [{ id: 7, name: "Vendor Bill" }],
+        owner: { id: 2, name: "Mitchell Admin" },
+        res_model: "account.move",
+        res_id: 42,
+        create_date: "2026-01-15 09:00:00",
+        write_date: "2026-01-16 10:00:00",
+        mimetype: "application/pdf",
+        file_size: 51234,
+        checksum: "abc123",
+        attachment: { id: 77, name: "facture.pdf" }
+      }
+    ]);
+    expect(payload.warnings).toEqual([]);
+  });
+
+  test("de-duplicates tag ids across documents into a single documents.tag read", async () => {
+    const agent = makeAgent();
+    const fetchCalls: { url: string; body: any }[] = [];
+    globalThis.fetch = mock(async (url: string, init: any) => {
+      fetchCalls.push({ url, body: JSON.parse(init.body) });
+      if (url.endsWith("/documents.tag/read")) return jsonResponse([{ id: 7, name: "Vendor Bill" }]);
+      return jsonResponse([
+        { id: 1, name: "a.pdf", tag_ids: [7, 8] },
+        { id: 2, name: "b.pdf", tag_ids: [7] }
+      ]);
+    });
+
+    const handler = getToolHandler(agent, "bookkeeping.search_source_documents");
+    const result = await handler({ limit: 80 });
+
+    expect(fetchCalls.length).toBe(2);
+    expect(fetchCalls[1].body.ids).toEqual([7, 8]);
+
+    const payload = JSON.parse(result.content[0].text);
+    // Tag 8 was not returned by the read (deleted / unreadable) — reported by id rather than dropped.
+    expect(payload.documents[0].tags).toEqual([
+      { id: 7, name: "Vendor Bill" },
+      { id: 8, name: "8" }
+    ]);
+    expect(payload.warnings).toEqual([]);
+  });
+
+  test("no tag ids means no documents.tag call at all", async () => {
+    const agent = makeAgent();
+    const fetchCalls: string[] = [];
+    globalThis.fetch = mock(async (url: string) => {
+      fetchCalls.push(url);
+      return jsonResponse([{ id: 1, name: "a.pdf", tag_ids: [] }]);
+    });
+
+    const handler = getToolHandler(agent, "bookkeeping.search_source_documents");
+    const result = await handler({ limit: 80 });
+
+    expect(fetchCalls.length).toBe(1);
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.documents[0].tags).toEqual([]);
+  });
+
+  test("a failing documents.tag read is non-fatal: documents still returned with a warning", async () => {
+    const agent = makeAgent();
+    globalThis.fetch = mock(async (url: string) => {
+      if (url.endsWith("/documents.tag/read")) {
+        return new Response(JSON.stringify({ error: { message: "tag read exploded" } }), { status: 500 });
+      }
+      return jsonResponse([{ id: 1, name: "a.pdf", tag_ids: [7] }]);
+    });
+
+    const handler = getToolHandler(agent, "bookkeeping.search_source_documents");
+    const result = await handler({ limit: 80 });
+
+    expect(result.isError).toBeUndefined();
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.documents[0].tags).toEqual([{ id: 7, name: "7" }]);
+    expect(payload.warnings.length).toBe(1);
+    expect(payload.warnings[0]).toContain("documents.tag names could not be resolved");
+  });
+
+  test("missing Documents module degrades to an empty list plus a warning, not an error", async () => {
+    const agent = makeAgent();
+    globalThis.fetch = mock(
+      async () =>
+        new Response(JSON.stringify({ error: { message: "Object documents.document doesn't exist" } }), { status: 404 })
+    );
+
+    const handler = getToolHandler(agent, "bookkeeping.search_source_documents");
+    const result = await handler({ filename: "facture", limit: 80 });
+
+    expect(result.isError).toBeUndefined();
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload).toEqual({ documents: [], warnings: [DOCUMENTS_UNAVAILABLE_WARNING] });
+  });
+
+  test("ACL denial degrades the same way and never echoes the API key", async () => {
+    const agent = makeAgent();
+    globalThis.fetch = mock(
+      async () =>
+        new Response(JSON.stringify({ error: { message: "You are not allowed to access 'Document' records" } }), { status: 403 })
+    );
+
+    const handler = getToolHandler(agent, "bookkeeping.search_source_documents");
+    const result = await handler({ folder_id: 3, limit: 80 });
+
+    expect(result.isError).toBeUndefined();
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload).toEqual({ documents: [], warnings: [DOCUMENTS_UNAVAILABLE_WARNING] });
+    expect(result.content[0].text).not.toContain("secret-bookkeeping-key");
+  });
+
+  test("a transient Odoo failure still surfaces as a structured error envelope", async () => {
+    const agent = makeAgent();
+    globalThis.fetch = mock(
+      async () => new Response(JSON.stringify({ error: { message: "Too many requests" } }), { status: 429 })
+    );
+
+    const handler = getToolHandler(agent, "bookkeeping.search_source_documents");
+    const result = await handler({ limit: 80 });
+
+    expect(result.isError).toBe(true);
+    const envelope = JSON.parse(result.content[0].text);
+    expect(envelope.error).toBe("rate_limited");
+    expect(envelope.model).toBe("documents.document");
+    expect(envelope.method).toBe("search_read");
+    expect(result.content[0].text).not.toContain("secret-bookkeeping-key");
+  });
+
+  test("is registered read-only and leaves list_source_documents untouched", () => {
+    const agent = makeAgent();
+    const tool = agent._registeredTools["bookkeeping.search_source_documents"];
+
+    expect(tool.annotations.readOnlyHint).toBe(true);
+    expect(tool.annotations.openWorldHint).toBe(false);
+    expect(agent._registeredTools["bookkeeping.list_source_documents"]).toBeDefined();
+    expect(agent._registeredTools["bookkeeping.fetch_attachment"]).toBeDefined();
   });
 });
 

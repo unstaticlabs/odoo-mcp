@@ -605,6 +605,23 @@ describe("endpoint tool surfaces", () => {
     expect(names.has("create_record")).toBe(false);
   });
 
+  test("search_source_documents ships on /mcp and /accounting/mcp but never on /projects/mcp", async () => {
+    const generic = await toolNames(McpAgent);
+    const accounting = await toolNames(AccountingAgent);
+    const projects = await toolNames(ProjectsAgent);
+
+    expect(generic.has("bookkeeping.search_source_documents")).toBe(true);
+    expect(accounting.has("bookkeeping.search_source_documents")).toBe(true);
+    expect(projects.has("bookkeeping.search_source_documents")).toBe(false);
+
+    // The pre-existing attachment tools keep their surfaces unchanged alongside it.
+    for (const names of [generic, accounting]) {
+      expect(names.has("bookkeeping.list_source_documents")).toBe(true);
+      expect(names.has("bookkeeping.fetch_attachment")).toBe(true);
+    }
+    expect(projects.has("bookkeeping.list_source_documents")).toBe(false);
+  });
+
   test("generic /mcp surface is a superset of both domain surfaces", async () => {
     const generic = await toolNames(McpAgent);
     const accounting = await toolNames(AccountingAgent);

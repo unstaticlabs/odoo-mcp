@@ -18,7 +18,16 @@ import {
   type PlanResult
 } from "../safety";
 import type { Props } from "../server";
-import { mcpError, mcpErrorFromException, mcpStructured, requireConnection, zOdooRecords, zRecordContainer, zWarnings } from "./shared";
+import {
+  mcpError,
+  mcpErrorFromException,
+  mcpStructured,
+  redactDetails,
+  requireConnection,
+  zOdooRecords,
+  zRecordContainer,
+  zWarnings
+} from "./shared";
 
 type FieldsMeta = Record<string, CachedFieldMeta>;
 
@@ -1196,6 +1205,148 @@ function tagAttachment(
   return "other";
 }
 
+// ---- Documents repository search (card ODOO2232) ----
+
+/**
+ * `documents.document` fields read by `bookkeeping.search_source_documents`.
+ * `datas` (the base64 payload) is deliberately absent — this tool returns metadata only;
+ * callers fetch bytes through `bookkeeping.fetch_attachment` once they have picked a document.
+ */
+export const DOCUMENT_SEARCH_FIELDS = [
+  "id",
+  "name",
+  "folder_id",
+  "tag_ids",
+  "owner_id",
+  "res_model",
+  "res_id",
+  "create_date",
+  "write_date",
+  "mimetype",
+  "file_size",
+  "checksum",
+  "attachment_id"
+];
+
+/** Stable ordering so repeated calls with the same filters return the same page. */
+const DOCUMENT_SEARCH_ORDER = "create_date desc, id desc";
+
+const DEFAULT_DOCUMENT_SEARCH_LIMIT = 80;
+
+export const DOCUMENTS_UNAVAILABLE_WARNING =
+  "Odoo Documents module (documents.document) is not installed or access was denied by ACLs.";
+
+export interface SearchSourceDocumentsInput {
+  filename?: string;
+  folder_id?: number;
+  tag_ids?: number[];
+  owner_id?: number;
+  date_from?: string;
+  date_to?: string;
+  res_model?: string;
+  res_id?: number;
+  limit?: number;
+}
+
+export interface NormalizedSourceDocument {
+  id: number;
+  name: string;
+  folder: { id: number; name: string } | null;
+  tags: Array<{ id: number; name: string }>;
+  owner: { id: number; name: string } | null;
+  res_model: string | null;
+  res_id: number | null;
+  create_date: string | null;
+  write_date: string | null;
+  mimetype: string | null;
+  file_size: number | null;
+  checksum: string | null;
+  attachment: { id: number; name: string } | null;
+}
+
+/**
+ * Exported for unit testing. Maps the tool's filters onto a `documents.document` search domain.
+ * Leaves are emitted in a fixed order and implicitly ANDed (Odoo's default for a bare leaf list);
+ * omitted filters contribute nothing, so `{}` searches the whole repository.
+ */
+export function buildSourceDocumentDomain(input: SearchSourceDocumentsInput): unknown[] {
+  const domain: unknown[] = [];
+  if (input.filename) domain.push(["name", "ilike", input.filename]);
+  if (input.folder_id !== undefined) domain.push(["folder_id", "=", input.folder_id]);
+  if (input.tag_ids?.length) domain.push(["tag_ids", "in", input.tag_ids]);
+  if (input.owner_id !== undefined) domain.push(["owner_id", "=", input.owner_id]);
+  if (input.date_from) domain.push(["create_date", ">=", input.date_from]);
+  if (input.date_to) domain.push(["create_date", "<=", input.date_to]);
+  if (input.res_model) domain.push(["res_model", "=", input.res_model]);
+  if (input.res_id !== undefined) domain.push(["res_id", "=", input.res_id]);
+  return domain;
+}
+
+/** `[id, name]` many2one tuple, bare id, or `false` → `{ id, name }` or null. */
+function toRelationRef(value: unknown): { id: number; name: string } | null {
+  if (Array.isArray(value) && typeof value[0] === "number") {
+    return { id: value[0], name: typeof value[1] === "string" ? value[1] : String(value[0]) };
+  }
+  if (typeof value === "number") return { id: value, name: String(value) };
+  return null;
+}
+
+function toScalar<T>(value: unknown, guard: (v: unknown) => v is T): T | null {
+  if (value === false || value === null || value === undefined) return null;
+  return guard(value) ? value : null;
+}
+
+const isStringValue = (v: unknown): v is string => typeof v === "string";
+const isNumberValue = (v: unknown): v is number => typeof v === "number";
+
+/**
+ * Exported for unit testing. Projects a raw `documents.document` row onto the normalized shape:
+ * many2ones become `{ id, name }` or null, Odoo's `false` becomes null, and `tag_ids` becomes
+ * `[{ id, name }]` using `tagNames` (ids missing from the lookup fall back to their id as name).
+ */
+export function normalizeSourceDocument(
+  row: Record<string, unknown>,
+  tagNames: Map<number, string> = new Map()
+): NormalizedSourceDocument {
+  const tagIds = Array.isArray(row.tag_ids) ? row.tag_ids.filter(isNumberValue) : [];
+  return {
+    id: row.id as number,
+    name: toScalar(row.name, isStringValue) ?? "",
+    folder: toRelationRef(row.folder_id),
+    tags: tagIds.map((id) => ({ id, name: tagNames.get(id) ?? String(id) })),
+    owner: toRelationRef(row.owner_id),
+    res_model: toScalar(row.res_model, isStringValue),
+    res_id: toScalar(row.res_id, isNumberValue),
+    create_date: toScalar(row.create_date, isStringValue),
+    write_date: toScalar(row.write_date, isStringValue),
+    mimetype: toScalar(row.mimetype, isStringValue),
+    file_size: toScalar(row.file_size, isNumberValue),
+    checksum: toScalar(row.checksum, isStringValue),
+    attachment: toRelationRef(row.attachment_id)
+  };
+}
+
+/**
+ * Exported for unit testing. True when a failure means "this Odoo has no readable Documents app"
+ * — the module is not installed (404 / "doesn't exist") or ACLs/record rules deny the model —
+ * as opposed to a transient or caller-fixable error, which must still surface as a tool error.
+ */
+export function isDocumentsUnavailableError(err: unknown): boolean {
+  if (!(err instanceof OdooError)) return false;
+  if (err.code === "model_or_method_not_found" || err.code === "permission_denied" || err.code === "unauthorized") return true;
+
+  const details = err.details.toLowerCase();
+  return (
+    details.includes("doesn't exist") ||
+    details.includes("does not exist") ||
+    details.includes("accesserror") ||
+    details.includes("not allowed to access") ||
+    details.includes("no access rights")
+  );
+}
+
+const zRelationRef = z.object({ id: z.number().int(), name: z.string() }).nullable();
+
 export function registerSourceDocumentTools(server: McpServer, getProps: () => Props | undefined, queue: OdooQueue) {
   server.registerTool(
     "bookkeeping.list_source_documents",
@@ -1328,6 +1479,110 @@ export function registerSourceDocumentTools(server: McpServer, getProps: () => P
         return mcpStructured({ name: data.name, mimetype: data.mimetype, file_size: data.file_size, base64: data.datas });
       } catch (err) {
         return mcpErrorFromException(err, { model: "ir.attachment", method: "read" });
+      }
+    }
+  );
+
+  server.registerTool(
+    "bookkeeping.search_source_documents",
+    {
+      title: "Search Source Documents",
+      description:
+        "Read-only: search the Odoo Documents repository (documents.document) by filename, folder, tags, owner, " +
+        "upload window, or linked record (res_model/res_id), and return normalized metadata — folder/tag/owner refs, " +
+        "create/write dates, mimetype, file size, checksum, and the backing ir.attachment ref. Never returns file " +
+        "content (use bookkeeping.fetch_attachment with the returned attachment id). When the Documents module is " +
+        "not installed or ACLs deny it, returns an empty list plus a warning instead of failing.",
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+      inputSchema: {
+        filename: z.string().optional().describe("Substring search (case-insensitive) on document name or filename"),
+        folder_id: z.number().int().positive().optional().describe("Filter by Odoo Documents folder ID"),
+        tag_ids: z
+          .array(z.number().int().positive())
+          .optional()
+          .describe("Filter by tag IDs (matches documents containing any of these tags)"),
+        owner_id: z.number().int().positive().optional().describe("Filter by document owner user ID (res.users)"),
+        date_from: z.string().optional().describe("ISO 8601 date/timestamp filter for create_date (>=)"),
+        date_to: z.string().optional().describe("ISO 8601 date/timestamp filter for create_date (<=)"),
+        res_model: z.string().optional().describe("Scope to linked Odoo model (e.g. project.task, account.move)"),
+        res_id: z.number().int().positive().optional().describe("Scope to linked Odoo record ID"),
+        limit: z
+          .number()
+          .int()
+          .min(1)
+          .max(200)
+          .default(DEFAULT_DOCUMENT_SEARCH_LIMIT)
+          .describe("Maximum records to return (default 80, max 200)")
+      },
+      outputSchema: {
+        documents: z
+          .array(
+            z.object({
+              id: z.number().int(),
+              name: z.string(),
+              folder: zRelationRef,
+              tags: z.array(z.object({ id: z.number().int(), name: z.string() })),
+              owner: zRelationRef,
+              res_model: z.string().nullable(),
+              res_id: z.number().int().nullable(),
+              create_date: z.string().nullable(),
+              write_date: z.string().nullable(),
+              mimetype: z.string().nullable(),
+              file_size: z.number().nullable(),
+              checksum: z.string().nullable(),
+              attachment: zRelationRef
+            })
+          )
+          .describe("Normalized documents.document rows, newest first. Binary content (datas) is never included."),
+        warnings: zWarnings.optional()
+      }
+    },
+    async (input) => {
+      try {
+        const conn = requireConnection(getProps());
+        const warnings: string[] = [];
+        const domain = buildSourceDocumentDomain(input);
+
+        let rows: Array<Record<string, unknown>>;
+        try {
+          rows = (await queue.enqueue(conn, "documents.document", "search_read", {
+            domain,
+            fields: DOCUMENT_SEARCH_FIELDS,
+            limit: input.limit ?? DEFAULT_DOCUMENT_SEARCH_LIMIT,
+            order: DOCUMENT_SEARCH_ORDER
+          })) as Array<Record<string, unknown>>;
+        } catch (err) {
+          if (!isDocumentsUnavailableError(err)) throw err;
+          // Details are redacted before they reach the log: Odoo messages can echo request context.
+          console.warn(
+            `documents.document search_read unavailable: ${redactDetails(err instanceof Error ? err.message : String(err))}`
+          );
+          return mcpStructured({ documents: [], warnings: [DOCUMENTS_UNAVAILABLE_WARNING] });
+        }
+
+        // One extra batched read resolves every tag id at once — never one call per document.
+        const tagIds = [...new Set(rows.flatMap((row) => (Array.isArray(row.tag_ids) ? row.tag_ids : [])).filter(isNumberValue))];
+        const tagNames = new Map<number, string>();
+        if (tagIds.length > 0) {
+          try {
+            const tagRows = (await queue.enqueue(conn, "documents.tag", "read", {
+              ids: tagIds,
+              fields: ["id", "name"]
+            })) as Array<Record<string, unknown>>;
+            for (const tag of tagRows) {
+              if (typeof tag.id === "number" && typeof tag.name === "string") tagNames.set(tag.id, tag.name);
+            }
+          } catch (err) {
+            const message = redactDetails(err instanceof Error ? err.message : String(err));
+            console.warn(`documents.tag read failed: ${message}`);
+            warnings.push(`documents.tag names could not be resolved (${message}); tags are reported by id only.`);
+          }
+        }
+
+        const documents = rows.map((row) => normalizeSourceDocument(row, tagNames));
+        return mcpStructured({ documents, warnings });
+      } catch (err) {
+        return mcpErrorFromException(err, { model: "documents.document", method: "search_read" });
       }
     }
   );
