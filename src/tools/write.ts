@@ -1,11 +1,18 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import {
+  buildDuplicateDomain,
+  DUPLICATE_PREFLIGHT_LIMIT,
+  inventoryMasterDataParentField,
+  normalizeParentValue
+} from "../inventory-master-data";
 import { isReversibleLifecycleMethod, type RiskClass } from "../lifecycle-allowlist";
 import { preflightLifecycleCall } from "../lifecycle-gate";
 import type { OdooQueue } from "../odoo-queue";
 import { preflightProjectTaskStateWrite } from "../project-task-state-gate";
 import { classifyOperation, type OperationClassification } from "../policy";
 import {
+  collectPmValueRecords,
   issueConfirmationToken,
   verifyConfirmationToken,
   type WritePlan
@@ -29,7 +36,9 @@ const PM_WRITE_ROUTING_NOTE =
   "Accounting models are action-classified (not prefix-denied): reversible configuration/lifecycle go to Odoo; " +
   "irreversible posting/payment/reconcile/delete/lock require a confirmation_token (preflight → confirm → execute). " +
   "Draft vendor-bill / expense prep helpers: billing.update_draft_expense / billing.configure_draft_vendor_bill. " +
-  "Tax-close / report / return / lock-exception: bookkeeping.plan_safe_write.";
+  "Tax-close / report / return / lock-exception: bookkeeping.plan_safe_write. " +
+  "Inventory: only product.category and stock.location accept create/write (duplicate name+parent is refused); " +
+  "other product.* / stock.* models are not writable here.";
 
 /**
  * Waiting (`04_waiting_normal`) is Odoo-derived from open Blocked By; agents discover only
@@ -146,6 +155,80 @@ async function guardMutation(opts: {
     queue: opts.queue,
     getProps: opts.getProps
   });
+}
+
+/**
+ * Duplicate preflight for the graduated inventory master-data models (`product.category`,
+ * `stock.location`). Creating a second "Consumables" under the same parent is the failure mode these
+ * models actually have: Odoo happily accepts it, and the duplicate is only noticed later, from the
+ * wrong place. Runs on CREATE only — a write targets a record that already exists.
+ *
+ * Costs one `search_read` per create, so it is scoped to the two models and a tight name+parent
+ * domain. Returns a response to send back (duplicate found, or the read itself failed), else null.
+ */
+async function preflightDuplicateMasterData(opts: {
+  model: string;
+  /** Odoo JSON-2 body (`vals_list` for create; `vals` tolerated). */
+  args: Record<string, unknown>;
+  queue: OdooQueue;
+  getProps: () => Props | undefined;
+}): Promise<ReturnType<typeof mcpWriteBlockedError> | ReturnType<typeof mcpErrorFromException> | null> {
+  const model = opts.model.trim();
+  const parentField = inventoryMasterDataParentField(model);
+  if (!parentField) return null;
+
+  for (const record of collectPmValueRecords(opts.args)) {
+    const rawName = record.name;
+    const name = typeof rawName === "string" ? rawName.trim() : "";
+    // No name → nothing to compare. Odoo's own required-field validation refuses it, via the
+    // structured exception envelope; guessing a domain here would only add a second failure mode.
+    if (!name) continue;
+
+    const parentId = normalizeParentValue(record[parentField]);
+    // Unrecognized many2one shape: checking the wrong parent's siblings is worse than not checking.
+    if (parentId === undefined) continue;
+
+    let rows: unknown;
+    try {
+      rows = await opts.queue.enqueue(requireConnection(opts.getProps()), model, "search_read", {
+        domain: buildDuplicateDomain(name, parentField, parentId),
+        fields: ["id", "name", parentField],
+        limit: DUPLICATE_PREFLIGHT_LIMIT
+      });
+    } catch (err) {
+      // Fail closed: an unverified create is exactly the silent duplicate this preflight exists to
+      // prevent. The envelope names the layer that refused the lookup (ACL, schema, …).
+      return mcpErrorFromException(err, { model, method: "search_read" });
+    }
+
+    const existing = (Array.isArray(rows) ? rows : []).filter(
+      (row): row is Record<string, unknown> => !!row && typeof row === "object"
+    );
+    const ids = existing.map((row) => row.id).filter((id): id is number => typeof id === "number");
+    if (ids.length === 0) continue;
+
+    const parentDescription = parentId === false ? "no parent (root)" : `${parentField} ${parentId}`;
+    return mcpWriteBlockedError(
+      { model, method: "create" },
+      {
+        intent: "financial_mutation",
+        reason:
+          `${model} already has a record named "${name}" under ${parentDescription} ` +
+          `(id ${ids.join(", ")}); creating another would duplicate it.`,
+        policy_rule: "duplicate_master_data",
+        risk_class: "reversible_configuration",
+        refusing_layer: "connector_policy",
+        blocked_fields: ["name", parentField],
+        record_ids: ids,
+        next_step:
+          `Use the existing record (id ${ids[0]}) — update it with update_record if it needs changes — ` +
+          `or create under a different ${parentField}, or with a distinct name.`,
+        recoverable: true
+      }
+    );
+  }
+
+  return null;
 }
 
 /** Shared schema fragment so every mutating tool advertises the token identically. */
@@ -362,6 +445,14 @@ export function registerWriteTools(
         getProps
       });
       if (blocked) return blocked;
+
+      const duplicate = await preflightDuplicateMasterData({
+        model,
+        args: { vals_list: [values] },
+        queue,
+        getProps
+      });
+      if (duplicate) return duplicate;
 
       const props = getProps();
       let conn: ReturnType<typeof requireConnection>;
@@ -799,6 +890,15 @@ export function registerWriteTools(
           if (stateBlocked) {
             logWriteContext("call_model_method", model, context);
             return stateBlocked;
+          }
+        }
+
+        // Same duplicate preflight as create_record — the escape hatch must not be the way around it.
+        if (method.trim() === "create") {
+          const duplicate = await preflightDuplicateMasterData({ model, args: body, queue, getProps });
+          if (duplicate) {
+            logWriteContext("call_model_method", model, context);
+            return duplicate;
           }
         }
 

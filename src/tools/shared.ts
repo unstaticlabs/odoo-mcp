@@ -6,7 +6,7 @@ import {
   type AggregationDiagnosisCode,
   type OdooConnection
 } from "../odoo";
-import { classifyRefusingLayer, nextStepForLayer } from "../policy";
+import { classifyRefusingLayer, extractRejectedFields, nextStepForLayer } from "../policy";
 import type { OdooQueue } from "../odoo-queue";
 import { annotateWaitingDependency, isWaitingTaskRecord, normalizeRecords } from "../normalizer";
 import type { Props } from "../server";
@@ -356,6 +356,8 @@ export interface ErrorEnvelope {
   record_ids?: number[];
   odoo_exception?: string;
   partial_write?: boolean;
+  /** Field(s) Odoo's message names as rejected, when confidently extractable (same key as write_blocked). */
+  blocked_fields?: string[];
 }
 
 export type AggregationErrorEnvelope = ErrorEnvelope & {
@@ -574,10 +576,14 @@ export function mcpErrorFromException(
 ) {
   const envelope = buildErrorEnvelope(err, context);
   const refusing_layer = classifyRefusingLayer(err);
+  // A schema / validation refusal that names a field must surface that field: "which field did Odoo
+  // reject" is the whole difference between an actionable refusal and an opaque one.
+  const blocked_fields = err instanceof OdooError ? extractRejectedFields(err.details) : [];
   const enriched: ErrorEnvelope = {
     ...envelope,
     refusing_layer,
     next_step: nextStepForLayer(refusing_layer),
+    ...(blocked_fields.length ? { blocked_fields } : {}),
     ...(err instanceof OdooError ? { odoo_exception: redactDetails(err.details) } : {}),
     ...(context.record_ids?.length ? { record_ids: context.record_ids } : {}),
     ...(context.partial_write != null ? { partial_write: context.partial_write } : {})

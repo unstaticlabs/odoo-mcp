@@ -121,6 +121,12 @@ can only do what their Odoo account permits.
   plus name / `country_id` / contact), then set `partner_id` on the draft bill. Banks,
   receivable/payable property accounts, payment terms, and credit/debit limits stay
   MCP-blocked; partner identity is not a `bookkeeping.plan_safe_write` path.
+- **Inventory master data** — `product.category` and `stock.location` (and *only* those two
+  inventory models) accept `create_record` / `update_record` / `call_model_method` writes under the
+  caller's own Odoo ACLs. A create is refused when a record with the same `name` already exists
+  under the same parent (`parent_id` for categories, `location_id` for locations); the refusal names
+  the existing id. `product.product`, `product.template`, `stock.picking`, `stock.move` and the rest
+  of `product.*` / `stock.*` stay blocked on generic write tools.
 - **Reversible expense lifecycle** — prefer the dedicated tools `billing.reset_expense` /
   `billing.submit_expense` / `billing.approve_expense`. They are the **only** lifecycle path on
   `/accounting/mcp`, which ships no generic write tools. On the full `/mcp` surface the same

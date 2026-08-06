@@ -10,7 +10,7 @@ import { describe, expect, mock, test } from "bun:test";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { OdooError } from "./odoo";
 import type { OdooQueue } from "./odoo-queue";
-import { classifyOperation, classifyRefusingLayer } from "./policy";
+import { classifyOperation, classifyRefusingLayer, extractRejectedFields } from "./policy";
 import { classifyPmWriteIntent, issueConfirmationToken, verifyConfirmationToken } from "./safety";
 import { mcpErrorFromException } from "./tools/shared";
 import { validatedToolHandler } from "./tools/structured-test-util";
@@ -306,5 +306,47 @@ describe("refusal envelope always names layer + next_step", () => {
     const envelope = JSON.parse(result.content[0].text);
     expect(envelope.refusing_layer).toBe("connector_policy");
     expect(envelope.next_step).toBeTruthy();
+  });
+});
+
+describe("extractRejectedFields — refusals name the field Odoo rejected", () => {
+  test("extracts the field from Odoo's common schema/validation messages", () => {
+    const cases: [string, string[]][] = [
+      ["Invalid field 'parent_idd' on model 'product.category'", ["parent_idd"]],
+      ["Unknown field \"usage\" in domain", ["usage"]],
+      ["ValueError: Wrong value for product.category.property_cost_method: 'nope'", ["property_cost_method"]],
+      ['null value in column "name" violates not-null constraint', ["name"]],
+      ["Invalid field stock.location.locationn_id in leaf", ["locationn_id"]]
+    ];
+    for (const [details, expected] of cases) {
+      expect(extractRejectedFields(details)).toEqual(expected);
+    }
+  });
+
+  test("names nothing when the message names no field (never invents one)", () => {
+    expect(extractRejectedFields("Access Denied by Odoo")).toEqual([]);
+    expect(extractRejectedFields("You cannot modify a posted entry.")).toEqual([]);
+    expect(extractRejectedFields("")).toEqual([]);
+  });
+
+  test("prose is not mistaken for a field name (unquoted, unqualified words are ignored)", () => {
+    expect(extractRejectedFields("Invalid field name in domain")).toEqual([]);
+    expect(extractRejectedFields("Unknown field type requested")).toEqual([]);
+  });
+
+  test("mcpErrorFromException surfaces the field alongside layer and next_step", () => {
+    const details = "Invalid field 'parent_idd' on model 'product.category'";
+    const err = new OdooError({
+      message: details,
+      code: "invalid_request",
+      httpStatus: 400,
+      model: "product.category",
+      method: "create",
+      details
+    });
+    const envelope = JSON.parse(mcpErrorFromException(err, { model: "product.category", method: "create" }).content[0].text);
+    expect(envelope.refusing_layer).toBe("schema");
+    expect(envelope.next_step).toBeTruthy();
+    expect(envelope.blocked_fields).toEqual(["parent_idd"]);
   });
 });

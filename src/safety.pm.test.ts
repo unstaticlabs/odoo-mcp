@@ -397,6 +397,61 @@ describe("classifyPmWriteIntent — Waiting is derived, not written", () => {
   });
 });
 
+describe("classifyPmWriteIntent — inventory master data (exact-model graduation)", () => {
+  for (const model of ["product.category", "stock.location"]) {
+    test(`${model} create is allowed as reversible configuration`, () => {
+      const result = classifyPmWriteIntent({
+        model,
+        method: "create",
+        args: { vals_list: [{ name: "Consumables" }] }
+      });
+      expect(result.verdict).toBe("allowed");
+      expect(result.intent).toBe("financial_mutation");
+      expect(result.risk_class).toBe("reversible_configuration");
+      expect(result.policy_rule).toBe("reversible_configuration");
+    });
+
+    test(`${model} write is allowed as reversible configuration`, () => {
+      const result = classifyPmWriteIntent({
+        model,
+        method: "write",
+        args: { ids: [4], vals: { name: "Renamed" } }
+      });
+      expect(result.verdict).toBe("allowed");
+      expect(result.risk_class).toBe("reversible_configuration");
+    });
+
+    test(`${model} unlink still requires confirmation`, () => {
+      const result = classifyPmWriteIntent({ model, method: "unlink", args: { ids: [4] } });
+      expect(result.verdict).toBe("denied");
+      expect(result.policy_rule).toBe("irreversible_confirmation_required");
+      expect(result.risk_class).toBe("destructive");
+      expect(result.next_step).toMatch(/confirmation/i);
+    });
+  }
+
+  test("graduation is by exact model name — sibling product.* / stock.* stay default-denied", () => {
+    for (const model of ["product.product", "product.template", "stock.picking", "stock.move", "stock.quant"]) {
+      const result = classifyPmWriteIntent({
+        model,
+        method: "create",
+        args: { vals_list: [{ name: "Widget" }] }
+      });
+      expect(result).toMatchObject({ verdict: "denied", intent: "disallowed" });
+      expect(result.reason).toContain("not allowlisted");
+    }
+  });
+
+  test("stock.valuation.layer stays action-classified via its existing prefix entry", () => {
+    const result = classifyPmWriteIntent({
+      model: "stock.valuation.layer",
+      method: "write",
+      args: { ids: [1], vals: { description: "adjust" } }
+    });
+    expect(result.verdict).toBe("allowed");
+  });
+});
+
 describe("classifyPmWriteIntent — bookkeeping isolation", () => {
   test("PM_MODEL_ALLOWLIST contains only project.task and mail.activity", () => {
     expect([...PM_MODEL_ALLOWLIST].sort()).toEqual(["mail.activity", "project.task"]);

@@ -1,4 +1,5 @@
 import { type CachedFieldMeta, type TtlCache, getFieldsCached } from "./cache";
+import { INVENTORY_MASTER_DATA_MODELS } from "./inventory-master-data";
 import { type PolicyRule, type RiskClass } from "./lifecycle-allowlist";
 import { PROJECT_TASK_WAITING_STATE } from "./normalizer";
 import { classifyOperation } from "./policy";
@@ -907,7 +908,13 @@ const ACTION_CLASSIFIED_PREFIXES = [
   "contract."
 ] as const;
 
+/**
+ * Exact model names (never prefixes) graduated onto the action-classified path — currently the two
+ * inventory master-data models. `product.` / `stock.` prefixes stay unlisted on purpose: graduating
+ * `product.product` / `stock.picking` / `stock.move` is a separate product decision.
+ */
 function isActionClassifiedModel(model: string): boolean {
+  if (INVENTORY_MASTER_DATA_MODELS.has(model)) return true;
   return ACTION_CLASSIFIED_PREFIXES.some((prefix) => model.startsWith(prefix));
 }
 

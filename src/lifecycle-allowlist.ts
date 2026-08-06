@@ -29,6 +29,9 @@ export type PolicyRule =
   | "lifecycle_guard_failed"
   | "lifecycle_move_type_incompatible"
   | "sensitive_model_method_denied"
+  // A create would add a second master-data record with the same name under the same parent —
+  // see inventory-master-data.ts + the duplicate preflight in tools/write.ts.
+  | "duplicate_master_data"
   // project.task Waiting is computed by Odoo 19 from open Blocked By dependencies — see project-task-state-gate.ts.
   | "waiting_state_forbidden"
   | "in_progress_blocked_by_dependencies";

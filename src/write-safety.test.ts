@@ -12,7 +12,7 @@
  * free-text finance-keyword blocking on allowed PM models.
  */
 import { describe, test, expect } from "bun:test";
-import { assessWriteOperation, isMutatingOdooMethod } from "./write-safety";
+import { annotateActionExecutability, assessWriteOperation, isMutatingOdooMethod } from "./write-safety";
 import { FINANCE_KEYWORD_PM_TEXT } from "./write-safety.fixtures";
 
 /** Ordinary PM notes — no banking/B2C/VAT/deadline vocabulary (negative control for keyword invariance). */
@@ -409,5 +409,56 @@ describe("assessWriteOperation — project.task Waiting state", () => {
       args: { ids: [42], vals: { stage_id: 7 } }
     });
     expect(verdict).toEqual(PM_ALLOWED_VERDICT);
+  });
+});
+
+describe("assessWriteOperation — graduated inventory master data (ODOO2240)", () => {
+  for (const model of ["product.category", "stock.location"]) {
+    test(`${model} create/write reach Odoo as reversible configuration`, () => {
+      const create = assessWriteOperation({
+        model,
+        method: "create",
+        args: { vals_list: [{ name: "Consumables" }] }
+      });
+      const write = assessWriteOperation({ model, method: "write", args: { ids: [4], vals: { name: "Renamed" } } });
+      expect(create.allowed).toBe(true);
+      expect(create.risk_class).toBe("reversible_configuration");
+      expect(write.allowed).toBe(true);
+      expect(write.risk_class).toBe("reversible_configuration");
+    });
+
+    test(`${model} unlink is confirmation-gated, and discovery says so`, () => {
+      const verdict = assessWriteOperation({ model, method: "unlink", args: { ids: [4] } });
+      expect(verdict.allowed).toBe(false);
+      expect(verdict.policy_rule).toBe("irreversible_confirmation_required");
+
+      const ann = annotateActionExecutability(model, "unlink");
+      expect(ann.executable).toBe(true);
+      expect(ann.confirmation_required).toBe(true);
+      expect(ann.alternative).toBe("confirmation_token");
+    });
+
+    test(`${model} create/write are executable in list_model_actions`, () => {
+      for (const method of ["create", "write"]) {
+        const ann = annotateActionExecutability(model, method);
+        expect(ann.executable).toBe(true);
+        expect(ann.confirmation_required).toBeUndefined();
+      }
+    });
+
+    test(`${model} high-risk method names still require confirmation`, () => {
+      const verdict = assessWriteOperation({ model, method: "action_post", args: { ids: [4] } });
+      expect(verdict.allowed).toBe(false);
+      expect(verdict.policy_rule).toBe("irreversible_confirmation_required");
+    });
+  }
+
+  test("sibling inventory models stay non-executable and default-denied", () => {
+    for (const model of ["product.product", "product.template", "stock.picking", "stock.move"]) {
+      const verdict = assessWriteOperation({ model, method: "write", args: { ids: [1], vals: { name: "x" } } });
+      expect(verdict.allowed).toBe(false);
+      expect(verdict.intent).toBe("disallowed");
+      expect(annotateActionExecutability(model, "write").executable).toBe(false);
+    }
   });
 });
