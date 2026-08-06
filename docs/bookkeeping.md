@@ -15,6 +15,7 @@ reads, normalize the shapes, and refuse to write until a human confirms.
 | Create / update **VAT-complete vendor** (`res.partner` identity: `vat`, `siret`, `company_registry`, plus name / `country_id` / contact) | Generic `create_record` / `update_record` — then attach via `billing.configure_draft_vendor_bill` (`partner_id`, draft-only). Partner identity is **not** a `bookkeeping.plan_safe_write` concern; banks / property accounts / credit limits remain MCP-denied |
 | Draft vendor-bill / expense **preparatory** fields (draft-only; expense amount via `total_amount` — `total_amount_currency` is audit-only) | `billing.update_draft_expense`, `billing.configure_draft_vendor_bill` |
 | **Attach / page-split a source PDF** onto a draft vendor bill (composite supplier PDFs) | `billing.attach_source_pdf` (draft `in_invoice` only; extract or copy in-Worker). Not generic `ir.attachment` CRUD |
+| **Link an already-filed Documents file** to an `account.move` / `project.task` (one durable copy, no byte duplication) | `bookkeeping.link_source_document` (write; sets `documents.document` `res_model`/`res_id` only; requires the Documents app). **Not** `billing.attach_source_pdf` (which copies/page-splits PDF **bytes** onto a draft bill) and not the read side — verify links with `bookkeeping.search_source_documents` |
 | Reversible expense / vendor-bill **lifecycle** (reset→edit→resubmit/reapprove) | `call_model_method` on allowlisted methods only (`list_model_actions` → `executable:true`), with required write `context` + compatible record `state`; a transition that leaves `posted` additionally needs `confirmation_token` |
 | Tax-close / report external value / return / lock-exception | `bookkeeping.plan_safe_write` (validate-only + human confirm) |
 | Reversible CRUD / lifecycle on `account.*` / `hr.*` / etc. | Allowed via generic write tools — Odoo ACLs/workflow/locks are authority (not model-prefix denial) |
@@ -372,7 +373,7 @@ Search the Odoo **Documents** repository (`documents.document`) — the app wher
 invoices, receipts and statements are filed — by filename, folder, tags, owner, upload
 window, or linked record. Complements §4.4: `list_source_documents` answers *"what is
 attached to this journal entry?"*, this one answers *"where is that PDF, and is it filed
-against anything?"*.
+against anything?"*. Write side: §4.9 `bookkeeping.link_source_document`.
 
 Metadata only: the binary payload (`datas`) is never read. Take `attachment.id` from a
 result and pass it to §4.6 `fetch_attachment` when you actually need the bytes.
@@ -481,6 +482,10 @@ One supplier PDF often holds several vendors' invoices (the Amazon monthly expor
 canonical case). Each of those invoices becomes its own draft vendor bill, and each bill
 wants its own source document — but `/accounting/mcp` ships no `create_record`, and generic
 `ir.attachment` CRUD is deliberately not the answer.
+
+Prefer this tool when you need a **new** PDF attachment on a draft bill (copy or page-split).
+If the file is already filed in the Documents app and you only need to point it at a
+business record, use §4.9 `bookkeeping.link_source_document` instead (no byte duplication).
 
 `billing.attach_source_pdf` closes that loop: it reads the composite attachment, slices an
 inclusive page range **in the Worker** (via `pdf-lib`, no OCR / rasterization / text
@@ -652,6 +657,77 @@ Supported `operation` values (exact enum in code):
 
 > The token is issued only when `CONFIRMATION_SECRET` is configured **and** the plan is
 > safe. No token ⇒ no authorized write.
+
+### 4.9 `bookkeeping.link_source_document`
+
+**Write-only.** Links an already-filed Odoo Documents file (`documents.document`) to an
+`account.move` or `project.task` by writing **only** the document's related-record fields
+`res_model` / `res_id`. The file stays owned by Documents — stored once, no byte copies, no
+new `ir.attachment`, no mirror records, no ledger state changes.
+
+Use this when the PDF is already in the Documents app and you need a durable link to a
+business record. To copy/page-split PDF **bytes** onto a draft vendor bill, use
+`billing.attach_source_pdf` instead. To find the document id or verify an existing link, use
+§4.5 `bookkeeping.search_source_documents`.
+
+Requires the Documents app; missing/denied access is a hard refusal (not the search tool's
+soft-degrade).
+
+| Field | Type | Required | Default | Notes |
+|---|---|---|---|---|
+| `document_id` | int (positive) | yes | — | `documents.document` id (find via §4.5) |
+| `target_model` | enum | yes | — | `account.move` or `project.task` |
+| `target_id` | int (positive) | yes | — | business record id |
+| `context` | string (1–500) | **yes** | — | audit-only write context, logged server-side; never sent to Odoo |
+
+**Input**
+
+```json
+{
+  "document_id": 11,
+  "target_model": "account.move",
+  "target_id": 42,
+  "context": "filing the scanned invoice against vendor bill 42"
+}
+```
+
+**Output (abridged)**
+
+```json
+{
+  "ok": true,
+  "changed": true,
+  "document": {
+    "id": 11,
+    "name": "facture.pdf",
+    "res_model": "account.move",
+    "res_id": 42
+  },
+  "previous_link": { "res_model": null, "res_id": null },
+  "warnings": [],
+  "metadata": { "odoo_calls": 4, "cache_hits": 0, "duration_seconds": 0.42 }
+}
+```
+
+When the document already pointed at the same record, `changed` is `false` and no write is
+issued (idempotent). Relinking from a different record issues the write and pushes a warning
+naming the previous link, e.g. *"Relinked documents.document 11 from account.move,7 to
+account.move,42; the previous link no longer exists."*
+
+**Documents precondition.** When `documents.document` is missing or ACLs deny it:
+
+```json
+{
+  "error": "documents_app_unavailable",
+  "model": "documents.document",
+  "method": "write",
+  "http_status": null,
+  "details": "Odoo Documents app (documents.document) is required to link source documents, but it is not installed on this database or ACLs deny it. Install/enable the Documents app and grant the connecting user read+write access on documents.document, then retry. No write was made.",
+  "recoverable": false,
+  "refusing_layer": "connector_policy",
+  "next_step": "Install the Odoo Documents app or grant documents.document access, then retry."
+}
+```
 
 ---
 

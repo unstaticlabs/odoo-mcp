@@ -1516,6 +1516,300 @@ describe("bookkeeping.search_source_documents", () => {
   });
 });
 
+describe("bookkeeping.link_source_document", () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  const baseDoc = {
+    id: 11,
+    name: "facture.pdf",
+    folder_id: [3, "Invoices"],
+    tag_ids: [] as number[],
+    owner_id: [2, "Mitchell Admin"],
+    res_model: false as false | string,
+    res_id: false as false | number,
+    create_date: "2026-01-15 09:00:00",
+    write_date: "2026-01-16 10:00:00",
+    mimetype: "application/pdf",
+    file_size: 51234,
+    checksum: "abc123",
+    attachment_id: [77, "facture.pdf"]
+  };
+
+  const baseArgs = {
+    document_id: 11,
+    target_model: "account.move" as const,
+    target_id: 42,
+    context: "filing the scanned invoice against vendor bill 42"
+  };
+
+  function mockLinkFetch(opts: {
+    preDoc?: Record<string, unknown> | null;
+    targetRows?: Array<Record<string, unknown>>;
+    targetModel?: string;
+    writeResult?: unknown;
+    readBack?: Record<string, unknown>;
+  }) {
+    const targetModel = opts.targetModel ?? "account.move";
+    const fetchCalls: { url: string; body: any }[] = [];
+    let docReads = 0;
+    globalThis.fetch = mock(async (url: string, init: any) => {
+      const body = JSON.parse(init.body);
+      fetchCalls.push({ url, body });
+      if (url.endsWith("/documents.document/read")) {
+        docReads += 1;
+        if (docReads === 1) {
+          if (opts.preDoc === null) return jsonResponse([]);
+          return jsonResponse([opts.preDoc ?? { ...baseDoc }]);
+        }
+        return jsonResponse([opts.readBack ?? { ...baseDoc, res_model: "account.move", res_id: 42 }]);
+      }
+      if (url.endsWith(`/${targetModel}/read`)) {
+        return jsonResponse(opts.targetRows ?? [{ id: 42 }]);
+      }
+      if (url.endsWith("/documents.document/write")) return jsonResponse(opts.writeResult ?? true);
+      if (url.endsWith("/documents.tag/read")) return jsonResponse([]);
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+    return fetchCalls;
+  }
+
+  test("happy path writes exactly res_model/res_id and returns re-readable evidence", async () => {
+    const fetchCalls = mockLinkFetch({});
+
+    const handler = getToolHandler(makeAgent(), "bookkeeping.link_source_document");
+    const result = await handler(baseArgs);
+
+    expect(result.isError).toBeUndefined();
+    const write = fetchCalls.find((c) => c.url.endsWith("/documents.document/write"));
+    expect(write).toBeDefined();
+    expect(write!.body).toEqual({ ids: [11], vals: { res_model: "account.move", res_id: 42 } });
+    expect(Object.keys(write!.body.vals).sort()).toEqual(["res_id", "res_model"]);
+    expect(fetchCalls.some((c) => c.url.includes("/ir.attachment/"))).toBe(false);
+
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.ok).toBe(true);
+    expect(payload.changed).toBe(true);
+    expect(payload.document.res_model).toBe("account.move");
+    expect(payload.document.res_id).toBe(42);
+    expect(payload.previous_link).toEqual({ res_model: null, res_id: null });
+    expect(payload.metadata.odoo_calls).toBeGreaterThan(0);
+  });
+
+  test("project.task target reads that model and writes res_model project.task", async () => {
+    const fetchCalls = mockLinkFetch({
+      targetModel: "project.task",
+      targetRows: [{ id: 7 }],
+      readBack: { ...baseDoc, res_model: "project.task", res_id: 7 }
+    });
+
+    const handler = getToolHandler(makeAgent(), "bookkeeping.link_source_document");
+    const result = await handler({
+      document_id: 11,
+      target_model: "project.task",
+      target_id: 7,
+      context: "link scanned brief to task 7"
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(fetchCalls.some((c) => c.url.endsWith("/project.task/read"))).toBe(true);
+    const write = fetchCalls.find((c) => c.url.endsWith("/documents.document/write"));
+    expect(write!.body.vals).toEqual({ res_model: "project.task", res_id: 7 });
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.document.res_model).toBe("project.task");
+    expect(payload.document.res_id).toBe(7);
+  });
+
+  test("idempotent when already linked: no write, changed false, warning", async () => {
+    const fetchCalls = mockLinkFetch({
+      preDoc: { ...baseDoc, res_model: "account.move", res_id: 42 },
+      readBack: { ...baseDoc, res_model: "account.move", res_id: 42 }
+    });
+
+    const handler = getToolHandler(makeAgent(), "bookkeeping.link_source_document");
+    const result = await handler(baseArgs);
+
+    expect(result.isError).toBeUndefined();
+    expect(fetchCalls.some((c) => c.url.endsWith("/documents.document/write"))).toBe(false);
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.ok).toBe(true);
+    expect(payload.changed).toBe(false);
+    expect(payload.warnings.some((w: string) => w.includes("already linked"))).toBe(true);
+  });
+
+  test("relink warning names the previous link", async () => {
+    const fetchCalls = mockLinkFetch({
+      preDoc: { ...baseDoc, res_model: "account.move", res_id: 7 },
+      readBack: { ...baseDoc, res_model: "account.move", res_id: 42 }
+    });
+
+    const handler = getToolHandler(makeAgent(), "bookkeeping.link_source_document");
+    const result = await handler(baseArgs);
+
+    expect(result.isError).toBeUndefined();
+    expect(fetchCalls.some((c) => c.url.endsWith("/documents.document/write"))).toBe(true);
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.previous_link).toEqual({ res_model: "account.move", res_id: 7 });
+    expect(payload.warnings.some((w: string) => w.includes("account.move,7"))).toBe(true);
+  });
+
+  test("missing Documents app returns documents_app_unavailable and never writes", async () => {
+    const fetchCalls: string[] = [];
+    globalThis.fetch = mock(async (url: string) => {
+      fetchCalls.push(url);
+      return new Response(JSON.stringify({ error: { message: "Object documents.document doesn't exist" } }), {
+        status: 404
+      });
+    });
+
+    const handler = getToolHandler(makeAgent(), "bookkeeping.link_source_document");
+    const result = await handler(baseArgs);
+
+    expect(result.isError).toBe(true);
+    const envelope = JSON.parse(result.content[0].text);
+    expect(envelope.error).toBe("documents_app_unavailable");
+    expect(envelope.details).toContain("Documents app");
+    expect(envelope.recoverable).toBe(false);
+    expect(fetchCalls.some((u) => u.endsWith("/documents.document/write"))).toBe(false);
+  });
+
+  test("Documents ACL denial returns the same refusal envelope", async () => {
+    const fetchCalls: string[] = [];
+    globalThis.fetch = mock(async (url: string) => {
+      fetchCalls.push(url);
+      return new Response(JSON.stringify({ error: { message: "You are not allowed to access 'Document' records" } }), {
+        status: 403
+      });
+    });
+
+    const handler = getToolHandler(makeAgent(), "bookkeeping.link_source_document");
+    const result = await handler(baseArgs);
+
+    expect(result.isError).toBe(true);
+    const envelope = JSON.parse(result.content[0].text);
+    expect(envelope.error).toBe("documents_app_unavailable");
+    expect(envelope.ok).toBeUndefined();
+    expect(fetchCalls.some((u) => u.endsWith("/documents.document/write"))).toBe(false);
+  });
+
+  test("invalid target model is rejected by schema and by the in-handler guard", async () => {
+    const agent = makeAgent();
+    const fetchCalls: string[] = [];
+    globalThis.fetch = mock(async (url: string) => {
+      fetchCalls.push(url);
+      return jsonResponse([]);
+    });
+
+    const tool = agent._registeredTools["bookkeeping.link_source_document"];
+    const bad = {
+      document_id: 11,
+      target_model: "res.partner",
+      target_id: 42,
+      context: "should not link"
+    };
+    expect(tool.inputSchema.safeParse(bad).success).toBe(false);
+    expect(fetchCalls.length).toBe(0);
+
+    const result = await tool.handler(bad);
+    expect(result.isError).toBe(true);
+    const envelope = JSON.parse(result.content[0].text);
+    expect(envelope.error).toBe("write_blocked");
+    expect(fetchCalls.length).toBe(0);
+  });
+
+  test("invalid target id is rejected by the schema with zero fetch calls", async () => {
+    const agent = makeAgent();
+    const fetchCalls: string[] = [];
+    globalThis.fetch = mock(async (url: string) => {
+      fetchCalls.push(url);
+      return jsonResponse([]);
+    });
+
+    const shape = agent._registeredTools["bookkeeping.link_source_document"].inputSchema.shape;
+    expect(shape.target_id.safeParse(0).success).toBe(false);
+    expect(shape.target_id.safeParse(-1).success).toBe(false);
+    expect(fetchCalls.length).toBe(0);
+  });
+
+  test("missing or empty context is rejected by the schema with zero fetch calls", async () => {
+    const agent = makeAgent();
+    const fetchCalls: string[] = [];
+    globalThis.fetch = mock(async (url: string) => {
+      fetchCalls.push(url);
+      return jsonResponse([]);
+    });
+
+    const shape = agent._registeredTools["bookkeeping.link_source_document"].inputSchema.shape;
+    expect(shape.context.safeParse("").success).toBe(false);
+    expect(shape.context.safeParse(undefined).success).toBe(false);
+    expect(fetchCalls.length).toBe(0);
+  });
+
+  test("document not found returns document_not_found and never writes", async () => {
+    const fetchCalls: { url: string; body: any }[] = [];
+    globalThis.fetch = mock(async (url: string, init: any) => {
+      fetchCalls.push({ url, body: JSON.parse(init.body) });
+      if (url.endsWith("/documents.document/read")) return jsonResponse([]);
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+
+    const handler = getToolHandler(makeAgent(), "bookkeeping.link_source_document");
+    const result = await handler(baseArgs);
+
+    expect(result.isError).toBe(true);
+    const envelope = JSON.parse(result.content[0].text);
+    expect(envelope.error).toBe("document_not_found");
+    expect(fetchCalls.some((c) => c.url.endsWith("/documents.document/write"))).toBe(false);
+  });
+
+  test("target not found returns target_not_found and never writes", async () => {
+    const fetchCalls: { url: string; body: any }[] = [];
+    globalThis.fetch = mock(async (url: string, init: any) => {
+      fetchCalls.push({ url, body: JSON.parse(init.body) });
+      if (url.endsWith("/documents.document/read")) return jsonResponse([{ ...baseDoc }]);
+      if (url.endsWith("/account.move/read")) return jsonResponse([]);
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+
+    const handler = getToolHandler(makeAgent(), "bookkeeping.link_source_document");
+    const result = await handler(baseArgs);
+
+    expect(result.isError).toBe(true);
+    const envelope = JSON.parse(result.content[0].text);
+    expect(envelope.error).toBe("target_not_found");
+    expect(fetchCalls.some((c) => c.url.endsWith("/documents.document/write"))).toBe(false);
+  });
+
+  test("target-side authz surfaces as an ordinary error, not documents_app_unavailable", async () => {
+    globalThis.fetch = mock(async (url: string) => {
+      if (url.endsWith("/documents.document/read")) return jsonResponse([{ ...baseDoc }]);
+      if (url.endsWith("/account.move/read")) {
+        return new Response(JSON.stringify({ error: { message: "AccessError: You are not allowed to access 'Journal Entry' records" } }), {
+          status: 403
+        });
+      }
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+
+    const handler = getToolHandler(makeAgent(), "bookkeeping.link_source_document");
+    const result = await handler(baseArgs);
+
+    expect(result.isError).toBe(true);
+    const envelope = JSON.parse(result.content[0].text);
+    expect(envelope.model).toBe("account.move");
+    expect(envelope.error).not.toBe("documents_app_unavailable");
+  });
+
+  test("registers as a write tool", () => {
+    const agent = makeAgent();
+    const tool = agent._registeredTools["bookkeeping.link_source_document"];
+    expect(tool.annotations.readOnlyHint).toBe(false);
+    expect(tool.annotations.destructiveHint).toBe(false);
+    expect(tool.annotations.openWorldHint).toBe(false);
+  });
+});
+
 // ---- Fiscal-return preview tests (card ODOO1077) ----
 
 function buildPreviewHandler(queue: OdooQueue, cache: TtlCache) {

@@ -624,6 +624,16 @@ describe("endpoint tool surfaces", () => {
     expect(projects.has("bookkeeping.list_source_documents")).toBe(false);
   });
 
+  test("link_source_document ships on /mcp and /accounting/mcp but never on /projects/mcp", async () => {
+    const generic = await toolNames(McpAgent);
+    const accounting = await toolNames(AccountingAgent);
+    const projects = await toolNames(ProjectsAgent);
+
+    expect(generic.has("bookkeeping.link_source_document")).toBe(true);
+    expect(accounting.has("bookkeeping.link_source_document")).toBe(true);
+    expect(projects.has("bookkeeping.link_source_document")).toBe(false);
+  });
+
   test("generic /mcp surface is a superset of both domain surfaces", async () => {
     const generic = await toolNames(McpAgent);
     const accounting = await toolNames(AccountingAgent);
