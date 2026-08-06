@@ -13,7 +13,7 @@ reads, normalize the shapes, and refuse to write until a human confirms.
 |---|---|
 | Expense population **audit** (account/VAT/payment/attachments/duplicates/totals) | `billing.audit_expenses` (read-only) |
 | Create / update **VAT-complete vendor** (`res.partner` identity: `vat`, `siret`, `company_registry`, plus name / `country_id` / contact) | Generic `create_record` / `update_record` — then attach via `billing.configure_draft_vendor_bill` (`partner_id`, draft-only). Partner identity is **not** a `bookkeeping.plan_safe_write` concern; banks / property accounts / credit limits remain MCP-denied |
-| Draft vendor-bill / expense **preparatory** fields (draft-only) | `billing.update_draft_expense`, `billing.configure_draft_vendor_bill` |
+| Draft vendor-bill / expense **preparatory** fields (draft-only; expense amount via `total_amount` — `total_amount_currency` is audit-only) | `billing.update_draft_expense`, `billing.configure_draft_vendor_bill` |
 | **Attach / page-split a source PDF** onto a draft vendor bill (composite supplier PDFs) | `billing.attach_source_pdf` (draft `in_invoice` only; extract or copy in-Worker). Not generic `ir.attachment` CRUD |
 | Reversible expense / vendor-bill **lifecycle** (reset→edit→resubmit/reapprove) | `call_model_method` on allowlisted methods only (`list_model_actions` → `executable:true`), with required write `context` + compatible record `state`; a transition that leaves `posted` additionally needs `confirmation_token` |
 | Tax-close / report external value / return / lock-exception | `bookkeeping.plan_safe_write` (validate-only + human confirm) |
@@ -28,6 +28,7 @@ Reversible CRUD on `hr.expense` / `hr.expense.sheet` / `account.move` is **not**
    `call_model_method` on an allowlisted reset method (`action_reset` /
    `action_reset_expense_sheets` / vendor-bill `button_draft`) on the full `/mcp` surface.
 2. `billing.update_draft_expense` / `billing.configure_draft_vendor_bill` — draft preparatory fields only.
+   Expense monetary prep uses `total_amount`; `total_amount_currency` is audit-only and refused on write.
    Vendor-bill header prep includes `currency_id` (foreign-currency drafts can be set here rather than
    requiring generic `update_record` on `account.move`).
 3. **Submit / approve** — `billing.submit_expense` / `billing.approve_expense`, or the equivalent

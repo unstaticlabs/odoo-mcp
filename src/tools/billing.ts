@@ -689,19 +689,26 @@ export function registerBillingWriteTools(
   getProps: () => Props | undefined,
   queue: OdooQueue
 ) {
+  const draftExpenseFieldList = [...DRAFT_EXPENSE_FIELDS].join(", ");
+  const draftExpenseValuesDescribe =
+    `Allowlisted preparatory keys only: ${draftExpenseFieldList}. ` +
+    "Use total_amount for monetary corrections; total_amount_currency is audit/read-only and not writable.";
+
   server.registerTool(
     "billing.update_draft_expense",
     {
       title: "Update Draft Expense",
       description:
-        "Write: update preparatory fields on a draft hr.expense only. Refuses non-draft records and " +
-        "lifecycle/payment fields. Does not validate, post, or delete. For reset→edit→resubmit/reapprove " +
-        "hygiene use call_model_method on allowlisted methods (action_reset / action_submit / action_approve) " +
+        "Write: update preparatory fields on a draft hr.expense only. Allowlisted fields: " +
+        `${draftExpenseFieldList}. Use total_amount for monetary corrections; total_amount_currency is ` +
+        "not writable (audit/read-only). Refuses non-draft records and lifecycle/payment fields. " +
+        "Does not validate, post, or delete. For reset→edit→resubmit/reapprove hygiene use " +
+        "call_model_method on allowlisted methods (action_reset / action_submit / action_approve) " +
         "with write context and a compatible record state (see list_model_actions executable:true).",
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
       inputSchema: {
         record_id: z.number().int().positive(),
-        values: z.record(z.string(), z.unknown()),
+        values: z.record(z.string(), z.unknown()).describe(draftExpenseValuesDescribe),
         context: zWriteContext
       },
       outputSchema: {
