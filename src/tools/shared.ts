@@ -1636,8 +1636,8 @@ export async function browseRecords(
       }
 
       return {
-        // Annotated after the size safeguard ran: `_web_url` adds ~60B/row against a 64KB
-        // chat-safety budget, not enough to justify re-planning the page.
+        // Annotated after the size safeguard ran: `_web_url` adds ~60-80B/row, so at the 100-row
+        // ceiling it is ~8KB against the 256KB cap — not enough to justify re-planning the page.
         records: annotateRecordUrls(conn.url, model, rows),
         page,
         field_preset: resolution.preset,
@@ -1662,8 +1662,8 @@ export async function browseRecords(
       warnings.push(plan.warning);
       const page = buildBrowsePageMeta(offset, limit, count, rows.length);
       return {
-        // Annotated after the size safeguard ran: `_web_url` adds ~60B/row against a 64KB
-        // chat-safety budget, not enough to justify re-planning the page.
+        // Annotated after the size safeguard ran: `_web_url` adds ~60-80B/row, so at the 100-row
+        // ceiling it is ~8KB against the 256KB cap — not enough to justify re-planning the page.
         records: annotateRecordUrls(conn.url, model, rows),
         page,
         field_preset: resolution.preset,

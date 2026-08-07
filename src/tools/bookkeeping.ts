@@ -1267,6 +1267,10 @@ export interface NormalizedSourceDocument {
   file_size: number | null;
   checksum: string | null;
   attachment: { id: number; name: string } | null;
+  /** Canonical clickable Odoo URL of the document itself (absent when the origin is unknown). */
+  web_url?: string;
+  /** Canonical clickable Odoo URL of the record the document is filed against, when it is linked. */
+  linked_record_web_url?: string;
 }
 
 /**
@@ -1308,26 +1312,35 @@ const isNumberValue = (v: unknown): v is number => typeof v === "number";
  * Exported for unit testing. Projects a raw `documents.document` row onto the normalized shape:
  * many2ones become `{ id, name }` or null, Odoo's `false` becomes null, and `tag_ids` becomes
  * `[{ id, name }]` using `tagNames` (ids missing from the lookup fall back to their id as name).
+ *
+ * `baseUrl` (the caller's Odoo origin) additionally yields the clickable URLs — omitted when it
+ * is unknown, so the shape never carries a link that would not open.
  */
 export function normalizeSourceDocument(
   row: Record<string, unknown>,
-  tagNames: Map<number, string> = new Map()
+  tagNames: Map<number, string> = new Map(),
+  baseUrl?: string | null
 ): NormalizedSourceDocument {
   const tagIds = Array.isArray(row.tag_ids) ? row.tag_ids.filter(isNumberValue) : [];
+  const resModel = toScalar(row.res_model, isStringValue);
+  const webUrl = buildRecordUrl(baseUrl, "documents.document", row.id);
+  const linkedUrl = resModel ? buildRecordUrl(baseUrl, resModel, row.res_id) : null;
   return {
     id: row.id as number,
     name: toScalar(row.name, isStringValue) ?? "",
     folder: toRelationRef(row.folder_id),
     tags: tagIds.map((id) => ({ id, name: tagNames.get(id) ?? String(id) })),
     owner: toRelationRef(row.owner_id),
-    res_model: toScalar(row.res_model, isStringValue),
+    res_model: resModel,
     res_id: toScalar(row.res_id, isNumberValue),
     create_date: toScalar(row.create_date, isStringValue),
     write_date: toScalar(row.write_date, isStringValue),
     mimetype: toScalar(row.mimetype, isStringValue),
     file_size: toScalar(row.file_size, isNumberValue),
     checksum: toScalar(row.checksum, isStringValue),
-    attachment: toRelationRef(row.attachment_id)
+    attachment: toRelationRef(row.attachment_id),
+    ...(webUrl ? { web_url: webUrl } : {}),
+    ...(linkedUrl ? { linked_record_web_url: linkedUrl } : {})
   };
 }
 
@@ -1388,7 +1401,15 @@ const zSourceDocument = z.object({
   mimetype: z.string().nullable(),
   file_size: z.number().nullable(),
   checksum: z.string().nullable(),
-  attachment: zRelationRef
+  attachment: zRelationRef,
+  web_url: z
+    .string()
+    .optional()
+    .describe("Canonical clickable Odoo URL of the document — cite it as [document name](web_url)"),
+  linked_record_web_url: z
+    .string()
+    .optional()
+    .describe("Canonical clickable Odoo URL of the record it is filed against (res_model/res_id)")
 });
 
 /** Business records that `bookkeeping.link_source_document` may point a document at. */
@@ -1652,7 +1673,7 @@ export function registerSourceDocumentTools(server: McpServer, getProps: () => P
           }
         }
 
-        const documents = rows.map((row) => normalizeSourceDocument(row, tagNames));
+        const documents = rows.map((row) => normalizeSourceDocument(row, tagNames, conn.url));
         return mcpStructured({ documents, warnings });
       } catch (err) {
         return mcpErrorFromException(err, { model: "documents.document", method: "search_read" });
@@ -1753,11 +1774,13 @@ export function registerSourceDocumentTools(server: McpServer, getProps: () => P
         }
 
         // TARGET EXISTENCE CHECK — dangling-link prevention; target-side ACL stays an ordinary error.
+        // The extra field is the one that picks the target's route variant (bill vs entry, which
+        // project a task hangs under), so the returned link costs no additional Odoo call.
         let targetRows: Array<Record<string, unknown>>;
         try {
           targetRows = (await queue.enqueue(conn, target_model, "read", {
             ids: [target_id],
-            fields: ["id"]
+            fields: ["id", target_model === "account.move" ? "move_type" : "project_id"]
           })) as Array<Record<string, unknown>>;
         } catch (err) {
           return mcpErrorFromException(err, { model: target_model, method: "read" });
@@ -1840,13 +1863,12 @@ export function registerSourceDocumentTools(server: McpServer, getProps: () => P
           }
         }
 
-        const document = normalizeSourceDocument(readBackRow, tagNames);
+        const document = normalizeSourceDocument(readBackRow, tagNames, conn.url);
         const { odoo_calls, total_duration_ms } = queue.delta(before);
         const metadata = { odoo_calls, cache_hits: 0, duration_seconds: total_duration_ms / 1000 };
 
         const document_web_url = buildRecordUrl(conn.url, "documents.document", document_id);
-        // The target was only read for `id`, so account.move links land on Journal Entries.
-        const target_web_url = buildRecordUrl(conn.url, target_model, target_id);
+        const target_web_url = buildRecordUrl(conn.url, target_model, target_id, targetRows[0]);
 
         return mcpStructured({
           ok: true,

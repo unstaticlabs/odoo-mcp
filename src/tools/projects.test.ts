@@ -342,9 +342,13 @@ describe("projects read tools", () => {
     });
     const { handler } = buildProjectsServer(queue);
 
-    await handler("projects.list_stages")({ project_id: 4 });
+    const result = await handler("projects.list_stages")({ project_id: 4 });
 
     expect(calls[0].args.domain).toEqual([["project_ids", "in", [4]]]);
     expect(calls[0].args.order).toBe("sequence, id");
+    // Stages are linkable too — Task Stages is a real Odoo action path (ODOO2272).
+    expect(result.structuredContent?.records).toEqual([
+      { id: 1, name: "Inbox", _web_url: "http://example.com/odoo/task-stages/1" }
+    ]);
   });
 });

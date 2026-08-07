@@ -34,6 +34,16 @@ export const RECORD_URL_FIELD = "_web_url";
 /**
  * Verified `ir.actions.act_window.path` per model — the list/breadcrumb context a record is
  * normally reached through. Models absent here use the generic `/odoo/<model>/<id>` route.
+ *
+ * Every entry below was read off Odoo Production (saas~19.2) rather than guessed. Re-verify
+ * after an Odoo upgrade with one read:
+ *
+ *   search_records({ model: "ir.actions.act_window",
+ *                    domain: [["path", "!=", false], ["res_model", "in", [...models]]],
+ *                    fields: ["res_model", "path", "name"] })
+ *
+ * A path that disappears is not a broken link: dropping the model from this map falls back to
+ * the generic model route, which the router accepts for every model.
  */
 export const MODEL_ACTION_PATHS: Readonly<Record<string, string>> = {
   "project.project": "project",
@@ -165,6 +175,9 @@ export function buildRecordUrl(
   return `${origin}/odoo/${recordRoutePath(model.trim(), id, record)}`;
 }
 
+/** A record after annotation: its own fields plus the canonical URL, absent when not derivable. */
+export type WithRecordUrl<T> = T & { [RECORD_URL_FIELD]?: string };
+
 /**
  * Attach `_web_url` to a record read from Odoo. Returns the record unchanged when no URL is
  * derivable (unknown origin, or a row without an `id` — e.g. a read_group bucket).
@@ -173,10 +186,10 @@ export function annotateRecordUrl<T extends Record<string, unknown>>(
   baseUrl: string | undefined | null,
   model: string,
   record: T
-): T {
-  if (record == null || typeof record !== "object") return record;
+): WithRecordUrl<T> {
+  if (record == null || typeof record !== "object") return record as WithRecordUrl<T>;
   const url = buildRecordUrl(baseUrl, model, record.id, record);
-  return url == null ? record : ({ ...record, [RECORD_URL_FIELD]: url } as T);
+  return url == null ? (record as WithRecordUrl<T>) : { ...record, [RECORD_URL_FIELD]: url };
 }
 
 /** {@link annotateRecordUrl} over a result set. Non-object rows pass through untouched. */
@@ -184,7 +197,7 @@ export function annotateRecordUrls<T extends Record<string, unknown>>(
   baseUrl: string | undefined | null,
   model: string,
   records: T[]
-): T[] {
-  if (!Array.isArray(records)) return records;
+): WithRecordUrl<T>[] {
+  if (!Array.isArray(records)) return records as WithRecordUrl<T>[];
   return records.map((row) => annotateRecordUrl(baseUrl, model, row));
 }

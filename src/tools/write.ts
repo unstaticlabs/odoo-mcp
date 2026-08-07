@@ -697,6 +697,7 @@ export function registerWriteTools(
         "Write: update multiple Odoo records of one model in one call. Each `updates` entry targets one " +
         "record_id with its own `values`. x2many fields need Odoo command tuples (e.g. [[6,0,ids]], [[4,id]], [[3,id]]). " +
         "Fail-fast: a mid-loop error aborts remaining updates; already-applied writes are NOT rolled back." +
+        RECORD_LINK_WRITE_NOTE +
         PM_WRITE_ROUTING_NOTE +
         TASK_WAITING_DEFERRAL_NOTE +
         CHATTER_VS_FIELDS_NOTE,
@@ -716,7 +717,16 @@ export function registerWriteTools(
       },
       outputSchema: {
         results: z
-          .array(z.object({ record_id: z.number().int(), ok: z.boolean() }))
+          .array(
+            z.object({
+              record_id: z.number().int(),
+              ok: z.boolean(),
+              web_url: z
+                .string()
+                .optional()
+                .describe("Canonical clickable Odoo URL of the updated record — surface it as [record name](web_url)")
+            })
+          )
           .describe("One entry per applied update, in input order (fail-fast: absent entries were not attempted)")
       }
     },
@@ -744,10 +754,12 @@ export function registerWriteTools(
 
       try {
         const conn = requireConnection(getProps());
-        const results: { record_id: number; ok: boolean }[] = [];
+        const results: { record_id: number; ok: boolean; web_url?: string }[] = [];
         for (const u of updates) {
           await queue.enqueue(conn, model, "write", { ids: [u.record_id], vals: u.values });
-          results.push({ record_id: u.record_id, ok: true });
+          // Same caveat as update_record: only the written `values` inform the route variant.
+          const webUrl = buildRecordUrl(conn.url, model, u.record_id, u.values);
+          results.push({ record_id: u.record_id, ok: true, ...(webUrl ? { web_url: webUrl } : {}) });
         }
         return mcpStructured({ results }, JSON.stringify(results, null, 2));
       } catch (err) {

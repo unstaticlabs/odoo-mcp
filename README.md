@@ -102,6 +102,99 @@ can only do what their Odoo account permits.
 > [docs/bookkeeping.md](docs/bookkeeping.md) for the snapshot-first workflow, rate-limit and
 > cache model, full tool reference, and worked CA12 walkthroughs.
 
+### Record links — surface URLs, not bare ids
+
+**Whenever you mention an Odoo record to a human, render it as a markdown link to that
+record's own Odoo page, labelled with the record's human-readable name or reference.** The
+numeric id is a *secondary* technical identifier: keep it for tool arguments, JSON payloads
+and debugging notes. On its own it just makes the reader go hunting in the Odoo UI.
+
+**Correct**
+
+> Filed [2025 EU foreign-VAT refunds — file by 30 Sep 2026](https://odoo.unstaticlabs.com/odoo/project/17/tasks/2266)
+> against [BILL/2026/07/0004 — Acme SARL](https://odoo.unstaticlabs.com/odoo/vendor-bills/9921),
+> matched to [bank line 14 Jul 2026 · −1 240,00 €](https://odoo.unstaticlabs.com/odoo/account.bank.statement.line/9844)
+> for [Acme SARL](https://odoo.unstaticlabs.com/odoo/contacts/512).
+
+**Incorrect**
+
+> Filed task 2266 against bill 9921, matched to move 9844 for partner 512.
+
+#### Where the URL comes from — never assemble it yourself
+
+The server derives every URL from the caller's own Odoo origin plus the record's model
+([`src/tools/record-urls.ts`](src/tools/record-urls.ts)) and hands it back in the response.
+Do **not** guess a UI route from an id, and do not hand-build one from a route you saw once:
+
+| Response shape | Field | Tools |
+|---|---|---|
+| Record rows | `_web_url` on every row | `search_records`, `search_records_compact`, `browse_records`, `batch_read`, `projects.list_projects`, `projects.list_tasks`, `projects.list_stages` |
+| Single record | `_web_url` on the record | `get_record`, `expand_record` (`record`), `projects.get_task` |
+| Write result | `web_url` | `create_record`, `update_record`, `projects.create_task`, `billing.update_draft_expense`, `billing.configure_draft_vendor_bill` |
+| Per-entry write result | `web_url` on each `results[]` entry | `batch_update` |
+| Domain rows | `web_url` per row | `billing.audit_expenses` |
+| Documents | `web_url` (+ `linked_record_web_url` when filed against a record) | `bookkeeping.search_source_documents` |
+| Two-sided link | `document_web_url` + `target_web_url` | `bookkeeping.link_source_document` |
+| Feedback card | `url` | `feedback.submit` |
+
+Tools that take an id you already have (`post_message`, `batch_post_message`,
+`delete_record`, `call_model_method`) return no link of their own — read the record first, or
+build the link from the route map below via the same helper.
+
+#### Route map (verified against Odoo 19.2 production routing)
+
+Every route below is an `ir.actions.act_window.path` that exists on Odoo Production
+(`https://odoo.unstaticlabs.com`), so the URL shape is
+`{your Odoo origin}/odoo/{route}/{id}`:
+
+| Model | Route | Example |
+|---|---|---|
+| `project.task` (in a project) | `project/{project_id}/tasks/{id}` | `…/odoo/project/17/tasks/2266` |
+| `project.task` (project unknown / private to-do) | `all-tasks/{id}` | `…/odoo/all-tasks/2266` |
+| `project.project` | `project/{id}` | `…/odoo/project/17` |
+| `project.task.type` | `task-stages/{id}` | `…/odoo/task-stages/9` |
+| `account.move` — `in_invoice` / `in_refund` | `vendor-bills` / `vendor-refunds` | `…/odoo/vendor-bills/9921` |
+| `account.move` — `out_invoice` / `out_refund` | `customer-invoices` / `credit-notes` | `…/odoo/customer-invoices/9930` |
+| `account.move` — `entry` (or `move_type` unknown) | `entries/{id}` | `…/odoo/entries/9844` |
+| `account.move.line` | `items/{id}` | `…/odoo/items/77` |
+| `account.payment` — `inbound` / `outbound` | `customer-payments` / `vendor-payments` | `…/odoo/vendor-payments/55` |
+| `account.bank.statement.line` | `account.bank.statement.line/{id}` | `…/odoo/account.bank.statement.line/431` |
+| `hr.expense` | `expenses/{id}` | `…/odoo/expenses/394` |
+| `res.partner` | `contacts/{id}` | `…/odoo/contacts/512` |
+| `res.users` / `hr.employee` / `res.company` | `users` / `employees` / `companies` | `…/odoo/employees/31` |
+| `account.account` / `account.tax` / `account.payment.term` | `accounts` / `taxes` / `payment-terms` | `…/odoo/accounts/1204` |
+| `account.analytic.account` / `account.analytic.line` | `analytic-accounts` / `analytic-items` | `…/odoo/analytic-accounts/8` |
+| `account.asset` / `account.return` | `assets` / `tax-return` | `…/odoo/tax-return/12` |
+| `product.template` / `product.category` | `products` / `product-categories` | `…/odoo/product-categories/7` |
+| `purchase.order` / `sale.order` / `stock.lot` | `purchase-orders` / `orders` / `lots` | `…/odoo/purchase-orders/610` |
+| `stock.picking` — `incoming` / `outgoing` / `internal` | `receipts` / `deliveries` / `internal` | `…/odoo/receipts/60` |
+| `documents.document` / `knowledge.article` | `documents` / `articles` | `…/odoo/documents/11` |
+| **anything else** | `{model.name}/{id}` | `…/odoo/x.custom.model/9` |
+
+The last row is the generic model route Odoo's own web client emits for record mentions, so
+**every** model has a working link — the helper never returns "no route". (A model name
+without a dot takes an `m-` prefix, e.g. `…/odoo/m-board/3`, because the router would
+otherwise read the segment as an action path.)
+
+#### Getting the *precise* route
+
+Some models route by a field, and the server can only use what your read actually returned:
+
+| Model | Field to request | Without it |
+|---|---|---|
+| `project.task` | `project_id` | falls back to `all-tasks/{id}` (still opens the task) |
+| `account.move` | `move_type` | falls back to `entries/{id}` (Journal Entries holds every move) |
+| `account.payment` | `payment_type` | falls back to `account.payment/{id}` |
+| `stock.picking` | `picking_type_code` | falls back to `stock.picking/{id}` |
+
+The curated presets already include `project_id` for `project.task`, so ordinary task reads
+get the nested project route for free. A **sub-task** links through *its own* `project_id`,
+never through its `parent_id` — the parent task is a separate record with its own link.
+
+Every fallback still opens the right record; it only loses the list/breadcrumb context. When
+a response carries **no** URL at all (the server could not determine the Odoo origin), say so
+and identify the record by name plus `model,id` — do not invent a route.
+
 ### Project-management writes vs bookkeeping vs billing
 
 - **PM task notes and history → the chatter.** Use `post_message` / `batch_post_message`
@@ -273,6 +366,9 @@ For `search_records`, `get_record`, `batch_read`, `projects.list_tasks`, and `pr
 
 Tool responses include structured field reporting alongside the records:
 
+- `_web_url` — on every returned record: its canonical clickable Odoo URL (see
+  [Record links](#record-links--surface-urls-not-bare-ids)). Server-added, not an Odoo field,
+  so it never appears in `returned_fields` and never needs requesting
 - `returned_fields` — fields present in the Odoo rows
 - `omitted_fields` — `{ field, reason }` where `reason` is `absent-from-rows` or `unknown-field` (the latter only when a cached `fields_get` result is already available)
 - `warnings` — when an **explicitly requested** field is omitted
@@ -389,8 +485,8 @@ automatically by the SDK) and read them with `resources/read`.
 
 | URI template | Description | Example |
 |---|---|---|
-| `odoo://{model}/record/{id}` | Fetch a single record by id | `odoo://project.task/record/42` |
-| `odoo://{model}/search` | List records for a model. Optional `?domain=<JSON array>&fields=<comma-separated>&limit=<1-100>` query params (defaults: `domain=[]`, smart fields, `limit=10`) | `odoo://project.task/search?domain=%5B%5B%22active%22%2C%22%3D%22%2Ctrue%5D%5D&limit=5` |
+| `odoo://{model}/record/{id}` | Fetch a single record by id (carries `_web_url`) | `odoo://project.task/record/42` |
+| `odoo://{model}/search` | List records for a model (each carries `_web_url`). Optional `?domain=<JSON array>&fields=<comma-separated>&limit=<1-100>` query params (defaults: `domain=[]`, smart fields, `limit=10`) | `odoo://project.task/search?domain=%5B%5B%22active%22%2C%22%3D%22%2Ctrue%5D%5D&limit=5` |
 | `odoo://{model}/count` | Count records matching a domain via `search_count`. Optional `?domain=<JSON array>` query param (default `[]`) | `odoo://project.task/count?domain=%5B%5B%22active%22%2C%22%3D%22%2Ctrue%5D%5D` |
 | `odoo://{model}/fields` | Field schema (name, type, string label) for a model | `odoo://project.task/fields` |
 

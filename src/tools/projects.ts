@@ -239,7 +239,8 @@ export function registerProjectsTools(
       title: "List Project Stages",
       description:
         "Read-only: list project.task.type stages for a project (kanban columns). " +
-        "Pass project_id to scope to that project's stages.",
+        "Pass project_id to scope to that project's stages." +
+        RECORD_LINK_NOTE,
       annotations: { readOnlyHint: true, openWorldHint: false },
       inputSchema: {
         project_id: z.number().int().positive().optional(),
@@ -248,7 +249,7 @@ export function registerProjectsTools(
         limit: z.number().int().min(1).max(100).default(100)
       },
       outputSchema: {
-        records: zOdooRecords.describe("Matching project.task.type stage records"),
+        records: zOdooRecords.describe("Matching project.task.type stage records, each with `_web_url`"),
         ...zFieldsReport
       }
     },
@@ -258,9 +259,10 @@ export function registerProjectsTools(
         const baseDomain = domain ?? [];
         const effectiveDomain =
           project_id != null ? [["project_ids", "in", [project_id]], ...baseDomain] : baseDomain;
+        const conn = requireConnection(getProps());
         const { rows, fieldsReport } = await searchRecords(
           queue,
-          requireConnection(getProps()),
+          conn,
           "project.task.type",
           effectiveDomain,
           fields ?? DEFAULT_STAGE_FIELDS,
@@ -270,14 +272,15 @@ export function registerProjectsTools(
           cache,
           warnings
         );
+        const records = annotateRecordUrls(conn.url, "project.task.type", rows as Record<string, unknown>[]);
         return mcpStructured(
           {
-            records: rows as Record<string, unknown>[],
+            records,
             returned_fields: fieldsReport.returned_fields,
             omitted_fields: fieldsReport.omitted_fields,
             warnings
           },
-          JSON.stringify(rows, null, 2)
+          JSON.stringify(records, null, 2)
         );
       } catch (err) {
         return mcpErrorFromException(err, { model: "project.task.type", method: "search_read" });
