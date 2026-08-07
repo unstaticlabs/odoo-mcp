@@ -429,8 +429,10 @@ ChatGPT's connector UI can't set custom headers, so the Worker ships an OAuth 2.
    search `project.task`).
 
 After any tool-surface change (`SERVER_VERSION` bump), ChatGPT keeps serving its cached
-tool list — open the connector's settings and refresh it so the new/removed tools appear;
-new connectors are unaffected.
+tool list — open the connector's settings and refresh it so the new/removed tools and
+updated parameters (e.g. top-level `confirmation_token` on irreversible writes) appear;
+new connectors are unaffected. Irreversible ledger ops need the preflight → confirm →
+retry round-trip documented in [`docs/bookkeeping.md`](docs/bookkeeping.md) (“The fence”).
 
 Your credentials are stored end-to-end encrypted in Workers KV and resolved per request —
 tools behave exactly as on the header path, limited by your own Odoo permissions. Token

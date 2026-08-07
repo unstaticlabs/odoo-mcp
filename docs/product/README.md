@@ -26,8 +26,14 @@ AI clients and projects can point at.
 - **ChatGPT** (e.g. Valentin's use) — via ChatGPT's remote-connector support.
   See the ChatGPT caveat in [`auth.md`](./auth.md) — its connector auth may not
   pass a static API-key header, which is the one path that could later need a
-  thin OAuth shim.
+  thin OAuth shim. After a `SERVER_VERSION` bump, refresh the connector's tool
+  list so new/updated parameters (including top-level `confirmation_token`) appear.
 - **Other projects/apps** — anything that speaks MCP and needs Odoo data.
+
+Irreversible ledger writes (post / pay / reconcile / delete / lock) on `/mcp` use a
+two-phase fence: call without `confirmation_token` → `confirmation_required` + token →
+retry with the **top-level** `confirmation_token` argument. See
+[`bookkeeping.md`](../bookkeeping.md) (“The fence” / Caller recipe).
 
 ## The domains
 

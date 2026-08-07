@@ -62,11 +62,24 @@ same policy table ([`src/lifecycle-allowlist.ts`](../src/lifecycle-allowlist.ts)
   `cancel` there is no live entry to remove, so that direction executes in one call.
 
 **Every** mutating write tool enforces this — `create_record`, `update_record`, `batch_update`,
-`delete_record` and `call_model_method` all route through one guard, and all accept
-`confirmation_token`. `batch_update` validates the whole batch before applying any update, so a
-policy refusal can never cause a partial write.
+`delete_record` and `call_model_method` all route through one guard, and all accept a **top-level**
+`confirmation_token` MCP argument. `batch_update` validates the whole batch before applying any
+update, so a policy refusal can never cause a partial write.
 `bookkeeping.plan_safe_write` is only for its four tax/lock operations (never post/pay). There is
 **no** end-to-end billing orchestrator tool.
+
+**Caller recipe (preflight → confirm → retry):**
+
+1. Call `call_model_method` (or `create_record` / `update_record` / `batch_update` / `delete_record`)
+   **without** `confirmation_token`.
+2. On `error: confirmation_required`, read `confirmation_token` from the envelope.
+3. Retry the **same** tool call with the **top-level** `confirmation_token` set (identical
+   model/method/ids/kwargs or values); expect execute plus optional `verification`.
+4. Do **not** rely on putting the token only inside `kwargs` — that is not the supported path.
+   For compatibility, `call_model_method` **lifts** a string `kwargs.confirmation_token` into the
+   top-level confirmation path and **strips** it before the HMAC plan and before Odoo JSON-2; if
+   top-level and kwargs tokens both exist and differ, the call is refused. Prefer the published
+   top-level argument so schema-driven clients (ChatGPT) see the field on the tool schema.
 
 Dedicated expense lifecycle tools (also the only lifecycle path on `/accounting/mcp`):
 

@@ -236,9 +236,65 @@ const zConfirmationToken = z
   .string()
   .optional()
   .describe(
-    "Confirmation token from a previous preflight response. Required only for irreversible operations " +
-      "(posting, paying, reconciling, deleting, lock-boundary writes); omit it to receive the preflight."
+    "Top-level MCP argument (not under kwargs/values). Omit for preflight of irreversible ops " +
+      "(posting, paying, reconciling, deleting, lock-boundary writes). On confirmation_required, retry the " +
+      "identical model/method/ids/kwargs (or values) plus this field. Do not put the token inside kwargs or values."
   );
+
+/**
+ * Lift `kwargs.confirmation_token` into the top-level confirmation path and strip it so it never
+ * reaches Odoo JSON-2 or the HMAC plan. Prefer the published top-level arg; kwargs is accepted as
+ * a compatibility lift for schema-driven clients that stuffed the token under kwargs.
+ */
+export function resolveConfirmationFromKwargs(opts: {
+  model: string;
+  method: string;
+  ids?: number[];
+  confirmation_token?: string;
+  kwargs: Record<string, unknown>;
+}):
+  | { ok: true; confirmation_token?: string; kwargs: Record<string, unknown> }
+  | { ok: false; error: ReturnType<typeof mcpWriteBlockedError> } {
+  const kwargs = { ...opts.kwargs };
+  const hadKwargsKey = Object.prototype.hasOwnProperty.call(kwargs, "confirmation_token");
+  const rawFromKwargs = kwargs.confirmation_token;
+  if (hadKwargsKey) delete kwargs.confirmation_token;
+
+  const kwargsToken =
+    typeof rawFromKwargs === "string" && rawFromKwargs.trim() ? rawFromKwargs.trim() : undefined;
+  const topLevel =
+    typeof opts.confirmation_token === "string" && opts.confirmation_token.trim()
+      ? opts.confirmation_token.trim()
+      : undefined;
+
+  if (topLevel && kwargsToken && topLevel !== kwargsToken) {
+    return {
+      ok: false,
+      error: mcpWriteBlockedError(
+        { model: opts.model, method: opts.method },
+        {
+          intent: "financial_mutation",
+          reason:
+            "confirmation_token was supplied both as a top-level argument and inside kwargs with different values. " +
+            "Use only the top-level confirmation_token MCP argument.",
+          policy_rule: "irreversible_confirmation_invalid",
+          risk_class: "irreversible_posting",
+          refusing_layer: "connector_policy",
+          next_step:
+            "Pass confirmation_token only as a top-level tool argument (omit it from kwargs), matching the preflight token.",
+          recoverable: true,
+          record_ids: opts.ids
+        }
+      )
+    };
+  }
+
+  return {
+    ok: true,
+    confirmation_token: topLevel ?? kwargsToken,
+    kwargs
+  };
+}
 
 /** Canonical plan signed into the irreversible confirmation token. */
 export function buildIrreversibleWritePlan(input: {
@@ -329,7 +385,7 @@ async function handleIrreversibleConfirmation(opts: {
       risk_class: classification.risk_class,
       next_step:
         confirmation_token != null
-          ? "Retry the same call with confirmation_token to execute, then verify the result in Odoo."
+          ? "Retry the same call with top-level confirmation_token (not under kwargs) to execute, then verify the result in Odoo."
           : "CONFIRMATION_SECRET is not configured; irreversible execute is unavailable. Configure the secret or use the Odoo UI.",
       confirmation_token,
       record_ids: opts.ids,
@@ -367,7 +423,8 @@ async function handleIrreversibleConfirmation(opts: {
         policy_rule: "irreversible_confirmation_invalid",
         risk_class: classification.risk_class,
         refusing_layer: "connector_policy",
-        next_step: "Call again without confirmation_token to get a new preflight token, then retry with that token.",
+        next_step:
+          "Call again without confirmation_token to get a new preflight token, then retry with that token as a top-level argument (not under kwargs).",
         recoverable: true,
         record_ids: opts.ids
       }
@@ -731,17 +788,15 @@ export function registerWriteTools(
     {
       title: "Delete Record",
       description:
-        "Write: delete a single Odoo record by id. Destructive — requires confirmation_token (call once without token to preflight)." +
+        "Write: delete a single Odoo record by id. Destructive — irreversible deletes return confirmation_required + confirmation_token; " +
+        "retry with the top-level confirmation_token argument (omit token for preflight)." +
         PM_WRITE_ROUTING_NOTE,
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
       inputSchema: {
         model: z.string().min(1),
         record_id: z.number().int().positive(),
         context: zWriteContext,
-        confirmation_token: z
-          .string()
-          .optional()
-          .describe("HMAC token from a prior unconfirmed delete_record preflight for this exact model/record_id")
+        confirmation_token: zConfirmationToken
       },
       outputSchema: {
         ok: z.boolean().describe("True when the delete succeeded"),
@@ -784,7 +839,8 @@ export function registerWriteTools(
       description:
         "Escape hatch: call an arbitrary Odoo model method. Odoo's JSON-2 API has NO positional args — every body key is bound as a named kwarg (record-bound methods take a top-level `ids`). Pass record ids via `ids` and all other parameters via `kwargs`. " +
         "Action-based risk policy (not model-prefix denial): reversible configuration/lifecycle methods execute under Odoo ACLs; " +
-        "irreversible posting/payment/reconcile/delete/lock require confirmation_token (omit token for preflight)." +
+        "irreversible posting/payment/reconcile/delete/lock require confirmation_token (omit token for preflight). " +
+        "Irreversible ops return confirmation_required + confirmation_token; retry with the top-level confirmation_token argument (not under kwargs)." +
         PM_WRITE_ROUTING_NOTE +
         TASK_WAITING_DEFERRAL_NOTE +
         CHATTER_VS_FIELDS_NOTE,
@@ -797,10 +853,7 @@ export function registerWriteTools(
         // Deprecated: JSON-2 cannot bind positional args; kept so old callers fail loudly instead of silently.
         args: z.array(z.any()).default([]),
         context: zWriteContext,
-        confirmation_token: z
-          .string()
-          .optional()
-          .describe("HMAC token from a prior unconfirmed call_model_method preflight for this exact model/method/ids/kwargs")
+        confirmation_token: zConfirmationToken
       },
       outputSchema: {
         result: z.unknown().describe("Raw return value of the invoked model method"),
@@ -811,15 +864,27 @@ export function registerWriteTools(
       if (!model || !model.trim()) return mcpError("model must be a non-empty string");
       if (!method || !method.trim()) return mcpError("method must be a non-empty string");
       const positionalArgs = args ?? [];
-      const namedKwargs = kwargs ?? {};
       if (positionalArgs.length > 0) {
         return mcpError(
           "Odoo JSON-2 has no positional args: every body key is bound as a named kwarg, so an 'args' key fails with 422 unless the method literally has an 'args' parameter. Move these values into 'kwargs' (and record ids into 'ids')."
         );
       }
+      const recordIds = extractIds(ids);
+      const resolved = resolveConfirmationFromKwargs({
+        model,
+        method,
+        ids: recordIds,
+        confirmation_token,
+        kwargs: kwargs ?? {}
+      });
+      if (!resolved.ok) {
+        logWriteContext("call_model_method", model, context);
+        return resolved.error;
+      }
+      const namedKwargs = resolved.kwargs;
+      const effectiveToken = resolved.confirmation_token;
       try {
         const body = { ...namedKwargs, ...(ids !== undefined ? { ids } : {}) };
-        const recordIds = extractIds(ids);
 
         // Pure classifier — flat denials only (PM field gates, etc.). Irreversible → confirmation path.
         const blocked = gateWrite(model, method, body);
@@ -834,7 +899,7 @@ export function registerWriteTools(
             method,
             ids: recordIds,
             kwargs: namedKwargs,
-            confirmation_token,
+            confirmation_token: effectiveToken,
             getSecret
           });
           if (confirm) {
@@ -867,7 +932,7 @@ export function registerWriteTools(
                   `"${preflight.states.get(preflight.confirmation_required_ids[0]) ?? "unknown"}" — this un-posts an existing ` +
                   `journal entry and requires confirmation.`
               },
-              confirmation_token,
+              confirmation_token: effectiveToken,
               getSecret
             });
             if (stateConfirm) {
