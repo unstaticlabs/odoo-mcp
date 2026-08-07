@@ -23,6 +23,38 @@ reads, normalize the shapes, and refuse to write until a human confirms.
 | Inventory master data: **`product.category` / `stock.location`** only | Generic `create_record` / `update_record` / `call_model_method` — Odoo ACLs are authority. Create runs a name+parent duplicate preflight (`parent_id` for categories, `location_id` for locations); a match refuses with `policy_rule: duplicate_master_data` and the existing id. Every other `product.*` / `stock.*` model (`product.product`, `product.template`, `stock.picking`, `stock.move`, …) stays non-action-classified and default-denied |
 | Irreversible ledger ops (post / pay / reconcile / delete non-PM / lock) | Generic writes with `confirmation_token` (preflight → confirm → execute) |
 
+#### Reporting records back to the human
+
+Accounting work is full of ids — a bill, its journal entry, the statement line it matches, the
+expense behind it. **Never hand the human a bare id.** Every record you mention gets a markdown
+link to its Odoo page, labelled with the reference a bookkeeper actually recognizes; the id
+stays as a technical detail. The full rule, the field each tool returns, and the verified
+model→route map live in the README under
+[Record links](../README.md#record-links--surface-urls-not-bare-ids).
+
+**Correct**
+
+> [BILL/2026/07/0004 — Acme SARL, 1 240,00 €](https://odoo.unstaticlabs.com/odoo/vendor-bills/9921)
+> is still in draft. Its VAT sits on
+> [445660 TVA déductible](https://odoo.unstaticlabs.com/odoo/accounts/1204), and the payment
+> shows up as [bank line 14 Jul 2026 · −1 240,00 €](https://odoo.unstaticlabs.com/odoo/account.bank.statement.line/431),
+> not yet reconciled. The scanned invoice is filed as
+> [facture.pdf](https://odoo.unstaticlabs.com/odoo/documents/11).
+
+**Incorrect**
+
+> Bill 9921 is still in draft; VAT on account 1204; statement line 431 unreconciled; doc 11.
+
+Two accounting-specific routing notes:
+
+- **`account.move` routes by `move_type`** — request that field and a vendor bill links to
+  Vendor Bills (`…/odoo/vendor-bills/9921`) rather than the generic Journal Entries route
+  (`…/odoo/entries/9921`). Both open the same move; only the breadcrumb differs.
+- **`account.bank.statement.line` has no record action path** in Odoo (Bank Matching is a
+  journal-scoped widget), so its canonical link is the generic model route
+  `…/odoo/account.bank.statement.line/{id}`. Do not link a statement line to a reconciliation
+  URL you constructed by hand.
+
 #### Capability-gated reversible lifecycle (no orchestrator)
 
 Reversible CRUD on `hr.expense` / `hr.expense.sheet` / `account.move` is **not** prefix-forbidden; Odoo validates. Prefer dedicated billing tools / allowlisted lifecycle when available. Operators compose:
@@ -459,7 +491,9 @@ document. A tag id the read does not return (deleted or unreadable) is reported 
       "mimetype": "application/pdf",
       "file_size": 51234,
       "checksum": "abc123",
-      "attachment": { "id": 77, "name": "facture.pdf" }
+      "attachment": { "id": 77, "name": "facture.pdf" },
+      "web_url": "https://odoo.unstaticlabs.com/odoo/documents/11",
+      "linked_record_web_url": "https://odoo.unstaticlabs.com/odoo/entries/42"
     }
   ],
   "warnings": []
@@ -468,6 +502,13 @@ document. A tag id the read does not return (deleted or unreadable) is reported 
 
 Many2one fields are normalized to `{ id, name }`, and Odoo's `false` becomes `null`
 throughout.
+
+`web_url` opens the document itself; `linked_record_web_url` opens the record it is filed
+against (`res_model`/`res_id`) and is absent when the document is unfiled. Report the row as
+[facture.pdf](https://odoo.unstaticlabs.com/odoo/documents/11), filed against
+[JRNL/2026/07/0031](https://odoo.unstaticlabs.com/odoo/entries/42) — not as "document 11 on
+move 42". A `documents.document` row carries no `move_type`, so the linked-move URL uses the
+Journal Entries route; read the move itself when you want the Vendor Bills breadcrumb.
 
 **Graceful degradation.** Odoo Documents is a separate (Enterprise) app, so it may simply
 not be there. When `documents.document` is missing or ACLs/record rules deny it, the tool
@@ -739,13 +780,27 @@ soft-degrade).
     "id": 11,
     "name": "facture.pdf",
     "res_model": "account.move",
-    "res_id": 42
+    "res_id": 42,
+    "web_url": "https://odoo.unstaticlabs.com/odoo/documents/11",
+    "linked_record_web_url": "https://odoo.unstaticlabs.com/odoo/vendor-bills/42"
   },
   "previous_link": { "res_model": null, "res_id": null },
+  "document_web_url": "https://odoo.unstaticlabs.com/odoo/documents/11",
+  "target_web_url": "https://odoo.unstaticlabs.com/odoo/vendor-bills/42",
   "warnings": [],
   "metadata": { "odoo_calls": 4, "cache_hits": 0, "duration_seconds": 0.42 }
 }
 ```
+
+**Confirm the write with both links**, never with the two ids:
+
+> Filed [facture.pdf](https://odoo.unstaticlabs.com/odoo/documents/11) against
+> [BILL/2026/07/0004 — Acme SARL](https://odoo.unstaticlabs.com/odoo/vendor-bills/42).
+
+The target's existence check doubles as the route-variant read (`move_type` for
+`account.move`, `project_id` for `project.task`), so `target_web_url` lands on Vendor Bills
+for a bill and on the task's own project (`…/odoo/project/17/tasks/2266`) for a task — at no
+extra Odoo call.
 
 When the document already pointed at the same record, `changed` is `false` and no write is
 issued (idempotent). Relinking from a different record issues the write and pushes a warning
@@ -886,6 +941,16 @@ trims to `""` and returns **`null`**, which short-circuits period generation and
 the return type is misconfigured — the `configuration_issues` entry names the exact record
 (`account.return.type 12 (TVA (CA12))`) and the blank periodicity. This is the actionable
 signal: either fix the periodicity on the return type, or create the missing card manually.
+
+**Report it as a link.** `configuration_issues` is connector diagnostics, phrased as
+`model id (name)`; what the accountant gets should be clickable. `account.return.type` has no
+curated action path, so the generic model route applies:
+
+> No "TVA oct. 2025 – sept. 2026" card exists because
+> [TVA (CA12)](https://odoo.unstaticlabs.com/odoo/account.return.type/12) has a blank
+> periodicity — Odoo has no cadence to generate the period from.
+
+not *"account.return.type 12 has a blank periodicity"*.
 
 **Remediation path (still validate-only).** Both fixes go through
 `bookkeeping.plan_safe_write`, never a raw write:

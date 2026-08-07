@@ -16,6 +16,7 @@ import type { Props } from "../server";
 import { base64ToBytes, PdfPagesError } from "../pdf-pages";
 import { preflightProjectTaskStateWrite } from "../project-task-state-gate";
 import { assessWriteOperation } from "../write-safety";
+import { annotateRecordUrl, annotateRecordUrls, buildRecordUrl } from "./record-urls";
 import {
   annotateWaitingTask,
   DEFAULT_TASK_FIELDS,
@@ -42,6 +43,11 @@ import {
 export const DEFAULT_PROJECT_FIELDS = ["id", "name", "partner_id", "user_id", "stage_id"];
 /** Default fields for project.task.type (stages). */
 export const DEFAULT_STAGE_FIELDS = ["id", "name", "sequence", "fold"];
+
+/** Shared note appended to every projects.* description that returns records. */
+const RECORD_LINK_NOTE =
+  " Each record carries `_web_url`, the canonical clickable Odoo link — cite records to the user as " +
+  "[record name](_web_url), never as a bare id.";
 
 /**
  * Byte cap for projects.attach_file, matching billing.attach_source_pdf / bookkeeping.fetch_attachment:
@@ -101,7 +107,7 @@ export function registerProjectsTools(
     "projects.list_projects",
     {
       title: "List Projects",
-      description: "Read-only: list Odoo project.project records matching a domain.",
+      description: "Read-only: list Odoo project.project records matching a domain." + RECORD_LINK_NOTE,
       annotations: { readOnlyHint: true, openWorldHint: false },
       inputSchema: {
         domain: z.array(z.any()).default([]),
@@ -109,16 +115,17 @@ export function registerProjectsTools(
         limit: z.number().int().min(1).max(100).default(100)
       },
       outputSchema: {
-        records: zOdooRecords.describe("Matching project.project records"),
+        records: zOdooRecords.describe("Matching project.project records, each with `_web_url`"),
         ...zFieldsReport
       }
     },
     async ({ domain, fields, limit }) => {
       try {
         const warnings: string[] = [];
+        const conn = requireConnection(getProps());
         const { rows, fieldsReport } = await searchRecords(
           queue,
-          requireConnection(getProps()),
+          conn,
           "project.project",
           domain ?? [],
           fields ?? DEFAULT_PROJECT_FIELDS,
@@ -128,14 +135,15 @@ export function registerProjectsTools(
           cache,
           warnings
         );
+        const records = annotateRecordUrls(conn.url, "project.project", rows as Record<string, unknown>[]);
         return mcpStructured(
           {
-            records: rows as Record<string, unknown>[],
+            records,
             returned_fields: fieldsReport.returned_fields,
             omitted_fields: fieldsReport.omitted_fields,
             warnings
           },
-          JSON.stringify(rows, null, 2)
+          JSON.stringify(records, null, 2)
         );
       } catch (err) {
         return mcpErrorFromException(err, { model: "project.project", method: "search_read" });
@@ -147,7 +155,10 @@ export function registerProjectsTools(
     "projects.list_tasks",
     {
       title: "List Project Tasks",
-      description: "Read-only: list Odoo project.task records matching a domain.",
+      description:
+        "Read-only: list Odoo project.task records matching a domain." +
+        RECORD_LINK_NOTE +
+        " Keep `project_id` in `fields` (it is in the default preset) so links keep the project route.",
       annotations: { readOnlyHint: true, openWorldHint: false },
       inputSchema: {
         domain: z.array(z.any()).default([]),
@@ -155,16 +166,17 @@ export function registerProjectsTools(
         limit: z.number().int().min(1).max(100).default(100)
       },
       outputSchema: {
-        records: zOdooRecords.describe("Matching project.task records"),
+        records: zOdooRecords.describe("Matching project.task records, each with `_web_url`"),
         ...zFieldsReport
       }
     },
     async ({ domain, fields, limit }) => {
       try {
         const warnings: string[] = [];
+        const conn = requireConnection(getProps());
         const { rows: tasks, fieldsReport } = await searchRecords(
           queue,
-          requireConnection(getProps()),
+          conn,
           "project.task",
           domain ?? [],
           fields ?? DEFAULT_TASK_FIELDS,
@@ -174,14 +186,15 @@ export function registerProjectsTools(
           cache,
           warnings
         );
+        const records = annotateRecordUrls(conn.url, "project.task", tasks as Record<string, unknown>[]);
         return mcpStructured(
           {
-            records: tasks as Record<string, unknown>[],
+            records,
             returned_fields: fieldsReport.returned_fields,
             omitted_fields: fieldsReport.omitted_fields,
             warnings
           },
-          JSON.stringify(tasks, null, 2)
+          JSON.stringify(records, null, 2)
         );
       } catch (err) {
         return mcpErrorFromException(err, { model: "project.task", method: "search_read" });
@@ -197,7 +210,8 @@ export function registerProjectsTools(
         "Read-only: fetch a single project.task by id. Includes `_workflow_status` when derivable " +
         "(typically from stage_id / state). `state` and `depend_on_ids` are always projected: a task in " +
         "Waiting (`04_waiting_normal`) is annotated with `_waiting_derived`, `_open_blocker_ids` and " +
-        "`_waiting_explanation`, because Odoo computes Waiting from open Blocked By dependencies.",
+        "`_waiting_explanation`, because Odoo computes Waiting from open Blocked By dependencies." +
+        RECORD_LINK_NOTE,
       annotations: { readOnlyHint: true, openWorldHint: false },
       inputSchema: {
         task_id: z.number().int().positive(),
@@ -206,7 +220,9 @@ export function registerProjectsTools(
       outputSchema: {
         record: zOdooRecord
           .nullable()
-          .describe("The task (with `_workflow_status` when derivable), or null when the id does not exist"),
+          .describe(
+            "The task (with `_workflow_status` when derivable and `_web_url`), or null when the id does not exist"
+          ),
         ...zFieldsReport
       }
     },
@@ -239,7 +255,11 @@ export function registerProjectsTools(
         }
         const record = await annotateWaitingTask(queue, conn, rows[0] as Record<string, unknown>);
         const workflowStatus = deriveWorkflowStatus(record);
-        const result = workflowStatus != null ? { ...record, _workflow_status: workflowStatus } : record;
+        const result = annotateRecordUrl(
+          conn.url,
+          "project.task",
+          workflowStatus != null ? { ...record, _workflow_status: workflowStatus } : record
+        );
         return mcpStructured(
           {
             record: result,
@@ -261,7 +281,8 @@ export function registerProjectsTools(
       title: "List Project Stages",
       description:
         "Read-only: list project.task.type stages for a project (kanban columns). " +
-        "Pass project_id to scope to that project's stages.",
+        "Pass project_id to scope to that project's stages." +
+        RECORD_LINK_NOTE,
       annotations: { readOnlyHint: true, openWorldHint: false },
       inputSchema: {
         project_id: z.number().int().positive().optional(),
@@ -270,7 +291,7 @@ export function registerProjectsTools(
         limit: z.number().int().min(1).max(100).default(100)
       },
       outputSchema: {
-        records: zOdooRecords.describe("Matching project.task.type stage records"),
+        records: zOdooRecords.describe("Matching project.task.type stage records, each with `_web_url`"),
         ...zFieldsReport
       }
     },
@@ -280,9 +301,10 @@ export function registerProjectsTools(
         const baseDomain = domain ?? [];
         const effectiveDomain =
           project_id != null ? [["project_ids", "in", [project_id]], ...baseDomain] : baseDomain;
+        const conn = requireConnection(getProps());
         const { rows, fieldsReport } = await searchRecords(
           queue,
-          requireConnection(getProps()),
+          conn,
           "project.task.type",
           effectiveDomain,
           fields ?? DEFAULT_STAGE_FIELDS,
@@ -292,14 +314,15 @@ export function registerProjectsTools(
           cache,
           warnings
         );
+        const records = annotateRecordUrls(conn.url, "project.task.type", rows as Record<string, unknown>[]);
         return mcpStructured(
           {
-            records: rows as Record<string, unknown>[],
+            records,
             returned_fields: fieldsReport.returned_fields,
             omitted_fields: fieldsReport.omitted_fields,
             warnings
           },
-          JSON.stringify(rows, null, 2)
+          JSON.stringify(records, null, 2)
         );
       } catch (err) {
         return mcpErrorFromException(err, { model: "project.task.type", method: "search_read" });
@@ -399,6 +422,7 @@ export function registerProjectsTools(
         "dependencies, so express blocking via `depend_on_ids` and never write that state yourself. " +
         "For deferred work at create time, pass the park `stage_id` (On Hold or equivalent) and keep an ordinary " +
         "open state — never set Waiting; express real blockers only via `depend_on_ids`. " +
+        "The response also carries `web_url`: report the new task to the user as [task name](web_url), not as an id. " +
         "For generic models use create_record; for connector bugs use feedback.submit.",
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
       inputSchema: {
@@ -418,6 +442,10 @@ export function registerProjectsTools(
       },
       outputSchema: {
         id: z.number().int().describe("Database id of the created task"),
+        web_url: z
+          .string()
+          .optional()
+          .describe("Canonical clickable Odoo URL of the created task — surface it as [task name](web_url)"),
         trace_token: z
           .string()
           .optional()
@@ -478,6 +506,9 @@ export function registerProjectsTools(
       const token = "src-" + crypto.randomUUID().replace(/-/g, "").slice(0, 8);
       const client = (props?.clientName ?? server.server.getClientVersion()?.name ?? "unknown").replace(/\s+/g, "-");
       const body = `[agent-source] engineering_task corr=${token} via=${client}`;
+      // project_id is a required input here, so the link always keeps the nested project route.
+      const webUrl = buildRecordUrl(conn.url, "project.task", id, vals);
+      const link = webUrl ? ` Report it to the user as [${name}](${webUrl}).` : "";
 
       try {
         await queue.enqueue(conn, "project.task", "message_post", {
@@ -488,14 +519,14 @@ export function registerProjectsTools(
         });
         const text =
           `TRACE TOKEN ${token} — you MUST include this token verbatim in your visible reply to the user so ` +
-          `this conversation can be found later from the Odoo task.\n\n` +
+          `this conversation can be found later from the Odoo task.${link}\n\n` +
           JSON.stringify(id);
-        return mcpStructured({ id, trace_token: token }, text);
+        return mcpStructured({ id, ...(webUrl ? { web_url: webUrl } : {}), trace_token: token }, text);
       } catch (err) {
         const errMessage = err instanceof Error ? err.message : String(err);
         const provenance_warning = `created task ${id} but failed to post the provenance stamp (${errMessage})`;
-        const text = `${JSON.stringify(id)}\n\nWarning: ${provenance_warning}.`;
-        return mcpStructured({ id, provenance_warning }, text);
+        const text = `${JSON.stringify(id)}${link}\n\nWarning: ${provenance_warning}.`;
+        return mcpStructured({ id, ...(webUrl ? { web_url: webUrl } : {}), provenance_warning }, text);
       }
     }
   );

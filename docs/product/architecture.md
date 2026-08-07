@@ -163,10 +163,21 @@ Tools are grouped by **domain module**, registered on the `McpAgent`:
 - **`billing.*`** — later. Read invoices first, then create invoice / link
   records.
 
+Shared across every module: **[`src/tools/record-urls.ts`](../../src/tools/record-urls.ts)**,
+the single place that turns `(Odoo origin, model, id, record)` into the record's canonical web
+URL. Reads annotate rows with `_web_url`, writes return `web_url`, and agents are instructed
+to cite records as links rather than ids
+([Record links](../../README.md#record-links--surface-urls-not-bare-ids)). Routes are the
+`ir.actions.act_window.path` values Odoo itself serves — curated per model, with the generic
+`/odoo/{model}/{id}` route Odoo's web client uses for record mentions as the always-available
+fallback. Nothing else in the codebase builds an Odoo UI URL by hand.
+
 Conventions:
 
 - Every tool **declares whether it is read or write** in its metadata/description
   so clients and reviewers can see the blast radius at a glance.
+- Every tool that returns or creates a record **returns its canonical URL**, so no client
+  ever has to reconstruct a UI route from an id.
 - **Read-only ships first per domain.** Writes are added only after the reads for
   that domain are proven, and writes are automatically constrained by the
   caller's Odoo permissions.

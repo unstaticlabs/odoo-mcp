@@ -2,12 +2,18 @@ import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mc
 import type { OdooQueue } from "../odoo-queue";
 import type { Props } from "../server";
 import { countRecords, parseDomainParam, requireConnection, resourceErrorFromException, searchRecords } from "./shared";
+import { annotateRecordUrl, annotateRecordUrls } from "./record-urls";
 
 export function registerResourceTemplates(server: McpServer, getProps: () => Props | undefined, queue: OdooQueue) {
   server.registerResource(
     "record",
     new ResourceTemplate("odoo://{model}/record/{id}", { list: undefined }),
-    { description: "Read-only: fetch a single Odoo record by id.", mimeType: "application/json" },
+    {
+      description:
+        "Read-only: fetch a single Odoo record by id. The record carries `_web_url`, the canonical " +
+        "clickable Odoo link — cite it as [record name](_web_url), never as a bare id.",
+      mimeType: "application/json"
+    },
     async (uri, variables) => {
       const model = typeof variables.model === "string" ? variables.model : "";
       try {
@@ -16,18 +22,16 @@ export function registerResourceTemplates(server: McpServer, getProps: () => Pro
         const id = Number(idRaw);
         if (!Number.isInteger(id) || id <= 0) throw new Error("id must be a positive integer");
 
-        const { rows } = (await searchRecords(
-          queue,
-          requireConnection(getProps()),
-          model,
-          [["id", "=", id]],
-          null,
-          1
-        )) as { rows: unknown[]; fieldsMeta: unknown };
+        const conn = requireConnection(getProps());
+        const { rows } = (await searchRecords(queue, conn, model, [["id", "=", id]], null, 1)) as {
+          rows: unknown[];
+          fieldsMeta: unknown;
+        };
         if (!Array.isArray(rows) || rows.length === 0) {
           throw new Error(`No ${model} record found for id ${id}`);
         }
-        return { contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify(rows[0], null, 2) }] };
+        const record = annotateRecordUrl(conn.url, model, rows[0] as Record<string, unknown>);
+        return { contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify(record, null, 2) }] };
       } catch (err) {
         return resourceErrorFromException(uri, err, { model, method: "search_read" });
       }
@@ -37,7 +41,12 @@ export function registerResourceTemplates(server: McpServer, getProps: () => Pro
   server.registerResource(
     "search",
     new ResourceTemplate("odoo://{model}/search", { list: undefined }),
-    { description: "Read-only: model-agnostic Odoo search_read via URI (domain/fields/limit query params).", mimeType: "application/json" },
+    {
+      description:
+        "Read-only: model-agnostic Odoo search_read via URI (domain/fields/limit query params). Each record " +
+        "carries `_web_url`, the canonical clickable Odoo link — cite records as [record name](_web_url).",
+      mimeType: "application/json"
+    },
     async (uri, variables) => {
       const model = typeof variables.model === "string" ? variables.model : "";
       try {
@@ -55,8 +64,10 @@ export function registerResourceTemplates(server: McpServer, getProps: () => Pro
         const limitNum = limitParam ? Number(limitParam) : 10;
         const limit = Number.isInteger(limitNum) && limitNum > 0 ? limitNum : 10;
 
-        const { rows } = await searchRecords(queue, requireConnection(getProps()), model, domain, fields, limit);
-        return { contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify(rows, null, 2) }] };
+        const conn = requireConnection(getProps());
+        const { rows } = await searchRecords(queue, conn, model, domain, fields, limit);
+        const records = annotateRecordUrls(conn.url, model, rows as Record<string, unknown>[]);
+        return { contents: [{ uri: uri.href, mimeType: "application/json", text: JSON.stringify(records, null, 2) }] };
       } catch (err) {
         return resourceErrorFromException(uri, err, { model, method: "search_read" });
       }
