@@ -909,7 +909,7 @@ const ACTION_CLASSIFIED_PREFIXES = [
 ] as const;
 
 /**
- * Exact model names (never prefixes) graduated onto the action-classified path — currently the two
+ * Exact model names (never prefixes) graduated onto the action-classified path — currently the three
  * inventory master-data models. `product.` / `stock.` prefixes stay unlisted on purpose: graduating
  * `product.product` / `stock.picking` / `stock.move` is a separate product decision.
  */

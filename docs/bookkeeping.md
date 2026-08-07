@@ -20,7 +20,7 @@ reads, normalize the shapes, and refuse to write until a human confirms.
 | Reversible expense / vendor-bill **lifecycle** (reset→edit→resubmit/reapprove) | `call_model_method` on allowlisted methods only (`list_model_actions` → `executable:true`), with required write `context` + compatible record `state`; a transition that leaves `posted` additionally needs `confirmation_token` |
 | Tax-close / report external value / return / lock-exception | `bookkeeping.plan_safe_write` (validate-only + human confirm) |
 | Reversible CRUD / lifecycle on `account.*` / `hr.*` / etc. | Allowed via generic write tools — Odoo ACLs/workflow/locks are authority (not model-prefix denial) |
-| Inventory master data: **`product.category` / `stock.location`** only | Generic `create_record` / `update_record` / `call_model_method` — Odoo ACLs are authority. Create runs a name+parent duplicate preflight (`parent_id` for categories, `location_id` for locations); a match refuses with `policy_rule: duplicate_master_data` and the existing id. Every other `product.*` / `stock.*` model (`product.product`, `product.template`, `stock.picking`, `stock.move`, …) stays non-action-classified and default-denied |
+| Inventory master data: **`product.category` / `stock.location` / `product.template`** only | Generic `create_record` / `update_record` / `call_model_method` — Odoo ACLs are authority. Create runs a duplicate preflight: name+parent for categories/locations (`parent_id` / `location_id`), name+`company_id` for templates (plus `default_code`+`company_id` when an internal reference is supplied); a match refuses with `policy_rule: duplicate_master_data` and the existing id. Every other `product.*` / `stock.*` model (`product.product`, `stock.picking`, `stock.move`, `stock.quant`, …) stays non-action-classified and default-denied |
 | Irreversible ledger ops (post / pay / reconcile / delete non-PM / lock) | Generic writes with `confirmation_token` (preflight → confirm → execute) |
 
 #### Reporting records back to the human
@@ -137,25 +137,35 @@ Draft bill/expense prep is **not** part of `plan_safe_write`. Generic writes are
 (reversible → Odoo; irreversible → confirmation). Deny envelopes carry `refusing_layer` /
 `policy_rule` / `risk_class` / `next_step` and route agents to the matching next step.
 
-#### Inventory master data (`product.category`, `stock.location`)
+#### Inventory master data (`product.category`, `stock.location`, `product.template`)
 
 Action classification is by prefix (`account.`, `hr.`, `payment.`, `l10n_`, `stock.valuation`,
-`sign.`, `contract.`) **plus an exact-model list** holding those two models only
-([`src/inventory-master-data.ts`](../src/inventory-master-data.ts)). Creating a category or a
-location is ordinary reversible configuration, so it goes to Odoo under the caller's own ACLs; no
-dedicated `inventory.*` tool exists and none is needed.
+`sign.`, `contract.`) **plus an exact-model list** holding those three models only
+([`src/inventory-master-data.ts`](../src/inventory-master-data.ts)). Creating a category, a location
+or a product template is ordinary reversible configuration, so it goes to Odoo under the caller's own
+ACLs; no dedicated `inventory.*` tool exists and none is needed. The list is deliberately *not*
+derived from "has a parent many2one" — `product.template` is flat, and graduation is a product
+decision independent of how a model nests.
 
-- **Duplicate preflight (create only).** One `search_read` on `name` + parent — `parent_id` for
-  `product.category`, `location_id` for `stock.location` — refuses a create that would add a second
-  record with that name under that parent, returning `policy_rule: duplicate_master_data` plus the
-  existing `record_ids`. `call_model_method` with `method: "create"` runs the same check, so the
-  escape hatch is not a way around it. A payload with no `name`, or a parent in an unrecognized
-  shape, skips the lookup (Odoo's own validation refuses it, with an envelope); a lookup that
-  *fails* refuses the create rather than writing unverified.
+- **Duplicate preflight (create only).** Each check is one `search_read` with plain equality:
+  - `product.category` / `stock.location`: `name` + parent — `parent_id` for categories,
+    `location_id` for locations.
+  - `product.template`: `name` + `company_id` (`false` = no company / shared across companies), and
+    — only when the payload carries a non-empty `default_code` — a second `default_code` +
+    `company_id` check, since an SKU collision is the same duplicate seen from the other direction.
+
+  A match refuses the create with `policy_rule: duplicate_master_data`, the colliding
+  `blocked_fields`, and the existing `record_ids`. `call_model_method` with `method: "create"` runs
+  the same checks, so the escape hatch is not a way around them. A payload with no `name`, or a
+  many2one in an unrecognized shape, skips the lookup (Odoo's own validation refuses it, with an
+  envelope); a lookup that *fails* refuses the create rather than writing unverified.
 - **Writes** (`update_record`) run no duplicate check — an update targets a record that exists.
-- **`unlink` is unchanged**: still `destructive` / confirmation_token (preflight → confirm → execute).
-- Widening to `product.product`, `stock.picking`, `stock.move`, … is a product decision, taken one
-  named model at a time; those models remain default-denied and non-executable in
+- **`unlink` is unchanged** on all three: still `destructive` / confirmation_token
+  (preflight → confirm → execute).
+- Template writes stay draft-safe configuration: there is no generic-tool path from here to
+  validating a picking, posting a stock move, or touching valuation.
+- Widening to `product.product`, `stock.picking`, `stock.move`, `stock.quant`, … is a product
+  decision, taken one named model at a time; those models remain default-denied and non-executable in
   `list_model_actions`.
 
 Registered on the MCP server in [`src/server.ts`](../src/server.ts) (`registerBookkeepingTools`,

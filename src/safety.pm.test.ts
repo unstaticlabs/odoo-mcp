@@ -398,7 +398,7 @@ describe("classifyPmWriteIntent — Waiting is derived, not written", () => {
 });
 
 describe("classifyPmWriteIntent — inventory master data (exact-model graduation)", () => {
-  for (const model of ["product.category", "stock.location"]) {
+  for (const model of ["product.category", "stock.location", "product.template"]) {
     test(`${model} create is allowed as reversible configuration`, () => {
       const result = classifyPmWriteIntent({
         model,
@@ -431,7 +431,7 @@ describe("classifyPmWriteIntent — inventory master data (exact-model graduatio
   }
 
   test("graduation is by exact model name — sibling product.* / stock.* stay default-denied", () => {
-    for (const model of ["product.product", "product.template", "stock.picking", "stock.move", "stock.quant"]) {
+    for (const model of ["product.product", "stock.picking", "stock.move", "stock.quant"]) {
       const result = classifyPmWriteIntent({
         model,
         method: "create",
