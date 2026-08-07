@@ -412,8 +412,8 @@ describe("assessWriteOperation — project.task Waiting state", () => {
   });
 });
 
-describe("assessWriteOperation — graduated inventory master data (ODOO2240)", () => {
-  for (const model of ["product.category", "stock.location"]) {
+describe("assessWriteOperation — graduated inventory master data (ODOO2240, ODOO2255)", () => {
+  for (const model of ["product.category", "stock.location", "product.template"]) {
     test(`${model} create/write reach Odoo as reversible configuration`, () => {
       const create = assessWriteOperation({
         model,
@@ -454,7 +454,7 @@ describe("assessWriteOperation — graduated inventory master data (ODOO2240)", 
   }
 
   test("sibling inventory models stay non-executable and default-denied", () => {
-    for (const model of ["product.product", "product.template", "stock.picking", "stock.move"]) {
+    for (const model of ["product.product", "stock.picking", "stock.move", "stock.quant"]) {
       const verdict = assessWriteOperation({ model, method: "write", args: { ids: [1], vals: { name: "x" } } });
       expect(verdict.allowed).toBe(false);
       expect(verdict.intent).toBe("disallowed");

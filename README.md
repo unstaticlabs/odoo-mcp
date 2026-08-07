@@ -221,12 +221,14 @@ and identify the record by name plus `model,id` — do not invent a route.
   plus name / `country_id` / contact), then set `partner_id` on the draft bill. Banks,
   receivable/payable property accounts, payment terms, and credit/debit limits stay
   MCP-blocked; partner identity is not a `bookkeeping.plan_safe_write` path.
-- **Inventory master data** — `product.category` and `stock.location` (and *only* those two
-  inventory models) accept `create_record` / `update_record` / `call_model_method` writes under the
-  caller's own Odoo ACLs. A create is refused when a record with the same `name` already exists
-  under the same parent (`parent_id` for categories, `location_id` for locations); the refusal names
-  the existing id. `product.product`, `product.template`, `stock.picking`, `stock.move` and the rest
-  of `product.*` / `stock.*` stay blocked on generic write tools.
+- **Inventory master data** — `product.category`, `stock.location` and `product.template` (and *only*
+  those three inventory models) accept `create_record` / `update_record` / `call_model_method` writes
+  under the caller's own Odoo ACLs. A create is refused when it would duplicate an existing record:
+  same `name` under the same parent for categories/locations (`parent_id` / `location_id`), same
+  `name` under the same `company_id` for templates — plus the same `default_code` under that company
+  when an internal reference is supplied. The refusal names the existing id. `product.product`,
+  `stock.picking`, `stock.move`, `stock.quant` and the rest of `product.*` / `stock.*` stay blocked on
+  generic write tools, and `unlink` on the three graduated models still needs a `confirmation_token`.
 - **Reversible expense lifecycle** — prefer the dedicated tools `billing.reset_expense` /
   `billing.submit_expense` / `billing.approve_expense`. They are the **only** lifecycle path on
   `/accounting/mcp`, which ships no generic write tools. On the full `/mcp` surface the same
