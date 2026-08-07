@@ -1185,6 +1185,25 @@ describe("normalizeSourceDocument", () => {
       attachment: null
     });
   });
+
+  test("an Odoo origin adds the document link and, when filed, the linked record's link", () => {
+    const linked = normalizeSourceDocument(
+      { id: 11, name: "facture.pdf", res_model: "account.move", res_id: 42 },
+      new Map(),
+      "https://odoo.unstaticlabs.com"
+    );
+    expect(linked.web_url).toBe("https://odoo.unstaticlabs.com/odoo/documents/11");
+    expect(linked.linked_record_web_url).toBe("https://odoo.unstaticlabs.com/odoo/entries/42");
+
+    // Unfiled document: its own link only — never a link to a record it does not point at.
+    const unfiled = normalizeSourceDocument(
+      { id: 12, name: "orphan.txt", res_model: false, res_id: false },
+      new Map(),
+      "https://odoo.unstaticlabs.com"
+    );
+    expect(unfiled.web_url).toBe("https://odoo.unstaticlabs.com/odoo/documents/12");
+    expect(unfiled).not.toHaveProperty("linked_record_web_url");
+  });
 });
 
 describe("isDocumentsUnavailableError", () => {
@@ -1355,7 +1374,11 @@ describe("bookkeeping.search_source_documents", () => {
         mimetype: "application/pdf",
         file_size: 51234,
         checksum: "abc123",
-        attachment: { id: 77, name: "facture.pdf" }
+        attachment: { id: 77, name: "facture.pdf" },
+        // The document links to its own Documents page, plus the record it is filed against.
+        // No move_type on a documents.document row, so the move link degrades to Journal Entries.
+        web_url: "http://example.com/odoo/documents/11",
+        linked_record_web_url: "http://example.com/odoo/entries/42"
       }
     ]);
     expect(payload.warnings).toEqual([]);
@@ -1595,6 +1618,36 @@ describe("bookkeeping.link_source_document", () => {
     expect(payload.document.res_id).toBe(42);
     expect(payload.previous_link).toEqual({ res_model: null, res_id: null });
     expect(payload.metadata.odoo_calls).toBeGreaterThan(0);
+  });
+
+  test("both sides come back as clickable links, routed by the target's own type", async () => {
+    // The existence read doubles as the route-variant read — move_type here, project_id for tasks.
+    const fetchCalls = mockLinkFetch({ targetRows: [{ id: 42, move_type: "in_invoice" }] });
+
+    const handler = getToolHandler(makeAgent(), "bookkeeping.link_source_document");
+    const result = await handler(baseArgs);
+
+    const targetRead = fetchCalls.find((c) => c.url.endsWith("/account.move/read"));
+    expect(targetRead!.body.fields).toEqual(["id", "move_type"]);
+
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.document_web_url).toBe("http://example.com/odoo/documents/11");
+    expect(payload.target_web_url).toBe("http://example.com/odoo/vendor-bills/42");
+  });
+
+  test("a task target keeps its project route", async () => {
+    const fetchCalls = mockLinkFetch({
+      targetModel: "project.task",
+      targetRows: [{ id: 7, project_id: [4, "Odoo MCP"] }],
+      readBack: { ...baseDoc, res_model: "project.task", res_id: 7 }
+    });
+
+    const handler = getToolHandler(makeAgent(), "bookkeeping.link_source_document");
+    const result = await handler({ ...baseArgs, target_model: "project.task" as const, target_id: 7 });
+
+    const targetRead = fetchCalls.find((c) => c.url.endsWith("/project.task/read"));
+    expect(targetRead!.body.fields).toEqual(["id", "project_id"]);
+    expect(JSON.parse(result.content[0].text).target_web_url).toBe("http://example.com/odoo/project/4/tasks/7");
   });
 
   test("project.task target reads that model and writes res_model project.task", async () => {

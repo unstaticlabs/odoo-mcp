@@ -9,6 +9,7 @@ import {
 import { classifyRefusingLayer, extractRejectedFields, nextStepForLayer } from "../policy";
 import type { OdooQueue } from "../odoo-queue";
 import { annotateWaitingDependency, isWaitingTaskRecord, normalizeRecords } from "../normalizer";
+import { annotateRecordUrls } from "./record-urls";
 import type { Props } from "../server";
 import type { TtlCache } from "../cache";
 
@@ -1635,7 +1636,9 @@ export async function browseRecords(
       }
 
       return {
-        records: rows,
+        // Annotated after the size safeguard ran: `_web_url` adds ~60-80B/row, so at the 100-row
+        // ceiling it is ~8KB against the 256KB cap — not enough to justify re-planning the page.
+        records: annotateRecordUrls(conn.url, model, rows),
         page,
         field_preset: resolution.preset,
         fields_resolution: { source: resolution.source, model: resolution.model },
@@ -1659,7 +1662,9 @@ export async function browseRecords(
       warnings.push(plan.warning);
       const page = buildBrowsePageMeta(offset, limit, count, rows.length);
       return {
-        records: rows,
+        // Annotated after the size safeguard ran: `_web_url` adds ~60-80B/row, so at the 100-row
+        // ceiling it is ~8KB against the 256KB cap — not enough to justify re-planning the page.
+        records: annotateRecordUrls(conn.url, model, rows),
         page,
         field_preset: resolution.preset,
         fields_resolution: { source: resolution.source, model: resolution.model },
@@ -1738,7 +1743,7 @@ export async function searchRecordsCompact(
 
   return buildCompactReadEnvelope({
     model,
-    records: rows,
+    records: annotateRecordUrls(conn.url, model, rows),
     resolved,
     fieldsReport,
     page,

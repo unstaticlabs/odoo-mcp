@@ -30,6 +30,13 @@ AI clients and projects can point at.
   list so new/updated parameters (including top-level `confirmation_token`) appear.
 - **Other projects/apps** — anything that speaks MCP and needs Odoo data.
 
+Every record a tool returns carries its **canonical clickable Odoo URL** (`_web_url` on
+reads, `web_url` on writes), because the person on the other end of the conversation cannot
+do anything with "task 2266". Agents are told to cite records as
+[record name](https://odoo.unstaticlabs.com/odoo/project/17/tasks/2266) and to treat the id
+as a secondary technical identifier — see
+[Record links](../../README.md#record-links--surface-urls-not-bare-ids).
+
 Irreversible ledger writes (post / pay / reconcile / delete / lock) on `/mcp` use a
 two-phase fence: call without `confirmation_token` → `confirmation_required` + token →
 retry with the **top-level** `confirmation_token` argument. See

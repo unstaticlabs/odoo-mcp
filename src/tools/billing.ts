@@ -13,6 +13,7 @@ import {
   extractPdfPages,
   looksLikePdf
 } from "../pdf-pages";
+import { buildRecordUrl } from "./record-urls";
 import {
   logWriteContext,
   mcpError,
@@ -87,6 +88,7 @@ const zExpenseAuditRow = z.object({
   total_amount: z.number().nullable(),
   total_amount_currency: z.number().nullable().optional(),
   reference: z.string().nullable(),
+  web_url: z.string().optional().describe("Canonical clickable Odoo URL — cite the expense as [name](web_url)"),
   attachments: z.array(zAttachmentRef),
   duplicate: z.object({
     is_duplicate: z.boolean(),
@@ -629,6 +631,7 @@ export function registerBillingReadTools(
           if (total != null) sum_total_amount += total;
           const duplicate = duplicateFlags.get(id) ?? { is_duplicate: false, reason: null, peer_ids: [] };
           if (duplicate.is_duplicate) duplicate_count += 1;
+          const webUrl = buildRecordUrl(conn.url, model, id, row);
 
           return {
             id,
@@ -645,6 +648,7 @@ export function registerBillingReadTools(
             total_amount: total,
             total_amount_currency: numberOrNull(row.total_amount_currency),
             reference: scalarOrNull(row.reference),
+            ...(webUrl ? { web_url: webUrl } : {}),
             attachments: attachmentsByResId.get(id) ?? [],
             duplicate
           };
@@ -715,6 +719,7 @@ export function registerBillingWriteTools(
         ok: z.boolean(),
         record_id: z.number().int(),
         state: z.string(),
+        web_url: z.string().optional().describe("Canonical clickable Odoo URL — confirm the write as [record name](web_url)"),
         warnings: z.array(z.string()).optional()
       }
     },
@@ -775,7 +780,8 @@ export function registerBillingWriteTools(
 
         await queue.enqueue(conn, model, "write", { ids: [record_id], vals: allowed });
         const state = deriveWorkflowStatus(record) ?? "draft";
-        return mcpStructured({ ok: true, record_id, state });
+        const webUrl = buildRecordUrl(conn.url, model, record_id, record);
+        return mcpStructured({ ok: true, record_id, state, ...(webUrl ? { web_url: webUrl } : {}) });
       } catch (err) {
         return mcpErrorFromException(err, { model, method: "write" });
       }
@@ -802,6 +808,7 @@ export function registerBillingWriteTools(
         record_id: z.number().int(),
         state: z.string(),
         move_type: z.string(),
+        web_url: z.string().optional().describe("Canonical clickable Odoo URL — confirm the write as [record name](web_url)"),
         warnings: z.array(z.string()).optional()
       }
     },
@@ -880,7 +887,15 @@ export function registerBillingWriteTools(
 
         await queue.enqueue(conn, model, "write", { ids: [record_id], vals: allowed });
         const state = deriveWorkflowStatus(record) ?? "draft";
-        return mcpStructured({ ok: true, record_id, state, move_type: moveType });
+        // moveType is read live above, so the bill links to Vendor Bills rather than Journal Entries.
+        const webUrl = buildRecordUrl(conn.url, model, record_id, { ...record, move_type: moveType });
+        return mcpStructured({
+          ok: true,
+          record_id,
+          state,
+          move_type: moveType,
+          ...(webUrl ? { web_url: webUrl } : {})
+        });
       } catch (err) {
         return mcpErrorFromException(err, { model, method: "write" });
       }

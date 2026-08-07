@@ -129,6 +129,7 @@ describe("projects.create_task", () => {
     expect(result.isError).toBeUndefined();
     expect(result.structuredContent).toEqual({
       id: 88,
+      web_url: "http://example.com/odoo/project/4/tasks/88",
       provenance_warning: "created task 88 but failed to post the provenance stamp (chatter down)"
     });
     expect(String(result.content[0].text)).not.toContain("secret-key");
@@ -244,7 +245,9 @@ describe("projects read tools", () => {
     expect(calls[0].model).toBe("project.project");
     expect(calls[0].method).toBe("search_read");
     expect(calls[0].args.domain).toEqual([["id", "=", 4]]);
-    expect(result.structuredContent?.records).toEqual([{ id: 4, name: "Demo" }]);
+    expect(result.structuredContent?.records).toEqual([
+      { id: 4, name: "Demo", _web_url: "http://example.com/odoo/project/4" }
+    ]);
   });
 
   test("get_task returns null when missing", async () => {
@@ -339,9 +342,13 @@ describe("projects read tools", () => {
     });
     const { handler } = buildProjectsServer(queue);
 
-    await handler("projects.list_stages")({ project_id: 4 });
+    const result = await handler("projects.list_stages")({ project_id: 4 });
 
     expect(calls[0].args.domain).toEqual([["project_ids", "in", [4]]]);
     expect(calls[0].args.order).toBe("sequence, id");
+    // Stages are linkable too — Task Stages is a real Odoo action path (ODOO2272).
+    expect(result.structuredContent?.records).toEqual([
+      { id: 1, name: "Inbox", _web_url: "http://example.com/odoo/task-stages/1" }
+    ]);
   });
 });

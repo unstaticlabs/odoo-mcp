@@ -57,7 +57,11 @@ describe("graduated create/write reach Odoo", () => {
     });
 
     expect(result.isError).toBeUndefined();
-    expect(result.structuredContent).toEqual({ id: 7 });
+    // product.category routes through the verified Categories action path (ODOO2272).
+    expect(result.structuredContent).toEqual({
+      id: 7,
+      web_url: "http://example.com/odoo/product-categories/7"
+    });
     expect(calls.map((c) => c.method)).toEqual(["search_read", "create"]);
     expect(calls[1].args).toEqual({ vals_list: [{ name: "Consumables", parent_id: 3 }] });
   });
