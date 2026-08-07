@@ -31,7 +31,7 @@ function buildProjectsServer(queue: OdooQueue) {
 }
 
 describe("projects.* registration", () => {
-  test("registers M1/M2 projects surface (reads + create_task)", () => {
+  test("registers M1/M2 projects surface (reads + create_task + attach_file)", () => {
     const { server } = buildProjectsServer(dispatchQueue(() => []));
     const tools = (server as unknown as { _registeredTools: Record<string, unknown> })._registeredTools;
     for (const name of [
@@ -40,7 +40,8 @@ describe("projects.* registration", () => {
       "projects.get_task",
       "projects.list_stages",
       "projects.list_chatter",
-      "projects.create_task"
+      "projects.create_task",
+      "projects.attach_file"
     ]) {
       expect(tools[name]).toBeDefined();
     }
@@ -50,6 +51,15 @@ describe("projects.* registration", () => {
     expect((tools["projects.list_projects"] as { annotations: { readOnlyHint: boolean } }).annotations.readOnlyHint).toBe(
       true
     );
+
+    const attach = tools["projects.attach_file"] as {
+      description: string;
+      annotations: { readOnlyHint: boolean; destructiveHint: boolean; openWorldHint: boolean };
+    };
+    expect(attach.annotations.readOnlyHint).toBe(false);
+    expect(attach.annotations.destructiveHint).toBe(false);
+    expect(attach.annotations.openWorldHint).toBe(false);
+    expect(String(attach.description).startsWith("Write:")).toBe(true);
   });
 });
 
@@ -343,5 +353,237 @@ describe("projects read tools", () => {
 
     expect(calls[0].args.domain).toEqual([["project_ids", "in", [4]]]);
     expect(calls[0].args.order).toBe("sequence, id");
+  });
+});
+
+describe("projects.attach_file", () => {
+  /** "hello" — 5 decoded bytes. */
+  const HELLO_B64 = "aGVsbG8=";
+
+  type ZodLike = { safeParse: (v: unknown) => { success: boolean }; parse: (v: unknown) => unknown };
+
+  function attachSchema(): Record<string, ZodLike> {
+    const { server } = buildProjectsServer(dispatchQueue(() => []));
+    const tools = (
+      server as unknown as { _registeredTools: Record<string, { inputSchema: { shape: Record<string, ZodLike> } }> }
+    )._registeredTools;
+    return tools["projects.attach_file"].inputSchema.shape;
+  }
+
+  function envelope(result: ToolResult): Record<string, unknown> {
+    return JSON.parse(result.content[0].text) as Record<string, unknown>;
+  }
+
+  test("input schema requires context, non-empty datas, a real task_id and project.task", () => {
+    const shape = attachSchema();
+
+    expect(shape.context.safeParse("").success).toBe(false);
+    expect(shape.context.safeParse(undefined).success).toBe(false);
+    expect(shape.context.safeParse("Attaching the Q3 audit workbook.").success).toBe(true);
+
+    expect(shape.datas.safeParse("").success).toBe(false);
+
+    expect(shape.task_id.safeParse(0).success).toBe(false);
+    expect(shape.task_id.safeParse(1.5).success).toBe(false);
+
+    expect(shape.res_model.safeParse("account.move").success).toBe(false);
+    expect(shape.res_model.parse(undefined)).toBe("project.task");
+  });
+
+  test("creates one binary ir.attachment linked to the task and returns its id", async () => {
+    const calls: { model: string; method: string; args: Record<string, unknown> }[] = [];
+    const queue = dispatchQueue((model, method, args) => {
+      calls.push({ model, method, args });
+      if (model === "project.task" && method === "read") return [{ id: 88, name: "Q3 audit" }];
+      if (model === "ir.attachment" && method === "create") return [7101];
+      throw new Error(`unexpected call ${model}.${method}`);
+    });
+    const { handler } = buildProjectsServer(queue);
+
+    const result = await handler("projects.attach_file")({
+      task_id: 88,
+      name: "q3-audit-workbook.xlsx",
+      datas: HELLO_B64,
+      mimetype: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      context: "Attaching the generated Q3 audit workbook as evidence."
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(result.structuredContent).toEqual({
+      ok: true,
+      attachment_id: 7101,
+      task_id: 88,
+      res_model: "project.task",
+      res_id: 88,
+      name: "q3-audit-workbook.xlsx",
+      mimetype: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      file_size: 5
+    });
+
+    expect(calls).toHaveLength(2);
+    const create = calls[1];
+    expect(create.model).toBe("ir.attachment");
+    expect(create.method).toBe("create");
+    const vals = (create.args.vals_list as Record<string, unknown>[])[0];
+    expect(vals).toMatchObject({
+      name: "q3-audit-workbook.xlsx",
+      type: "binary",
+      mimetype: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      res_model: "project.task",
+      res_id: 88
+    });
+    expect(vals.datas).toBe(HELLO_B64);
+    // Write context is audit-only — it must never reach Odoo.
+    expect(vals).not.toHaveProperty("context");
+
+    // The task is read, never mutated; no existing attachment is touched.
+    for (const call of calls) {
+      expect(["write", "unlink"]).not.toContain(call.method);
+    }
+  });
+
+  test("defaults mimetype to application/octet-stream", async () => {
+    const calls: { model: string; method: string; args: Record<string, unknown> }[] = [];
+    const queue = dispatchQueue((model, method, args) => {
+      calls.push({ model, method, args });
+      if (model === "project.task") return [{ id: 5, name: "Task" }];
+      return [900];
+    });
+    const { handler } = buildProjectsServer(queue);
+
+    const result = await handler("projects.attach_file")({
+      task_id: 5,
+      name: "evidence.bin",
+      datas: HELLO_B64,
+      context: "Evidence upload."
+    });
+
+    expect(result.structuredContent?.mimetype).toBe("application/octet-stream");
+    expect((calls[1].args.vals_list as Record<string, unknown>[])[0].mimetype).toBe("application/octet-stream");
+  });
+
+  test("refuses an unknown task before creating anything", async () => {
+    const calls: { model: string; method: string }[] = [];
+    const queue = dispatchQueue((model, method) => {
+      calls.push({ model, method });
+      return [];
+    });
+    const { handler } = buildProjectsServer(queue);
+
+    const result = await handler("projects.attach_file")({
+      task_id: 4242,
+      name: "evidence.bin",
+      datas: HELLO_B64,
+      context: "Evidence upload."
+    });
+
+    expect(result.isError).toBe(true);
+    const env = envelope(result);
+    expect(env.error).toBe("not_found");
+    expect(env.model).toBe("project.task");
+    expect(calls).toEqual([{ model: "project.task", method: "read" }]);
+  });
+
+  test("refuses a non-project.task res_model that slipped past the schema", async () => {
+    const calls: unknown[] = [];
+    const queue = dispatchQueue((model, method) => {
+      calls.push({ model, method });
+      return [];
+    });
+    const { handler } = buildProjectsServer(queue);
+
+    const result = await handler("projects.attach_file")({
+      task_id: 88,
+      name: "evidence.bin",
+      datas: HELLO_B64,
+      res_model: "account.move",
+      context: "Evidence upload."
+    });
+
+    expect(result.isError).toBe(true);
+    expect(envelope(result).error).toBe("invalid_res_model");
+    expect(calls).toHaveLength(0);
+  });
+
+  test("refuses invalid base64 with zero Odoo calls", async () => {
+    const calls: unknown[] = [];
+    const queue = dispatchQueue((model, method) => {
+      calls.push({ model, method });
+      return [];
+    });
+    const { handler } = buildProjectsServer(queue);
+
+    const result = await handler("projects.attach_file")({
+      task_id: 88,
+      name: "evidence.bin",
+      datas: "not base64!!",
+      context: "Evidence upload."
+    });
+
+    expect(result.isError).toBe(true);
+    expect(envelope(result).error).toBe("invalid_base64");
+    expect(calls).toHaveLength(0);
+  });
+
+  test("refuses a payload over max_bytes with zero Odoo calls, naming both sizes", async () => {
+    const calls: unknown[] = [];
+    const queue = dispatchQueue((model, method) => {
+      calls.push({ model, method });
+      return [];
+    });
+    const { handler } = buildProjectsServer(queue);
+
+    // 30 decoded bytes against a 16-byte cap.
+    const datas = btoa("a".repeat(30));
+    const result = await handler("projects.attach_file")({
+      task_id: 88,
+      name: "big.bin",
+      datas,
+      max_bytes: 16,
+      context: "Evidence upload."
+    });
+
+    expect(result.isError).toBe(true);
+    const env = envelope(result);
+    expect(env.error).toBe("oversize");
+    expect(String(env.details)).toContain("30");
+    expect(String(env.details)).toContain("16");
+    expect(calls).toHaveLength(0);
+  });
+
+  test("refuses base64 that decodes to zero bytes", async () => {
+    const calls: unknown[] = [];
+    const queue = dispatchQueue((model, method) => {
+      calls.push({ model, method });
+      return [];
+    });
+    const { handler } = buildProjectsServer(queue);
+
+    const result = await handler("projects.attach_file")({
+      task_id: 88,
+      name: "empty.bin",
+      datas: "   ",
+      context: "Evidence upload."
+    });
+
+    expect(result.isError).toBe(true);
+    expect(envelope(result).error).toBe("empty_datas");
+    expect(calls).toHaveLength(0);
+  });
+
+  test("issues no confirmation token — attachment creation is reversible", async () => {
+    const queue = dispatchQueue((model) => (model === "project.task" ? [{ id: 88, name: "Q3" }] : [7101]));
+    const { handler } = buildProjectsServer(queue);
+
+    const result = await handler("projects.attach_file")({
+      task_id: 88,
+      name: "evidence.bin",
+      datas: HELLO_B64,
+      context: "Evidence upload."
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(result.structuredContent).not.toHaveProperty("confirmation_token");
+    expect(result.structuredContent).not.toHaveProperty("confirmation_required");
   });
 });
