@@ -15,7 +15,8 @@ reads, normalize the shapes, and refuse to write until a human confirms.
 | Create / update **VAT-complete vendor** (`res.partner` identity: `vat`, `siret`, `company_registry`, plus name / `country_id` / contact) | Generic `create_record` / `update_record` — then attach via `billing.configure_draft_vendor_bill` (`partner_id`, draft-only). Partner identity is **not** a `bookkeeping.plan_safe_write` concern; banks / property accounts / credit limits remain MCP-denied |
 | Draft vendor-bill / expense **preparatory** fields (draft-only; expense amount via `total_amount` — `total_amount_currency` is audit-only) | `billing.update_draft_expense`, `billing.configure_draft_vendor_bill` |
 | **Attach / page-split a source PDF** onto a draft vendor bill (composite supplier PDFs) | `billing.attach_source_pdf` (draft `in_invoice` only; extract or copy in-Worker). Not generic `ir.attachment` CRUD |
-| **Link an already-filed Documents file** to an `account.move` / `project.task` (one durable copy, no byte duplication) | `bookkeeping.link_source_document` (write; sets `documents.document` `res_model`/`res_id` only; requires the Documents app). **Not** `billing.attach_source_pdf` (which copies/page-splits PDF **bytes** onto a draft bill) and not the read side — verify links with `bookkeeping.search_source_documents` |
+| **Link an already-filed Documents file** to an `account.move` / `project.task` (one durable copy, no byte duplication) | `bookkeeping.link_source_document` (write; sets `documents.document` `res_model`/`res_id` only; requires the Documents app; `/mcp` + `/accounting/mcp` only). **Not** `billing.attach_source_pdf` (which copies/page-splits PDF **bytes** onto a draft bill) and not the read side — verify links with `bookkeeping.search_source_documents` |
+| **Attach newly generated evidence bytes** (audit workbook, export, report) to a `project.task` | `projects.attach_file` (write; `/mcp` + `/projects/mcp`; creates one binary `ir.attachment` with `res_model=project.task`, required `context`, 10 MiB decoded cap). Use this when the bytes do **not** yet exist in Odoo: `bookkeeping.link_source_document` is link-only (no new bytes, Documents app required) and `billing.attach_source_pdf` only targets draft vendor bills. Generic `create_record` on `ir.attachment` stays denied |
 | Reversible expense / vendor-bill **lifecycle** (reset→edit→resubmit/reapprove) | `call_model_method` on allowlisted methods only (`list_model_actions` → `executable:true`), with required write `context` + compatible record `state`; a transition that leaves `posted` additionally needs `confirmation_token` |
 | Tax-close / report external value / return / lock-exception | `bookkeeping.plan_safe_write` (validate-only + human confirm) |
 | Reversible CRUD / lifecycle on `account.*` / `hr.*` / etc. | Allowed via generic write tools — Odoo ACLs/workflow/locks are authority (not model-prefix denial) |
@@ -743,8 +744,10 @@ new `ir.attachment`, no mirror records, no ledger state changes.
 
 Use this when the PDF is already in the Documents app and you need a durable link to a
 business record. To copy/page-split PDF **bytes** onto a draft vendor bill, use
-`billing.attach_source_pdf` instead. To find the document id or verify an existing link, use
-§4.5 `bookkeeping.search_source_documents`.
+`billing.attach_source_pdf` instead. To upload **new** bytes an agent just generated (an
+audit workbook, an export) onto a `project.task`, use `projects.attach_file` — this tool
+never carries bytes, so it cannot file a document that is not already in Odoo. To find the
+document id or verify an existing link, use §4.5 `bookkeeping.search_source_documents`.
 
 Requires the Documents app; missing/denied access is a hard refusal (not the search tool's
 soft-degrade).

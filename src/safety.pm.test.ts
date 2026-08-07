@@ -457,6 +457,19 @@ describe("classifyPmWriteIntent — bookkeeping isolation", () => {
     expect([...PM_MODEL_ALLOWLIST].sort()).toEqual(["mail.activity", "project.task"]);
   });
 
+  test("generic CRUD on ir.attachment stays denied — projects.attach_file is the only path", () => {
+    for (const method of ["create", "write", "unlink"] as const) {
+      const result = classifyPmWriteIntent({
+        model: "ir.attachment",
+        method,
+        args: { ids: [1], vals: { name: "evidence.xlsx", res_model: "project.task", res_id: 42 } }
+      });
+      expect(result).toMatchObject({ verdict: "denied", intent: "disallowed" });
+      expect(result.reason).toContain("are not allowlisted");
+      expect(result.reason).toContain("project.task / mail.activity");
+    }
+  });
+
   test("bookkeeping.ts does not import classifyPmWriteIntent", async () => {
     const mod = await import("./tools/bookkeeping");
     expect("classifyPmWriteIntent" in mod).toBe(false);

@@ -13,6 +13,7 @@ import type { TtlCache } from "../cache";
 import { deriveWorkflowStatus } from "../normalizer";
 import type { OdooQueue } from "../odoo-queue";
 import type { Props } from "../server";
+import { base64ToBytes, PdfPagesError } from "../pdf-pages";
 import { preflightProjectTaskStateWrite } from "../project-task-state-gate";
 import { assessWriteOperation } from "../write-safety";
 import { annotateRecordUrl, annotateRecordUrls, buildRecordUrl } from "./record-urls";
@@ -32,8 +33,10 @@ import {
   zOdooRecord,
   zOdooRecords,
   withWaitingAnnotationFields,
+  zRequiredWriteContext,
   zWarnings,
-  zWriteContext
+  zWriteContext,
+  type WriteBlockedIntent
 } from "./shared";
 
 /** Default fields for project.project list/get (matches MODEL_FIELD_PRESETS). */
@@ -45,6 +48,45 @@ export const DEFAULT_STAGE_FIELDS = ["id", "name", "sequence", "fold"];
 const RECORD_LINK_NOTE =
   " Each record carries `_web_url`, the canonical clickable Odoo link — cite records to the user as " +
   "[record name](_web_url), never as a bare id.";
+
+/**
+ * Byte cap for projects.attach_file, matching billing.attach_source_pdf / bookkeeping.fetch_attachment:
+ * base64 inflates a payload ~1.37x, so this is the decoded size we are willing to hold in Worker memory.
+ */
+export const TASK_ATTACHMENT_MAX_BYTES = 10485760;
+const TASK_ATTACHMENT_NAME_MAX = 255;
+const DEFAULT_TASK_ATTACHMENT_MIMETYPE = "application/octet-stream";
+
+/**
+ * Error envelope for projects.* refusals, mirroring billing.ts's `billingBlocked`: a custom `error`
+ * code gets a hand-built envelope, while a plain policy refusal goes through mcpWriteBlockedError.
+ */
+function projectsBlocked(
+  context: { model: string; method?: string },
+  opts: { intent?: WriteBlockedIntent; reason: string; blocked_fields?: string[]; error?: string }
+) {
+  if (opts.error && opts.error !== "write_blocked") {
+    const envelope = {
+      error: opts.error,
+      intent: opts.intent ?? ("project_management" as const),
+      model: context.model,
+      method: context.method ?? "write",
+      http_status: null,
+      details: opts.reason,
+      recoverable: false,
+      ...(opts.blocked_fields?.length ? { blocked_fields: opts.blocked_fields } : {})
+    };
+    return { content: [{ type: "text" as const, text: JSON.stringify(envelope) }], isError: true as const };
+  }
+  return mcpWriteBlockedError(
+    { model: context.model, method: context.method ?? "write" },
+    {
+      intent: opts.intent ?? "project_management",
+      reason: opts.reason,
+      blocked_fields: opts.blocked_fields
+    }
+  );
+}
 
 const zFieldOmission = z.object({ field: z.string(), reason: z.string() });
 const zFieldsReport = {
@@ -485,6 +527,174 @@ export function registerProjectsTools(
         const provenance_warning = `created task ${id} but failed to post the provenance stamp (${errMessage})`;
         const text = `${JSON.stringify(id)}${link}\n\nWarning: ${provenance_warning}.`;
         return mcpStructured({ id, ...(webUrl ? { web_url: webUrl } : {}), provenance_warning }, text);
+      }
+    }
+  );
+
+  server.registerTool(
+    "projects.attach_file",
+    {
+      title: "Attach File To Project Task",
+      description:
+        "Write: create one binary ir.attachment holding the supplied base64 bytes and link it to an existing " +
+        "project.task via res_model/res_id. Built for agent-generated evidence — audit workbooks, exports, " +
+        "reports — that belongs on the task documenting the work. The task itself is never modified, and no " +
+        "existing attachment is ever deleted or rewritten. This is not generic ir.attachment CRUD: it only ever " +
+        "creates one attachment on one project.task. To link an already-filed Documents record instead of " +
+        "uploading new bytes use bookkeeping.link_source_document; for draft vendor bills use billing.attach_source_pdf.",
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+      inputSchema: {
+        task_id: z.number().int().positive().describe("Existing project.task id to attach the file to"),
+        name: z
+          .string()
+          .min(1)
+          .max(TASK_ATTACHMENT_NAME_MAX)
+          .describe("File name for the new attachment (e.g. `q3-vat-workbook.xlsx`)"),
+        datas: z.string().min(1).describe("File bytes, base64-encoded"),
+        mimetype: z
+          .string()
+          .min(1)
+          .max(255)
+          .optional()
+          .describe(`MIME type of the payload; defaults to ${DEFAULT_TASK_ATTACHMENT_MIMETYPE}`),
+        res_model: z
+          .literal("project.task")
+          .default("project.task")
+          .describe("Always project.task — this tool cannot retarget another model"),
+        max_bytes: z
+          .number()
+          .int()
+          .positive()
+          .default(TASK_ATTACHMENT_MAX_BYTES)
+          .describe("Refuse payloads decoding to more than this many bytes, before any Odoo call"),
+        context: zRequiredWriteContext
+      },
+      outputSchema: {
+        ok: z.boolean(),
+        attachment_id: z.number().int().describe("id of the newly created ir.attachment"),
+        task_id: z.number().int(),
+        res_model: z.literal("project.task"),
+        res_id: z.number().int(),
+        name: z.string(),
+        mimetype: z.string(),
+        file_size: z.number().int().describe("decoded byte length of the stored payload")
+      }
+    },
+    async ({ task_id, name, datas, mimetype, res_model, max_bytes = TASK_ATTACHMENT_MAX_BYTES, context }) => {
+      const model = "ir.attachment";
+      const taskModel = "project.task";
+      logWriteContext("projects.attach_file", model, context);
+
+      // Deliberately no assessWriteOperation / PM gate call here: ir.attachment is not in
+      // PM_MODEL_ALLOWLIST, so the classifier would default-deny this tool's own create. That denial
+      // is correct for generic create_record and must stay; this tool enforces the narrower invariants
+      // itself (project.task-only target, single binary attachment, size cap) — same shape as
+      // billing.attach_source_pdf. projects.create_task above does call the gate because project.task
+      // *is* allowlisted; the difference is intentional, not an oversight.
+
+      // Defensive: the zod literal (and its default) normally settles this before the handler runs.
+      if ((res_model ?? taskModel) !== taskModel) {
+        return projectsBlocked(
+          { model, method: "create" },
+          {
+            error: "invalid_res_model",
+            reason:
+              `projects.attach_file only attaches to ${taskModel}; got res_model=${String(res_model)}. ` +
+              "Use bookkeeping.link_source_document or billing.attach_source_pdf for other targets. " +
+              "No Odoo call was made."
+          }
+        );
+      }
+
+      // Decode locally first — an invalid or oversize payload never costs an Odoo round-trip.
+      let bytes: Uint8Array;
+      try {
+        bytes = base64ToBytes(datas);
+      } catch (err) {
+        if (err instanceof PdfPagesError) {
+          return projectsBlocked(
+            { model, method: "create" },
+            {
+              error: "invalid_base64",
+              reason:
+                "`datas` is not valid base64, so nothing could be decoded to store. Send the raw file bytes " +
+                "base64-encoded (whitespace is tolerated). No Odoo call was made."
+            }
+          );
+        }
+        throw err;
+      }
+      if (bytes.length === 0) {
+        return projectsBlocked(
+          { model, method: "create" },
+          {
+            error: "empty_datas",
+            reason: "`datas` decodes to zero bytes; there is nothing to attach. No Odoo call was made."
+          }
+        );
+      }
+      if (bytes.length > max_bytes) {
+        return projectsBlocked(
+          { model, method: "create" },
+          {
+            error: "oversize",
+            reason:
+              `\`datas\` decodes to ${bytes.length} bytes, exceeding max_bytes (${max_bytes}). ` +
+              "Base64 encoding inflates the payload ~1.37x against Worker memory limits, so it was not sent. " +
+              "Raise max_bytes if you really need this file. No Odoo call was made."
+          }
+        );
+      }
+
+      const resolvedMimetype = mimetype ?? DEFAULT_TASK_ATTACHMENT_MIMETYPE;
+
+      try {
+        const conn = requireConnection(getProps());
+
+        // The target task must exist. Odoo ACLs stay the authz layer — a key that may not read the
+        // task errors out of Odoo here, which is the intended behaviour.
+        const taskRows = await queue.enqueue(conn, taskModel, "read", {
+          ids: [task_id],
+          fields: ["id", "name"]
+        });
+        if (!Array.isArray(taskRows) || taskRows.length === 0) {
+          return projectsBlocked(
+            { model: taskModel, method: "read" },
+            { error: "not_found", reason: `project.task id ${task_id} was not found.` }
+          );
+        }
+
+        // Store the caller's own base64 (whitespace-stripped) rather than re-encoding, so the stored
+        // bytes are byte-identical to the ones validated above. `context` is audit-only, never a val.
+        const created = await queue.enqueue(conn, model, "create", {
+          vals_list: [
+            {
+              name,
+              type: "binary",
+              mimetype: resolvedMimetype,
+              datas: datas.replace(/\s+/g, ""),
+              res_model: taskModel,
+              res_id: task_id
+            }
+          ]
+        });
+        const attachment_id = Array.isArray(created) ? created[0] : created;
+        if (typeof attachment_id !== "number" || !Number.isInteger(attachment_id) || attachment_id <= 0) {
+          return mcpError("Odoo create returned no ir.attachment id");
+        }
+
+        return mcpStructured({
+          ok: true,
+          attachment_id,
+          task_id,
+          res_model: "project.task" as const,
+          res_id: task_id,
+          name,
+          mimetype: resolvedMimetype,
+          file_size: bytes.length
+        });
+      } catch (err) {
+        return mcpErrorFromException(err, { model, method: "create" });
       }
     }
   );

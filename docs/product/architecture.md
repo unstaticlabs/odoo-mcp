@@ -155,8 +155,10 @@ Tools are grouped by **domain module**, registered on the `McpAgent`:
 
 - **`projects.*`** — v1. `projects.list_projects`, `projects.list_tasks`,
   `projects.list_chatter`, `projects.get_task`, `projects.list_stages` (read);
-  `projects.create_task` (write, Odoo 19 `vals_list`). Further writes (`update_task`,
-  `move_task`) follow the same pattern.
+  `projects.create_task` (write, Odoo 19 `vals_list`), `projects.attach_file` (write, creates
+  one binary `ir.attachment` scoped to an existing `project.task` — the only sanctioned path
+  for attachment bytes, since generic `ir.attachment` CRUD stays PM-denied). Further writes
+  (`update_task`, `move_task`) follow the same pattern.
 - **`booking.*`** — later. Read bookings first, then create.
 - **`billing.*`** — later. Read invoices first, then create invoice / link
   records.

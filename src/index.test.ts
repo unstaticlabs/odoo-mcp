@@ -601,10 +601,21 @@ describe("endpoint tool surfaces", () => {
 
     expect(names.has("projects.list_tasks")).toBe(true);
     expect(names.has("projects.create_task")).toBe(true);
+    expect(names.has("projects.attach_file")).toBe(true);
     expect(names.has("feedback.submit")).toBe(true);
     expect(names.has("bookkeeping.get_snapshot")).toBe(false);
     expect(names.has("search_records")).toBe(false);
     expect(names.has("create_record")).toBe(false);
+  });
+
+  test("projects.attach_file ships on /mcp and /projects/mcp but never on /accounting/mcp", async () => {
+    const generic = await toolNames(McpAgent);
+    const projects = await toolNames(ProjectsAgent);
+    const accounting = await toolNames(AccountingAgent);
+
+    expect(generic.has("projects.attach_file")).toBe(true);
+    expect(projects.has("projects.attach_file")).toBe(true);
+    expect(accounting.has("projects.attach_file")).toBe(false);
   });
 
   test("search_source_documents ships on /mcp and /accounting/mcp but never on /projects/mcp", async () => {
@@ -2816,6 +2827,7 @@ describe("tool metadata (title/annotations)", () => {
       "billing.configure_draft_vendor_bill",
       "billing.attach_source_pdf",
       "projects.create_task",
+      "projects.attach_file",
       "feedback.submit"
     ];
     for (const name of writeToolNames) {
@@ -2830,7 +2842,8 @@ describe("tool metadata (title/annotations)", () => {
       "projects.list_tasks",
       "projects.get_task",
       "projects.list_stages",
-      "projects.create_task"
+      "projects.create_task",
+      "projects.attach_file"
     ]) {
       expect(agent.server._registeredTools[name], `missing ${name}`).toBeDefined();
     }

@@ -57,6 +57,7 @@ The server never logs, stores, or echoes your key.
 | `projects.list_stages` | read | `project_id` (positive int, optional), `domain` (array), `fields` (string[]), `limit` (1–100) — `project.task.type` stages for a project |
 | `projects.list_chatter` | read | `task_ids` (positive int[], 1–25), `limit_per_task` (1–50, default 20), `order` (string, default `"date desc"`) — canonical multi-task PM chatter; one scoped `mail.message` query per task; caps at 8 Odoo calls |
 | `projects.create_task` | write | `name` (string), `project_id` (positive int), `description` / `stage_id` / `tag_ids` (optional), `values` (optional extra vals), `context` (optional) — Odoo 19 `vals_list` create + provenance `trace_token` |
+| `projects.attach_file` | write | `task_id` (positive int), `name` (string ≤ 255), `datas` (base64 file bytes), `mimetype` (optional, default `application/octet-stream`), `max_bytes` (default 10 MiB decoded), `context` (**required**) — creates one binary `ir.attachment` with `res_model=project.task` / `res_id=task_id`. Refuses unknown tasks, invalid base64, empty or oversize payloads, and any other `res_model`, before any create. Not generic `ir.attachment` CRUD |
 | [`aggregate_records`](#aggregate_records--grouped-summaries) | read | `model` (string), `domain` (array), `groupby` (string[], Odoo `field:agg` syntax e.g. `invoice_date:month`), `aggregates` (string[], e.g. `amount_total:sum`, `__count`), `lazy` (bool, default true), `orderby` (string, optional), `limit` (1–100, default 100, fallback scan cap), `offset` (int ≥ 0, default 0) — native `read_group` with bounded connector fallback |
 | `create_record` | write | `model` (string), `values` (object), `context` (string ≤ 500, optional — see [Write context](#write-context-audit-only)) |
 | `update_record` | write | `model` (string), `record_id` (positive int), `values` (object; x2many use Odoo command tuples, e.g. `[[6,0,ids]]`, `[[4,id]]`, `[[3,id]]`), `context` (optional) |
@@ -202,6 +203,12 @@ and identify the record by name plus `model,id` — do not invent a route.
   `call_model_method` are for changing the task's *own* fields (stage, assignee, dates,
   tags) — not for recording what happened. Activities go via `create_record` /
   `call_model_method` on `mail.activity` with `res_model` ∈ `{project.task, project.project}`.
+- **Files on a task → `projects.attach_file`.** Agent-generated evidence (audit workbooks,
+  exports, reports) is attached with `projects.attach_file` (`task_id` + base64 `datas` +
+  required `context`). Generic `create_record` on `ir.attachment` is **denied** — that
+  denial is deliberate, so do not route around it. To link a file already filed in the
+  Documents app, use `bookkeeping.link_source_document`; for draft vendor bills,
+  `billing.attach_source_pdf`.
 - **Operational text** may reference banking, B2C exports, VAT, payroll handoffs, deadlines — the
   connector classifies by **model + method + field names**, not free-text keywords.
 - **Draft vendor-bill / expense prep** — use `billing.update_draft_expense` /
@@ -283,6 +290,7 @@ move to Done or Cancelled. These are five different things and only the last one
 | Scheduling | `date_start` / `date_deadline` / `mail.activity` | When it is due or planned |
 | Blocked By | `depend_on_ids` | Which tasks must close first |
 | Waiting | `state` | **Derived** by Odoo from stage + open Blocked By |
+| Evidence / files | `ir.attachment` via `projects.attach_file` | The workbook, export or report the task documents — never generic attachment CRUD |
 
 The connector enforces this:
 
