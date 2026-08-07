@@ -265,4 +265,31 @@ describe("un-posting is gated in the same class as posting", () => {
     expect(executed.isError).toBeUndefined();
     expect(calls.map((c) => c.method)).toContain("button_draft");
   });
+
+  test("un-posting also executes when the token is only under kwargs (lift + strip)", async () => {
+    const { queue, calls } = dispatchQueue(({ method }) => {
+      if (method === "read") return [{ id: 9, state: "posted" }];
+      return true;
+    });
+    const h = handlers(queue);
+    const preflight = await h.callModelMethod({
+      model: "account.move",
+      method: "button_draft",
+      ids: [9],
+      context: "correcting a manual entry"
+    });
+    const token = envelopeOf(preflight).confirmation_token as string;
+
+    const executed = await h.callModelMethod({
+      model: "account.move",
+      method: "button_draft",
+      ids: [9],
+      context: "correcting a manual entry",
+      kwargs: { confirmation_token: token }
+    });
+    expect(executed.isError).toBeUndefined();
+    const mutate = calls.find((c) => c.method === "button_draft");
+    expect(mutate).toBeDefined();
+    expect(mutate!.args).not.toHaveProperty("confirmation_token");
+  });
 });
