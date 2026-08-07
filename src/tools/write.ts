@@ -19,6 +19,7 @@ import {
 } from "../safety";
 import type { Props } from "../server";
 import { assessWriteOperation, isMutatingOdooMethod } from "../write-safety";
+import { buildRecordUrl } from "./record-urls";
 import {
   logWriteContext,
   mcpConfirmationRequired,
@@ -30,6 +31,14 @@ import {
   requireConnection,
   zWriteContext
 } from "./shared";
+
+/**
+ * Appended to write descriptions that return an affected record: the user needs a link back
+ * into Odoo, not the id we happen to have. See src/tools/record-urls.ts.
+ */
+const RECORD_LINK_WRITE_NOTE =
+  " The response carries `web_url`, the canonical clickable Odoo link for the record — confirm the write to the " +
+  "user as [record name](web_url), never as a bare id.";
 
 const PM_WRITE_ROUTING_NOTE =
   " Project-management notes (including banking/B2C/deadline operational text) on project.task / project.project / mail.activity→project.* are allowed. " +
@@ -468,6 +477,7 @@ export function registerWriteTools(
         "Write: create a single Odoo record of the given model. When the model is project.task, the response carries a " +
         "trace_token (src-…) that is also stamped into the task's chatter — you MUST surface that token verbatim in your " +
         "visible reply to the user so the conversation can be found again from the Odoo task." +
+        RECORD_LINK_WRITE_NOTE +
         PM_WRITE_ROUTING_NOTE +
         TASK_WAITING_DEFERRAL_NOTE,
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
@@ -479,6 +489,10 @@ export function registerWriteTools(
       },
       outputSchema: {
         id: z.number().int().describe("Database id of the created record"),
+        web_url: z
+          .string()
+          .optional()
+          .describe("Canonical clickable Odoo URL of the created record — surface it as [record name](web_url)"),
         trace_token: z
           .string()
           .optional()
@@ -522,9 +536,16 @@ export function registerWriteTools(
         return mcpErrorFromException(err, { model, method: "create" });
       }
 
+      // `values` is the only context we have for route selection (move_type, project_id, …);
+      // fields it omits just fall back to the model-level route, never to a wrong one.
+      const webUrl = buildRecordUrl(conn.url, model, id, values);
+
       // Only project.task creations get a trusted provenance stamp; every other model is byte-for-byte unchanged.
       if (model !== "project.task") {
-        return mcpStructured({ id }, JSON.stringify(id));
+        return mcpStructured(
+          { id, ...(webUrl ? { web_url: webUrl } : {}) },
+          webUrl ? `${JSON.stringify(id)}\n\nOdoo record: ${webUrl}` : JSON.stringify(id)
+        );
       }
 
       const token = "src-" + crypto.randomUUID().replace(/-/g, "").slice(0, 8);
@@ -545,16 +566,18 @@ export function registerWriteTools(
         // after the id) is what gets `src-…` into the ChatGPT/Claude transcript so the task is traceable.
         const text =
           `TRACE TOKEN ${token} — you MUST include this token verbatim in your visible reply to the user so ` +
-          `this conversation can be found later from the Odoo task.\n\n` +
+          `this conversation can be found later from the Odoo task.` +
+          (webUrl ? ` Link the task as [task name](${webUrl}).` : "") +
+          `\n\n` +
           JSON.stringify(id);
-        return mcpStructured({ id, trace_token: token }, text);
+        return mcpStructured({ id, ...(webUrl ? { web_url: webUrl } : {}), trace_token: token }, text);
       } catch (err) {
         // A chatter-post failure must never fail the create: return the id and warn, never surface an MCP error.
         // No token is surfaced here — it was never stamped into the chatter, so echoing it would be a dead reference.
         const errMessage = err instanceof Error ? err.message : String(err);
         const provenance_warning = `created task ${id} but failed to post the provenance stamp (${errMessage})`;
-        const text = `${JSON.stringify(id)}\n\nWarning: ${provenance_warning}.`;
-        return mcpStructured({ id, provenance_warning }, text);
+        const text = `${JSON.stringify(id)}${webUrl ? `\n\nOdoo record: ${webUrl}` : ""}\n\nWarning: ${provenance_warning}.`;
+        return mcpStructured({ id, ...(webUrl ? { web_url: webUrl } : {}), provenance_warning }, text);
       }
     }
   );
@@ -613,6 +636,7 @@ export function registerWriteTools(
       title: "Update Record",
       description:
         "Write: update fields on a single Odoo record by id. x2many fields need Odoo command tuples (e.g. [[6,0,ids]], [[4,id]], [[3,id]])." +
+        RECORD_LINK_WRITE_NOTE +
         PM_WRITE_ROUTING_NOTE +
         TASK_WAITING_DEFERRAL_NOTE +
         CHATTER_VS_FIELDS_NOTE,
@@ -625,7 +649,11 @@ export function registerWriteTools(
         confirmation_token: zConfirmationToken
       },
       outputSchema: {
-        ok: z.boolean().describe("True when the write succeeded")
+        ok: z.boolean().describe("True when the write succeeded"),
+        web_url: z
+          .string()
+          .optional()
+          .describe("Canonical clickable Odoo URL of the updated record — surface it as [record name](web_url)")
       }
     },
     async ({ model, record_id, values, context, confirmation_token }) => {
@@ -643,11 +671,18 @@ export function registerWriteTools(
       });
       if (blocked) return blocked;
       try {
-        await queue.enqueue(requireConnection(getProps()), model, "write", {
+        const conn = requireConnection(getProps());
+        await queue.enqueue(conn, model, "write", {
           ids: [record_id],
           vals: values
         });
-        return mcpStructured({ ok: true }, JSON.stringify(true, null, 2));
+        // `values` only carries the fields being written, so route variants it does not
+        // mention (an untouched move_type, say) degrade to the model-level route.
+        const webUrl = buildRecordUrl(conn.url, model, record_id, values);
+        return mcpStructured(
+          { ok: true, ...(webUrl ? { web_url: webUrl } : {}) },
+          webUrl ? `${JSON.stringify(true)}\n\nOdoo record: ${webUrl}` : JSON.stringify(true, null, 2)
+        );
       } catch (err) {
         return mcpErrorFromException(err, { model, method: "write", record_ids: [record_id] });
       }

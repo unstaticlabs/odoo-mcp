@@ -26,10 +26,19 @@ import {
   zOdooRecords,
   zWarnings
 } from "./shared";
+import { annotateRecordUrl, annotateRecordUrls } from "./record-urls";
 import { aggregateRecords } from "../aggregation";
 import { deriveWorkflowStatus, normalizeRecords } from "../normalizer";
 import { type CachedFieldMeta, type TtlCache, getFieldsCached } from "../cache";
 import { OdooError } from "../odoo";
+
+/**
+ * Appended to every read description that returns records: agents must surface the link,
+ * not the id. See src/tools/record-urls.ts for the route derivation.
+ */
+const RECORD_LINK_NOTE =
+  " Each record carries `_web_url`, the canonical clickable Odoo link — cite records to the user as " +
+  "[record name](_web_url), never as a bare id.";
 
 const zFieldOmission = z.object({ field: z.string(), reason: z.string() });
 const zFieldsReport = {
@@ -149,7 +158,8 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
       title: "Search Records",
       description:
         "Read-only: model-agnostic Odoo search_read. " +
-        "For project.task chatter, use projects.list_chatter or per-id expand_record — not bulk mail.message reads with body/preview.",
+        "For project.task chatter, use projects.list_chatter or per-id expand_record — not bulk mail.message reads with body/preview." +
+        RECORD_LINK_NOTE,
       annotations: { readOnlyHint: true, openWorldHint: false },
       inputSchema: {
         model: z.string(),
@@ -160,7 +170,9 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
         offset: z.number().int().min(0).default(0)
       },
       outputSchema: {
-        records: zOdooRecords.describe("Matching records with the requested (or preset-default) fields"),
+        records: zOdooRecords.describe(
+          "Matching records with the requested (or preset-default) fields, each with `_web_url`"
+        ),
         ...zFieldsReport
       }
     },
@@ -168,9 +180,10 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
       if (!model || !model.trim()) return mcpError("model must be a non-empty string");
       try {
         const warnings: string[] = [];
+        const conn = requireConnection(getProps());
         const { rows, fieldsReport } = await searchRecords(
           queue,
-          requireConnection(getProps()),
+          conn,
           model,
           domain,
           fields,
@@ -180,14 +193,15 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
           cache,
           warnings
         );
+        const records = annotateRecordUrls(conn.url, model, rows as Record<string, unknown>[]);
         return mcpStructured(
           {
-            records: rows as Record<string, unknown>[],
+            records,
             returned_fields: fieldsReport.returned_fields,
             omitted_fields: fieldsReport.omitted_fields,
             warnings
           },
-          JSON.stringify(rows, null, 2)
+          JSON.stringify(records, null, 2)
         );
       } catch (err) {
         return mcpErrorFromException(err, { model, method: "search_read" });
@@ -429,7 +443,8 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
         "side effects (linked accounting entries, downstream automations), so check this field before mutating. " +
         "For `project.task`, `state` and `depend_on_ids` are always projected and a task in Waiting " +
         "(`04_waiting_normal`) is annotated with `_waiting_derived`, `_open_blocker_ids` and `_waiting_explanation` — " +
-        "Odoo computes Waiting from open Blocked By dependencies, so it is not a status to write.",
+        "Odoo computes Waiting from open Blocked By dependencies, so it is not a status to write." +
+        RECORD_LINK_NOTE,
       annotations: { readOnlyHint: true, openWorldHint: false },
       inputSchema: {
         model: z.string(),
@@ -437,7 +452,11 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
         fields: z.array(z.string()).nullable().default(null)
       },
       outputSchema: {
-        record: zOdooRecord.nullable().describe("The record (with `_workflow_status` when derivable), or null when the id does not exist"),
+        record: zOdooRecord
+          .nullable()
+          .describe(
+            "The record (with `_workflow_status` when derivable and `_web_url`), or null when the id does not exist"
+          ),
         ...zFieldsReport
       }
     },
@@ -475,7 +494,11 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
             ? await annotateWaitingTask(queue, conn, rows[0] as Record<string, unknown>)
             : (rows[0] as Record<string, unknown>);
         const workflowStatus = deriveWorkflowStatus(record);
-        const result = workflowStatus != null ? { ...record, _workflow_status: workflowStatus } : record;
+        const result = annotateRecordUrl(
+          conn.url,
+          model,
+          workflowStatus != null ? { ...record, _workflow_status: workflowStatus } : record
+        );
         return mcpStructured(
           {
             record: result,
@@ -498,7 +521,8 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
       description:
         "Read-only: fetch multiple Odoo records of one model by id in a single call. " +
         "`fields` omitted/null → curated per-model preset (see Field selection); a string array → exactly those fields. " +
-        "At most 100 ids are read (extra ids are ignored); return order follows Odoo search_read, not input order.",
+        "At most 100 ids are read (extra ids are ignored); return order follows Odoo search_read, not input order." +
+        RECORD_LINK_NOTE,
       annotations: { readOnlyHint: true, openWorldHint: false },
       inputSchema: {
         model: z.string(),
@@ -506,7 +530,9 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
         fields: z.array(z.string()).nullable().default(null)
       },
       outputSchema: {
-        records: zOdooRecords.describe("Found records in Odoo search_read order (missing ids are silently absent)"),
+        records: zOdooRecords.describe(
+          "Found records in Odoo search_read order, each with `_web_url` (missing ids are silently absent)"
+        ),
         ...zFieldsReport
       }
     },
@@ -514,9 +540,10 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
       if (!model || !model.trim()) return mcpError("model must be a non-empty string");
       try {
         const warnings: string[] = [];
+        const conn = requireConnection(getProps());
         const { rows, fieldsReport } = await searchRecords(
           queue,
-          requireConnection(getProps()),
+          conn,
           model,
           [["id", "in", ids]],
           fields,
@@ -526,14 +553,15 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
           cache,
           warnings
         );
+        const records = annotateRecordUrls(conn.url, model, rows as Record<string, unknown>[]);
         return mcpStructured(
           {
-            records: rows as Record<string, unknown>[],
+            records,
             returned_fields: fieldsReport.returned_fields,
             omitted_fields: fieldsReport.omitted_fields,
             warnings
           },
-          JSON.stringify(rows, null, 2)
+          JSON.stringify(records, null, 2)
         );
       } catch (err) {
         return mcpErrorFromException(err, { model, method: "search_read" });
@@ -550,7 +578,8 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
         "replacing the get_record → search_records → ... relation-chasing chain. Each hop through OdooQueue costs " +
         "≥1s, so this tool caps itself at 8 Odoo calls per invocation; once the cap is hit, remaining sections " +
         'degrade to {"error": "call budget exceeded (max 8 Odoo calls per invocation)"} instead of failing the ' +
-        "whole call. Preferred way to read one task's chatter; avoid bulk mail.message search_records across many res_ids.",
+        "whole call. Preferred way to read one task's chatter; avoid bulk mail.message search_records across many res_ids." +
+        RECORD_LINK_NOTE,
       annotations: { readOnlyHint: true, openWorldHint: false },
       inputSchema: {
         model: z.string(),
@@ -561,7 +590,9 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
         relation_limit: z.number().int().min(1).max(50).default(10)
       },
       outputSchema: {
-        record: zOdooRecord.nullable().describe("The normalized record, or null when the id does not exist"),
+        record: zOdooRecord
+          .nullable()
+          .describe("The normalized record (with `_web_url`), or null when the id does not exist"),
         relations: z
           .record(z.string(), z.unknown())
           .optional()
@@ -598,7 +629,7 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
         return mcpErrorFromException(err, { model, method: "search_read" });
       }
 
-      const record = normalizeRecords([rawRecord], fieldsMeta)[0];
+      const record = annotateRecordUrl(conn.url, model, normalizeRecords([rawRecord], fieldsMeta)[0]);
 
       const relationResults: Record<string, unknown> = {};
       for (const field of relations) {

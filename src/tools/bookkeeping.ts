@@ -18,6 +18,7 @@ import {
   type PlanResult
 } from "../safety";
 import type { Props } from "../server";
+import { buildRecordUrl } from "./record-urls";
 import {
   logWriteContext,
   mcpError,
@@ -1695,6 +1696,14 @@ export function registerSourceDocumentTools(server: McpServer, getProps: () => P
         previous_link: z
           .object({ res_model: z.string().nullable(), res_id: z.number().int().nullable() })
           .describe("The document's related-record fields before this call"),
+        document_web_url: z
+          .string()
+          .optional()
+          .describe("Canonical clickable Odoo URL of the linked document"),
+        target_web_url: z
+          .string()
+          .optional()
+          .describe("Canonical clickable Odoo URL of the record it now points at — cite it as [record name](target_web_url)"),
         warnings: zWarnings,
         metadata: zCallMetadata
       }
@@ -1835,7 +1844,20 @@ export function registerSourceDocumentTools(server: McpServer, getProps: () => P
         const { odoo_calls, total_duration_ms } = queue.delta(before);
         const metadata = { odoo_calls, cache_hits: 0, duration_seconds: total_duration_ms / 1000 };
 
-        return mcpStructured({ ok: true, changed, document, previous_link, warnings, metadata });
+        const document_web_url = buildRecordUrl(conn.url, "documents.document", document_id);
+        // The target was only read for `id`, so account.move links land on Journal Entries.
+        const target_web_url = buildRecordUrl(conn.url, target_model, target_id);
+
+        return mcpStructured({
+          ok: true,
+          changed,
+          document,
+          previous_link,
+          ...(document_web_url ? { document_web_url } : {}),
+          ...(target_web_url ? { target_web_url } : {}),
+          warnings,
+          metadata
+        });
       } catch (err) {
         return mcpErrorFromException(err, { model: "documents.document", method: "write" });
       }

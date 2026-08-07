@@ -20,6 +20,7 @@ import type { OdooConnection } from "../odoo";
 import type { OdooQueue } from "../odoo-queue";
 import { SERVER_VERSION, type Props } from "../server";
 import { assessWriteOperation } from "../write-safety";
+import { buildRecordUrl } from "./record-urls";
 import {
   escapeHtml,
   mcpErrorFromException,
@@ -189,7 +190,9 @@ export function registerFeedbackTools(
         return mcpErrorFromException(err, { model: "project.task", method: "create" });
       }
 
-      const url = `${conn.url.replace(/\/+$/, "")}/odoo/project/${FEEDBACK_PROJECT_ID}/tasks/${taskId}`;
+      // Same nested project route as every other task link — see src/tools/record-urls.ts.
+      const url =
+        buildRecordUrl(conn.url, "project.task", taskId, { project_id: FEEDBACK_PROJECT_ID }) ?? "";
       // Distinct low-trust marker — see the trust-model note in the module docstring.
       const marker = `${FEEDBACK_TITLE_PREFIX} category=${category} via=${client} server=${SERVER_VERSION}`;
 

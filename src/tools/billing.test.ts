@@ -429,7 +429,12 @@ describe("billing.update_draft_expense", () => {
     const result = await updateExpense({ record_id: 394, values: { date: "2026-07-04" } });
 
     expect(result.isError).toBeUndefined();
-    expect(result.structuredContent).toEqual({ ok: true, record_id: 394, state: "draft" });
+    expect(result.structuredContent).toEqual({
+      ok: true,
+      record_id: 394,
+      state: "draft",
+      web_url: "http://example.com/odoo/expenses/394"
+    });
     expect(calls).toEqual([
       { model: "hr.expense", method: "read", args: { ids: [394], fields: ["id", "state"] } },
       { model: "hr.expense", method: "write", args: { ids: [394], vals: { date: "2026-07-04" } } }
@@ -501,7 +506,12 @@ describe("billing.update_draft_expense", () => {
     const result = await updateExpense({ record_id: 42, values: { total_amount: 28.61 } });
 
     expect(result.isError).toBeUndefined();
-    expect(result.structuredContent).toEqual({ ok: true, record_id: 42, state: "draft" });
+    expect(result.structuredContent).toEqual({
+      ok: true,
+      record_id: 42,
+      state: "draft",
+      web_url: "http://example.com/odoo/expenses/42"
+    });
     expect(calls).toEqual([
       { model: "hr.expense", method: "read", args: { ids: [42], fields: ["id", "state"] } },
       { model: "hr.expense", method: "write", args: { ids: [42], vals: { total_amount: 28.61 } } }
@@ -543,11 +553,13 @@ describe("billing.configure_draft_vendor_bill", () => {
     const result = await configureBill({ record_id: 9647, values: billValues });
 
     expect(result.isError).toBeUndefined();
+    // move_type read live → the link lands on Vendor Bills, not Journal Entries (ODOO2272).
     expect(result.structuredContent).toEqual({
       ok: true,
       record_id: 9647,
       state: "draft",
-      move_type: "in_invoice"
+      move_type: "in_invoice",
+      web_url: "http://example.com/odoo/vendor-bills/9647"
     });
     expect(calls[0]).toEqual({
       model: "account.move",
@@ -577,11 +589,13 @@ describe("billing.configure_draft_vendor_bill", () => {
     });
 
     expect(result.isError).toBeUndefined();
+    // move_type read live → the link lands on Vendor Bills, not Journal Entries (ODOO2272).
     expect(result.structuredContent).toEqual({
       ok: true,
       record_id: 9647,
       state: "draft",
-      move_type: "in_invoice"
+      move_type: "in_invoice",
+      web_url: "http://example.com/odoo/vendor-bills/9647"
     });
     expect(calls[1].args.vals).toMatchObject({
       partner_id: 10,

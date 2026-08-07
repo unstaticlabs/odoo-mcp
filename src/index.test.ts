@@ -2870,13 +2870,15 @@ describe("tool metadata (title/annotations)", () => {
     const handler = getToolHandler(agent, "search_records");
     const result = await handler({ model: "project.task", domain: [], fields: ["id", "name"], limit: 10, offset: 0 });
 
+    // Rows carry the canonical clickable URL alongside the id (ODOO2272).
+    const linked = [{ ...rows[0], _web_url: "http://example.com/odoo/all-tasks/1" }];
     expect(result.structuredContent).toEqual({
-      records: rows,
+      records: linked,
       returned_fields: ["id", "name"],
       omitted_fields: [],
       warnings: []
     });
-    expect(JSON.parse(result.content[0].text)).toEqual(rows);
+    expect(JSON.parse(result.content[0].text)).toEqual(linked);
     globalThis.fetch = originalFetch;
   });
 
@@ -2960,13 +2962,15 @@ describe("tool metadata (title/annotations)", () => {
     const handler = getToolHandler(agent, "projects.list_tasks");
     const result = await handler({ domain: [], fields: ["id", "name", "stage_id", "project_id"] });
 
+    // project_id present → the link keeps the nested project route (ODOO2272).
+    const linked = [{ ...rows[0], _web_url: "http://example.com/odoo/project/2/tasks/1" }];
     expect(result.structuredContent).toMatchObject({
-      records: rows,
+      records: linked,
       returned_fields: ["id", "name", "stage_id", "project_id"],
       omitted_fields: [],
       warnings: []
     });
-    expect(JSON.parse(result.content[0].text)).toEqual(rows);
+    expect(JSON.parse(result.content[0].text)).toEqual(linked);
     globalThis.fetch = originalFetch;
   });
 });
@@ -3932,7 +3936,8 @@ describe("expand_record", () => {
     expect(body.relations).toEqual({});
     expect(body.chatter).toEqual([{ date: "2024-01-01", author_id: { id: 7, name: "Alice" }, body: "hi", message_type: "comment" }]);
     expect(body.attachments).toEqual([{ name: "file.pdf", mimetype: "application/pdf", file_size: 123, create_date: "2024-01-01" }]);
-    expect(body.record).toEqual({ id: 42, name: "Task A" });
+    // No project_id read here, so the task link falls back to the All Tasks route (ODOO2272).
+    expect(body.record).toEqual({ id: 42, name: "Task A", _web_url: "http://example.com/odoo/all-tasks/42" });
     expect(result.isError).toBeUndefined();
   });
 
@@ -4020,7 +4025,7 @@ describe("expand_record", () => {
     const body = JSON.parse(result.content[0].text);
 
     expect(body.chatter.error).toContain("mail.message");
-    expect(body.record).toEqual({ id: 42, name: "Task A" });
+    expect(body.record).toEqual({ id: 42, name: "Task A", _web_url: "http://example.com/odoo/all-tasks/42" });
     expect(body.relations).toEqual({});
     expect(body.attachments.length).toBe(1);
     expect(result.isError).toBeUndefined();
@@ -4646,9 +4651,11 @@ describe("batch_read tool", () => {
     expect(fetchCalls[0].body.fields).toEqual(["id", "name"]);
     expect(fetchCalls[0].body.limit).toBe(2);
     expect(result.isError).toBeUndefined();
-    expect(JSON.parse(result.content[0].text)).toEqual(rows);
+    // res.partner routes through the verified Contacts action path (ODOO2272).
+    const linked = rows.map((row) => ({ ...row, _web_url: `http://example.com/odoo/contacts/${row.id}` }));
+    expect(JSON.parse(result.content[0].text)).toEqual(linked);
     expect(result.structuredContent).toMatchObject({
-      records: rows,
+      records: linked,
       returned_fields: ["id", "name"],
       omitted_fields: [],
       warnings: []
