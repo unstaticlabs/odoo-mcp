@@ -3,7 +3,7 @@ import { z } from "zod";
 import { readGroupCompat } from "../aggregation";
 import { type CachedFieldMeta, type TtlCache, getFieldsCached, resolveXmlIdCached } from "../cache";
 import { normalizeRecord, normalizeRecords } from "../normalizer";
-import { OdooError, type OdooConnection } from "../odoo";
+import { OdooError, companyRpcContext, type OdooConnection } from "../odoo";
 import type { OdooQueue } from "../odoo-queue";
 import {
   checkLockExceptionSupport,
@@ -75,6 +75,13 @@ const MOVE_LINE_TAX_TAG_FK_CANDIDATES = ["tax_tag_ids"];
 /** Exported for unit testing. Intersects candidate field names with a model's fields_get result. */
 export function pickExistingFields(candidates: string[], fieldsMeta: Record<string, unknown>): string[] {
   return candidates.filter((name) => name in fieldsMeta);
+}
+
+/** Exported for unit testing. Spreadable JSON-2 body fragment carrying the multi-company RPC context.
+ *  Every company-scoped account.account / account.move.line call must include it: on Odoo 19 the
+ *  company_id domain leaf alone does not defeat record rules for a non-default company. */
+export function companyContextArgs(companyId: number): { context: ReturnType<typeof companyRpcContext> } {
+  return { context: companyRpcContext(companyId) };
 }
 
 /** Exported for unit testing. `date` (an Odoo date/datetime string) falls within [dateFrom, dateTo] (both YYYY-MM-DD). */
@@ -386,7 +393,8 @@ async function buildKeyAccountsScope(
     const rows = (await queue.enqueue(conn, "account.account", "search_read", {
       domain,
       fields,
-      limit: 100
+      limit: 100,
+      ...companyContextArgs(companyId)
     })) as Record<string, unknown>[];
     accountIds = rows.map((row) => row.id as number);
   } catch (err) {
@@ -419,7 +427,8 @@ async function buildKeyAccountsScope(
       ],
       groupby: ["account_id"],
       aggregates,
-      lazy: true
+      lazy: true,
+      context: companyRpcContext(companyId)
     });
     const normalized = normalizeRecords(rows, moveLineFieldsMeta);
     balances = hasBalanceField
@@ -436,10 +445,12 @@ async function buildKeyAccountsScope(
       domain: [
         ["account_id", "in", accountIds],
         ["amount_residual", "!=", 0],
-        ["parent_state", "=", "posted"]
+        ["parent_state", "=", "posted"],
+        ["company_id", "=", companyId]
       ],
       fields,
-      limit: 50
+      limit: 50,
+      ...companyContextArgs(companyId)
     })) as Record<string, unknown>[];
     topOpenLines = groupByAccountId(normalizeRecords(rows, moveLineFieldsMeta));
   } catch (err) {
@@ -507,7 +518,8 @@ async function buildKeyAccountsReview(
   const accountRows = (await queue.enqueue(conn, "account.account", "search_read", {
     domain,
     fields: accountFields,
-    limit: 100
+    limit: 100,
+    ...companyContextArgs(companyId)
   })) as Record<string, unknown>[];
 
   const foundCodes = new Set(accountRows.map((row) => row.code as string));
@@ -540,7 +552,8 @@ async function buildKeyAccountsReview(
       ],
       groupby: ["account_id"],
       aggregates,
-      lazy: true
+      lazy: true,
+      context: companyRpcContext(companyId)
     });
     for (const row of balanceRows) {
       const acc = row.account_id;
@@ -579,7 +592,8 @@ async function buildKeyAccountsReview(
         ],
         fields: openFields,
         order: "date desc",
-        limit: 60
+        limit: 60,
+        ...companyContextArgs(companyId)
       })) as Record<string, unknown>[];
       openByAccount = groupByAccountId(normalizeRecords(openRows, moveLineFieldsMeta));
     } catch (err) {

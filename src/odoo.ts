@@ -9,6 +9,19 @@ export interface OdooConnection {
   apiKey: string;
 }
 
+/** Odoo RPC context sent as the top-level `context` key of the JSON-2 request body.
+ *  NOT the MCP write-audit `context` string (see tools/shared.ts zWriteContext), which is never sent to Odoo. */
+export type OdooRpcContext = Record<string, unknown>;
+
+/**
+ * Multi-company RPC context. Odoo 19 record rules on account.account / account.move.line
+ * are evaluated against `allowed_company_ids`; a company_id domain leaf alone cannot see
+ * records of a company outside the user's default allowed set.
+ */
+export function companyRpcContext(companyId: number): { allowed_company_ids: number[]; company_id: number } {
+  return { allowed_company_ids: [companyId], company_id: companyId };
+}
+
 export type OdooErrorCode =
   | "unauthorized"
   | "permission_denied"
@@ -190,7 +203,13 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Thin Odoo JSON-2 client. Never logs or echoes the caller's API key. */
+/**
+ * Thin Odoo JSON-2 client. Never logs or echoes the caller's API key.
+ *
+ * `args` is serialized verbatim as the JSON-2 request body, so a `context` key in `args`
+ * is forwarded to Odoo as the RPC context (see `companyRpcContext` for multi-company use).
+ * That is unrelated to the MCP write-audit `context` argument, which never reaches Odoo.
+ */
 export async function callOdoo(
   conn: OdooConnection,
   model: string,

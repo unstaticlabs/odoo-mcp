@@ -713,6 +713,14 @@ describe("bookkeeping.review_key_accounts", () => {
     expect(delta.calls.some((c) => c.method === "fields_get")).toBe(false);
     expect(calls.length).toBeGreaterThan(0);
     expect(parsed.metadata.duration_seconds).toEqual(expect.any(Number));
+    // The default company carries the multi-company RPC context too (adds a body key, not a call).
+    const scopedCalls = calls.filter(
+      (c) => (c.model === "account.account" || c.model === "account.move.line") && c.method !== "fields_get"
+    );
+    expect(scopedCalls.length).toBeGreaterThan(0);
+    for (const call of scopedCalls) {
+      expect(call.body.context).toEqual({ allowed_company_ids: [1], company_id: 1 });
+    }
   });
 
   const ODOO19_BALANCE_FIELDS: Record<string, CannedResponse> = {
@@ -829,6 +837,184 @@ describe("bookkeeping.review_key_accounts", () => {
     expect(account.debit).toBeNull();
     expect(account.credit).toBeNull();
     expect(account.severity).toBe("unknown");
+  });
+});
+
+describe("key accounts multi-company context", () => {
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  // Company 8 is NOT the API user's default company: without allowed_company_ids in the RPC
+  // context, Odoo 19 record rules hide these rows before the company_id domain leaf applies.
+  const OTHER_COMPANY_ID = 8;
+  const EXPECTED_CONTEXT = { allowed_company_ids: [OTHER_COMPANY_ID], company_id: OTHER_COMPANY_ID };
+
+  const OTHER_COMPANY_OVERRIDE: Record<string, CannedResponse> = {
+    "res.company.search_read": {
+      status: 200,
+      body: [
+        {
+          id: OTHER_COMPANY_ID,
+          name: "USL MEDIA",
+          country_id: [10, "United States"],
+          fiscalyear_lock_date: false,
+          tax_lock_date: false,
+          sale_lock_date: false,
+          purchase_lock_date: false,
+          hard_lock_date: false
+        }
+      ]
+    },
+    "account.account.search_read": {
+      status: 200,
+      body: [
+        { id: 510, code: "451000", name: "VAT Suspense", account_type: "liability_current", reconcile: true, company_id: [8, "USL MEDIA"] },
+        { id: 511, code: "101000", name: "Bank", account_type: "asset_cash", reconcile: true, company_id: [8, "USL MEDIA"] }
+      ]
+    },
+    "account.move.line.read_group": {
+      status: 200,
+      body: [
+        { account_id: [510, "VAT Suspense"], balance: -1200, __count: 4 },
+        { account_id: [511, "Bank"], balance: 8400, __count: 9 }
+      ]
+    },
+    "account.move.line.search_read": {
+      status: 200,
+      body: [
+        {
+          id: 610,
+          account_id: [510, "VAT Suspense"],
+          date: "2026-08-01",
+          name: "Open VAT",
+          amount_residual: 120,
+          move_id: [710, "MV10"],
+          partner_id: [810, "Partner"]
+        }
+      ]
+    }
+  };
+
+  /** Every company-scoped account.account / account.move.line data call carries the RPC context. */
+  function expectScopedContext(calls: { model: string; method: string; body: any }[]) {
+    const scoped = calls.filter(
+      (c) => (c.model === "account.account" || c.model === "account.move.line") && c.method !== "fields_get"
+    );
+    expect(scoped.length).toBeGreaterThan(0);
+    for (const call of scoped) {
+      expect(call.body.context).toEqual(EXPECTED_CONTEXT);
+    }
+  }
+
+  test("review of a non-default company returns balances and sends allowed_company_ids", async () => {
+    const { fetchMock, calls } = buildFetchMock(OTHER_COMPANY_OVERRIDE);
+    globalThis.fetch = fetchMock;
+    const handler = buildReviewHandler(makeQueue(), new TtlCache());
+
+    const result = await handler({ company: "USL MEDIA", date_to: "2026-08-11", account_codes: ["451000", "101000"] });
+
+    expect(result.isError).toBeUndefined();
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.warnings.some((w: string) => w.includes("No account.account record found for code"))).toBe(false);
+    const byCode = Object.fromEntries(parsed.accounts.map((a: any) => [a.code, a]));
+    expect(byCode["451000"].balance).toBe(-1200);
+    expect(byCode["101000"].balance).toBe(8400);
+
+    expectScopedContext(calls);
+    const readGroupCall = calls.find((c) => c.model === "account.move.line" && c.method === "read_group");
+    expect(readGroupCall?.body.context).toEqual(EXPECTED_CONTEXT);
+  });
+
+  test("Odoo 19 formatted_read_group fallback carries the same company context", async () => {
+    const { fetchMock, calls } = buildFetchMock({
+      ...OTHER_COMPANY_OVERRIDE,
+      "account.move.line.read_group": {
+        status: 404,
+        body: { error: { message: "The method 'account.move.line.read_group' does not exist" } }
+      },
+      "account.move.line.formatted_read_group": {
+        status: 200,
+        body: [
+          { account_id: [510, "VAT Suspense"], "balance:sum": -1200, __count: 4 },
+          { account_id: [511, "Bank"], "balance:sum": 8400, __count: 9 }
+        ]
+      }
+    });
+    globalThis.fetch = fetchMock;
+    const handler = buildReviewHandler(makeQueue(), new TtlCache());
+
+    const result = await handler({ company: "USL MEDIA", date_to: "2026-08-11", account_codes: ["451000", "101000"] });
+
+    expect(result.isError).toBeUndefined();
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.accounts.find((a: any) => a.code === "451000").balance).toBe(-1200);
+
+    const formatted = calls.filter((c) => c.model === "account.move.line" && c.method === "formatted_read_group");
+    expect(formatted.length).toBe(1);
+    expect(formatted[0].body.context).toEqual(EXPECTED_CONTEXT);
+    expectScopedContext(calls);
+  });
+
+  test("fields_get stays context-free so the model-only metadata cache is preserved", async () => {
+    const { fetchMock, calls } = buildFetchMock(OTHER_COMPANY_OVERRIDE);
+    globalThis.fetch = fetchMock;
+    const handler = buildReviewHandler(makeQueue(), new TtlCache());
+
+    await handler({ company: "USL MEDIA", date_to: "2026-08-11", account_codes: ["451000", "101000"] });
+
+    const fieldsGetCalls = calls.filter((c) => c.method === "fields_get");
+    expect(fieldsGetCalls.length).toBeGreaterThan(0);
+    for (const call of fieldsGetCalls) {
+      expect(call.body.context).toBeUndefined();
+    }
+  });
+
+  test("a company outside the API user's allowed set surfaces Odoo's ACL refusal verbatim", async () => {
+    // Odoo validates allowed_company_ids against res.users.company_ids: an unauthorized company
+    // now raises AccessError instead of silently returning zero rows per requested code.
+    const { fetchMock } = buildFetchMock({
+      ...OTHER_COMPANY_OVERRIDE,
+      "account.account.search_read": {
+        status: 403,
+        body: { error: { message: "Access to unauthorized or invalid companies." } }
+      }
+    });
+    globalThis.fetch = fetchMock;
+    const handler = buildReviewHandler(makeQueue(), new TtlCache());
+
+    const result = await handler({ company: "USL MEDIA", date_to: "2026-08-11", account_codes: ["451000", "101000"] });
+
+    expect(result.isError).toBe(true);
+    const envelope = JSON.parse(result.content[0].text);
+    expect(envelope.error).toBe("permission_denied");
+    expect(envelope.refusing_layer).toBe("odoo_acl");
+    expect(envelope.details).toContain("Access to unauthorized or invalid companies.");
+    // Not dressed up as a per-code "not found" warning.
+    expect(result.content[0].text).not.toContain("No account.account record found for code");
+  });
+
+  test("get_snapshot key_accounts scope resolves a non-default company's accounts", async () => {
+    const { fetchMock, calls } = buildFetchMock(OTHER_COMPANY_OVERRIDE);
+    globalThis.fetch = fetchMock;
+    const handler = buildHandler(makeQueue(), new TtlCache());
+
+    const result = await handler({
+      company: "USL MEDIA",
+      date_from: "2026-01-01",
+      date_to: "2026-08-11",
+      scopes: ["key_accounts"],
+      key_account_codes: ["451000", "101000"]
+    });
+
+    expect(result.isError).toBeUndefined();
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.key_accounts.balances.records.length).toBeGreaterThan(0);
+    expect(parsed.warnings.some((w: string) => w.includes("No account.account records found for codes"))).toBe(false);
+
+    expectScopedContext(calls);
+    const openLines = calls.find((c) => c.model === "account.move.line" && c.method === "search_read");
+    expect(openLines?.body.domain).toContainEqual(["company_id", "=", OTHER_COMPANY_ID]);
   });
 });
 
