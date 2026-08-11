@@ -123,8 +123,26 @@ export const DRAFT_VENDOR_BILL_FIELDS = new Set([
   "currency_id",
   "narration",
   "payment_reference",
+  // Native Reviewed / To Review queue status. Not a lifecycle field: it does not post,
+  // validate, reconcile, pay, or change amounts.
+  "review_state",
   "invoice_line_ids"
 ]);
+
+/** Odoo's native `account.move.review_state` selection used for the Reviewed / To Review queue. */
+export const VENDOR_BILL_REVIEW_STATES = new Set(["todo", "reviewed"]);
+
+/**
+ * Return the offending value when `values.review_state` is present but not a supported selection key.
+ * Fails closed locally so the agent gets a clear, recoverable error instead of an Odoo traceback
+ * (or, worse, a write that silently no-ops). Exported for unit testing.
+ */
+export function invalidReviewState(values: Record<string, unknown>): string | null {
+  if (!("review_state" in values)) return null;
+  const raw = values.review_state;
+  if (typeof raw === "string" && VENDOR_BILL_REVIEW_STATES.has(raw)) return null;
+  return typeof raw === "string" ? raw : JSON.stringify(raw ?? null);
+}
 
 /** Nested create/update dict keys allowed inside `invoice_line_ids` commands. */
 export const DRAFT_VENDOR_BILL_LINE_FIELDS = new Set([
@@ -242,7 +260,13 @@ export function deriveSourcePdfName(
 
 function billingBlocked(
   context: { model: string; method?: string },
-  opts: { intent?: WriteBlockedIntent; reason: string; blocked_fields?: string[]; error?: string }
+  opts: {
+    intent?: WriteBlockedIntent;
+    reason: string;
+    blocked_fields?: string[];
+    error?: string;
+    recoverable?: boolean;
+  }
 ) {
   if (opts.error && opts.error !== "write_blocked") {
     const envelope = {
@@ -252,7 +276,7 @@ function billingBlocked(
       method: context.method ?? "write",
       http_status: null,
       details: opts.reason,
-      recoverable: false,
+      recoverable: opts.recoverable ?? false,
       ...(opts.blocked_fields?.length ? { blocked_fields: opts.blocked_fields } : {})
     };
     return { content: [{ type: "text" as const, text: JSON.stringify(envelope) }], isError: true as const };
@@ -262,7 +286,8 @@ function billingBlocked(
     {
       intent: opts.intent ?? "financial_mutation",
       reason: opts.reason,
-      blocked_fields: opts.blocked_fields
+      blocked_fields: opts.blocked_fields,
+      recoverable: opts.recoverable
     }
   );
 }
@@ -794,7 +819,9 @@ export function registerBillingWriteTools(
       title: "Configure Draft Vendor Bill",
       description:
         "Write: update preparatory header/line fields (including currency_id) on a draft vendor bill " +
-        "(account.move with move_type=in_invoice) only. Refuses posted moves, other move types, and lifecycle/payment fields. " +
+        "(account.move with move_type=in_invoice) only. Includes `review_state` (`todo` / `reviewed`) to maintain " +
+        "Odoo's native Reviewed / To Review queue — a status flip only; it does not validate, post, reconcile, send, pay, or delete. " +
+        "Refuses posted moves, other move types, and lifecycle/payment fields. " +
         "Does not validate, post, reconcile, send, or delete. To reset a posted/cancel vendor bill to draft, " +
         "use call_model_method button_draft with write context (in_invoice / in_refund only; see list_model_actions).",
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
@@ -875,6 +902,19 @@ export function registerBillingWriteTools(
                 `Allowed header: ${[...DRAFT_VENDOR_BILL_FIELDS].join(", ")}. ` +
                 `Allowed line keys: ${[...DRAFT_VENDOR_BILL_LINE_FIELDS].join(", ")}.`,
               blocked_fields: allBlocked
+            }
+          );
+        }
+        const badReviewState = invalidReviewState(allowed);
+        if (badReviewState !== null) {
+          return billingBlocked(
+            { model },
+            {
+              error: "invalid_review_state",
+              reason:
+                `review_state=${badReviewState} is not a supported value. ` +
+                `Allowed: ${[...VENDOR_BILL_REVIEW_STATES].join(", ")} (Odoo's Reviewed / To Review queue).`,
+              recoverable: true
             }
           );
         }
