@@ -309,6 +309,8 @@ not exist on a given Odoo version degrade into `warnings[]` rather than aborting
     }
   },
   "key_accounts": {
+    /* company-scoped via a company_id domain leaf *and* the multi-company Odoo RPC
+       context — see the Multi-company note under §4.2 */
     "balances": { "model": "account.move.line", "records": [ /* per-account balance */ ] },
     "top_open_lines": { "model": "account.move.line", "by_account_id": { "…": [] } }
   },
@@ -370,6 +372,28 @@ Odoo **≤18** falls back to legacy `read_group`. The resolved method is cached 
 (same TTL as metadata). When both APIs fail, `balance` / `debit` / `credit` are `null` and
 `severity` is `"unknown"` — same semantics as a single-method failure above. A successful
 query with no grouped rows still defaults missing accounts to `0` and runs `computeSeverity`.
+
+**Multi-company.** Every `account.account` and `account.move.line` lookup in this tool sends the
+Odoo RPC context `{"allowed_company_ids": [<company id>], "company_id": <company id>}` as a
+top-level key of the JSON-2 request body, *in addition to* the `company_id` domain leaf. On Odoo 19
+the record rules for these models are evaluated against `allowed_company_ids`, so without the
+context a company that is not the API user's default is invisible **before** the domain applies —
+every requested code would come back as `No account.account record found for code: <code>`. The
+domain leaves are kept as well: the context restores visibility, the domain keeps the result set
+explicit when the API user's allowed companies span several entities. `fields_get` is deliberately
+sent without context — field metadata is company-independent and its cache is keyed by model only.
+
+Odoo validates `allowed_company_ids` against the API user's own `res.users.company_ids`. If the
+requested company is **not** in that set, Odoo raises `AccessError: Access to unauthorized or
+invalid companies.` and the tool returns a `permission_denied` error envelope (`refusing_layer:
+"odoo_acl"`) instead of a per-code "not found" warning. That is the correct, actionable outcome —
+before the context was sent, the same situation produced a misleading `No account.account record
+found for code: <code>` for every requested code. The fix is Odoo-side: add the company to the API
+user's allowed companies.
+
+> This Odoo RPC context is **unrelated** to the `context` argument on the write tools
+> (`bookkeeping.plan_safe_write`, `bookkeeping.link_source_document`, …). That one is a
+> human-readable audit string, logged locally and never sent to Odoo.
 
 ### 4.3 `bookkeeping.explain_report_line`
 

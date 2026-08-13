@@ -2,7 +2,7 @@ import type { CachedFieldMeta } from "./cache";
 import { getFieldsCached, TTL_METADATA_MS, type TtlCache } from "./cache";
 import { normalizeRecords } from "./normalizer";
 import { OdooError } from "./odoo";
-import type { OdooConnection } from "./odoo";
+import type { OdooConnection, OdooRpcContext } from "./odoo";
 import type { OdooQueue } from "./odoo-queue";
 import {
   AGGREGATE_FALLBACK_MAX_RECORDS,
@@ -344,6 +344,8 @@ export interface ReadGroupCompatArgs {
   limit?: number;
   /** Legacy read_group only; never sent to formatted_read_group. */
   lazy?: boolean;
+  /** Odoo RPC context (e.g. multi-company allowed_company_ids); forwarded as the JSON-2 body `context` key. */
+  context?: OdooRpcContext;
 }
 
 export interface NormalizedGroupRow {
@@ -388,6 +390,7 @@ async function invokeReadGroupMethod(
     };
     if (args.order !== undefined) body.order = args.order;
     if (args.limit !== undefined) body.limit = args.limit;
+    if (args.context !== undefined) body.context = args.context;
     return (await queue.enqueue(conn, model, "formatted_read_group", body)) as Record<string, unknown>[];
   }
 
@@ -399,6 +402,7 @@ async function invokeReadGroupMethod(
   };
   if (args.order !== undefined) body.orderby = args.order;
   if (args.limit !== undefined) body.limit = args.limit;
+  if (args.context !== undefined) body.context = args.context;
   return (await queue.enqueue(conn, model, "read_group", body)) as Record<string, unknown>[];
 }
 
