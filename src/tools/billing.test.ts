@@ -18,7 +18,9 @@ import {
   DRAFT_EXPENSE_FIELDS,
   DRAFT_VENDOR_BILL_FIELDS,
   EXPENSE_AUDIT_FIELDS,
-  EXPENSE_DUPLICATE_HEURISTIC
+  EXPENSE_DUPLICATE_HEURISTIC,
+  VENDOR_BILL_REVIEW_STATES,
+  invalidReviewState
 } from "./billing";
 import { registerSafeWritePlannerTools } from "./bookkeeping";
 import { validatedToolHandler } from "./structured-test-util";
@@ -403,6 +405,23 @@ describe("billing allowlist helpers", () => {
     expect(blocked).toContain("payment_state");
   });
 
+  test("review_state is allowlisted on vendor bills while state stays blocked", () => {
+    const { allowed, blocked } = partitionAllowlistedValues(
+      { review_state: "todo", state: "posted" },
+      DRAFT_VENDOR_BILL_FIELDS
+    );
+    expect(allowed).toEqual({ review_state: "todo" });
+    expect(blocked).toContain("state");
+  });
+
+  test("invalidReviewState accepts todo/reviewed and rejects others", () => {
+    expect(invalidReviewState({ review_state: "reviewed" })).toBeNull();
+    expect(invalidReviewState({ review_state: "bogus" })).toBe("bogus");
+    expect(invalidReviewState({ ref: "X" })).toBeNull();
+    expect(VENDOR_BILL_REVIEW_STATES.has("todo")).toBe(true);
+    expect(VENDOR_BILL_REVIEW_STATES.has("reviewed")).toBe(true);
+  });
+
   test("isDraftRecord uses state and derived workflow status", () => {
     expect(isDraftRecord({ state: "draft" })).toBe(true);
     expect(isDraftRecord({ state: "approved" })).toBe(false);
@@ -681,6 +700,122 @@ describe("billing.configure_draft_vendor_bill", () => {
     expect(result.isError).toBe(true);
     const envelope = JSON.parse(result.content[0].text);
     expect(envelope.blocked_fields).toContain("state");
+  });
+
+  test("review_state alone succeeds on draft in_invoice", async () => {
+    const calls: { model: string; method: string; args: Record<string, unknown> }[] = [];
+    const queue = dispatchQueue((model, method, args) => {
+      calls.push({ model, method, args });
+      if (method === "read") return [{ id: 8695, state: "draft", move_type: "in_invoice" }];
+      if (method === "write") return true;
+      return null;
+    });
+    const { configureBill } = buildBillingHandlers(queue);
+    const result = await configureBill({ record_id: 8695, values: { review_state: "todo" } });
+
+    expect(result.isError).toBeUndefined();
+    expect(result.structuredContent).toEqual({
+      ok: true,
+      record_id: 8695,
+      state: "draft",
+      move_type: "in_invoice",
+      web_url: "http://example.com/odoo/vendor-bills/8695"
+    });
+    expect(calls[1].method).toBe("write");
+    expect(calls[1].args.vals).toEqual({ review_state: "todo" });
+  });
+
+  test("review_state combined with other allowlisted fields succeeds", async () => {
+    const calls: { model: string; method: string; args: Record<string, unknown> }[] = [];
+    const queue = dispatchQueue((model, method, args) => {
+      calls.push({ model, method, args });
+      if (method === "read") return [{ id: 8695, state: "draft", move_type: "in_invoice" }];
+      if (method === "write") return true;
+      return null;
+    });
+    const { configureBill } = buildBillingHandlers(queue);
+    const result = await configureBill({
+      record_id: 8695,
+      values: { ...billValues, review_state: "reviewed" }
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(calls[1].args.vals).toMatchObject({
+      partner_id: 10,
+      ref: "VB-9647",
+      review_state: "reviewed"
+    });
+  });
+
+  test("invalid review_state fails closed with no write", async () => {
+    const calls: string[] = [];
+    const queue = dispatchQueue((model, method) => {
+      calls.push(`${model}.${method}`);
+      if (method === "read") return [{ id: 8695, state: "draft", move_type: "in_invoice" }];
+      return null;
+    });
+    const { configureBill } = buildBillingHandlers(queue);
+    const result = await configureBill({ record_id: 8695, values: { review_state: "bogus" } });
+
+    expect(result.isError).toBe(true);
+    const envelope = JSON.parse(result.content[0].text);
+    expect(envelope.error).toBe("invalid_review_state");
+    expect(envelope.recoverable).toBe(true);
+    expect(String(envelope.details)).toContain("todo");
+    expect(String(envelope.details)).toContain("reviewed");
+    expect(calls).toEqual(["account.move.read"]);
+  });
+
+  test("review_state with blocked state still reports write_blocked", async () => {
+    const calls: string[] = [];
+    const queue = dispatchQueue((model, method) => {
+      calls.push(`${model}.${method}`);
+      if (method === "read") return [{ id: 8695, state: "draft", move_type: "in_invoice" }];
+      return null;
+    });
+    const { configureBill } = buildBillingHandlers(queue);
+    const result = await configureBill({
+      record_id: 8695,
+      values: { review_state: "todo", state: "posted" }
+    });
+
+    expect(result.isError).toBe(true);
+    const envelope = JSON.parse(result.content[0].text);
+    expect(envelope.error).toBe("write_blocked");
+    expect(envelope.blocked_fields).toContain("state");
+    expect(calls).toEqual(["account.move.read"]);
+  });
+
+  test("review_state on posted bill is refused with draft_required", async () => {
+    const calls: string[] = [];
+    const queue = dispatchQueue((model, method) => {
+      calls.push(`${model}.${method}`);
+      if (method === "read") return [{ id: 8695, state: "posted", move_type: "in_invoice" }];
+      return null;
+    });
+    const { configureBill } = buildBillingHandlers(queue);
+    const result = await configureBill({ record_id: 8695, values: { review_state: "todo" } });
+
+    expect(result.isError).toBe(true);
+    const envelope = JSON.parse(result.content[0].text);
+    expect(envelope.error).toBe("draft_required");
+    expect(calls).toEqual(["account.move.read"]);
+  });
+
+  test("review_state on draft out_invoice is refused with vendor_bill_required", async () => {
+    const calls: string[] = [];
+    const queue = dispatchQueue((model, method) => {
+      calls.push(`${model}.${method}`);
+      if (method === "read") return [{ id: 8695, state: "draft", move_type: "out_invoice" }];
+      return null;
+    });
+    const { configureBill } = buildBillingHandlers(queue);
+    const result = await configureBill({ record_id: 8695, values: { review_state: "todo" } });
+
+    expect(result.isError).toBe(true);
+    const envelope = JSON.parse(result.content[0].text);
+    expect(envelope.error).toBe("vendor_bill_required");
+    expect(calls).toEqual(["account.move.read"]);
   });
 });
 
