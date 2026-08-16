@@ -5,20 +5,28 @@ import { classifyPmWriteIntent } from "../safety";
 import { PDFDocument } from "pdf-lib";
 import { base64ToBytes, bytesToBase64, countPdfPages } from "../pdf-pages";
 import {
+  analyticAccountIdsFromDistribution,
   blockedInvoiceLineFields,
   buildExpenseAuditDomain,
+  companyBoundFieldIds,
   deriveSourcePdfName,
   expenseMatchesAnalyticAccounts,
   flagExpenseDuplicates,
+  incompatibleCompanyBoundFields,
   isDraftRecord,
   normalizeAnalyticDistribution,
+  parseExpenseMoveRequest,
   partitionAllowlistedValues,
   registerBillingReadTools,
   registerBillingWriteTools,
+  requiresEmployeeReassignment,
+  retainedCompanyBoundFields,
+  COMPANY_BOUND_EXPENSE_FIELDS,
   DRAFT_EXPENSE_FIELDS,
   DRAFT_VENDOR_BILL_FIELDS,
   EXPENSE_AUDIT_FIELDS,
   EXPENSE_DUPLICATE_HEURISTIC,
+  EXPENSE_MOVE_READ_FIELDS,
   VENDOR_BILL_REVIEW_STATES,
   invalidReviewState
 } from "./billing";
@@ -455,8 +463,13 @@ describe("billing.update_draft_expense", () => {
       web_url: "http://example.com/odoo/expenses/394"
     });
     expect(calls).toEqual([
-      { model: "hr.expense", method: "read", args: { ids: [394], fields: ["id", "state"] } },
-      { model: "hr.expense", method: "write", args: { ids: [394], vals: { date: "2026-07-04" } } }
+      { model: "hr.expense", method: "read", args: { ids: [394], fields: [...EXPENSE_MOVE_READ_FIELDS] } },
+      { model: "hr.expense", method: "write", args: { ids: [394], vals: { date: "2026-07-04" } } },
+      {
+        model: "hr.expense",
+        method: "read",
+        args: { ids: [394], fields: ["id", "state", "company_id", "employee_id"] }
+      }
     ]);
   });
 
@@ -532,9 +545,437 @@ describe("billing.update_draft_expense", () => {
       web_url: "http://example.com/odoo/expenses/42"
     });
     expect(calls).toEqual([
-      { model: "hr.expense", method: "read", args: { ids: [42], fields: ["id", "state"] } },
-      { model: "hr.expense", method: "write", args: { ids: [42], vals: { total_amount: 28.61 } } }
+      { model: "hr.expense", method: "read", args: { ids: [42], fields: [...EXPENSE_MOVE_READ_FIELDS] } },
+      { model: "hr.expense", method: "write", args: { ids: [42], vals: { total_amount: 28.61 } } },
+      {
+        model: "hr.expense",
+        method: "read",
+        args: { ids: [42], fields: ["id", "state", "company_id", "employee_id"] }
+      }
     ]);
+  });
+});
+
+describe("billing.update_draft_expense cross-company reassignment", () => {
+  /** Draft expense #443, sitting in company 1 on employee 1, with no company-bound references. */
+  const bareDraft = {
+    id: 443,
+    state: "draft",
+    company_id: [1, "Unstatic Labs"],
+    employee_id: [1, "Valentin Viennot"],
+    product_id: false,
+    account_id: false,
+    tax_ids: [],
+    analytic_distribution: false,
+    currency_id: [1, "EUR"]
+  };
+
+  const movedDraft = {
+    id: 443,
+    state: "draft",
+    company_id: [8, "USL MEDIA"],
+    employee_id: [4, "Valentin Viennot"]
+  };
+
+  /**
+   * Odoo double for the move: `overrides` replaces the response of any `model.method` (and the
+   * initial `hr.expense.read`, keyed as `hr.expense.read`; the post-write re-read is `confirm`).
+   */
+  function moveQueue(overrides: Record<string, unknown> = {}) {
+    const calls: { model: string; method: string; args: Record<string, unknown> }[] = [];
+    const pick = (key: string, fallback: unknown) => (key in overrides ? overrides[key] : fallback);
+    const queue = dispatchQueue((model, method, args) => {
+      calls.push({ model, method, args });
+      const key = `${model}.${method}`;
+      if (key === "hr.expense.read") {
+        // The preflight read asks for the full move field list; the confirmation re-read does not.
+        const isConfirm = !(args.fields as string[]).includes("currency_id");
+        const row = isConfirm ? pick("confirm", movedDraft) : pick(key, bareDraft);
+        if (typeof row === "function") return (row as () => unknown)();
+        if (row === null) return [];
+        return [row];
+      }
+      if (key === "hr.expense.write") return true;
+      if (key === "res.company.search_read") {
+        return pick(key, [{ id: 8, name: "USL MEDIA", currency_id: [1, "EUR"] }]);
+      }
+      if (key === "hr.employee.search_read") {
+        return pick(key, [{ id: 4, name: "Valentin Viennot", company_id: [8, "USL MEDIA"], user_id: [2, "VV"] }]);
+      }
+      if (key === "hr.employee.read") {
+        return pick(key, [{ id: 1, name: "Valentin Viennot", user_id: [2, "VV"] }]);
+      }
+      if (key in overrides) {
+        const value = overrides[key];
+        if (typeof value === "function") return (value as (args: Record<string, unknown>) => unknown)(args);
+        return value;
+      }
+      return [];
+    });
+    return { queue, calls };
+  }
+
+  const methodsOf = (calls: { model: string; method: string }[]) => calls.map((c) => `${c.model}.${c.method}`);
+
+  test("moves a clean draft in one write and reports the re-read company/employee", async () => {
+    const { queue, calls } = moveQueue();
+    const { updateExpense } = buildBillingHandlers(queue);
+    const result = await updateExpense({
+      record_id: 443,
+      values: { company_id: 8, employee_id: 4 },
+      context: "fix mis-routed OCR expense"
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(result.structuredContent).toEqual({
+      ok: true,
+      record_id: 443,
+      state: "draft",
+      company: { id: 8, name: "USL MEDIA" },
+      employee: { id: 4, name: "Valentin Viennot" },
+      web_url: "http://example.com/odoo/expenses/443"
+    });
+
+    const writes = calls.filter((c) => c.method === "write");
+    expect(writes).toHaveLength(1);
+    expect(writes[0].model).toBe("hr.expense");
+    expect(writes[0].args.vals).toEqual({ company_id: 8, employee_id: 4 });
+    expect(writes[0].args.context).toEqual({ allowed_company_ids: [1, 8], company_id: 8 });
+    expect(methodsOf(calls)).toEqual([
+      "hr.expense.read",
+      "res.company.search_read",
+      "hr.employee.search_read",
+      "hr.employee.read",
+      "hr.expense.write",
+      "hr.expense.read"
+    ]);
+  });
+
+  test("employee outside the target company is refused with no write", async () => {
+    const { queue, calls } = moveQueue({
+      "hr.employee.search_read": [{ id: 4, name: "Other", company_id: [1, "Unstatic Labs"], user_id: [2, "VV"] }]
+    });
+    const { updateExpense } = buildBillingHandlers(queue);
+    const result = await updateExpense({ record_id: 443, values: { company_id: 8, employee_id: 4 } });
+
+    expect(result.isError).toBe(true);
+    const envelope = JSON.parse(result.content[0].text);
+    expect(envelope.error).toBe("employee_company_mismatch");
+    expect(envelope.recoverable).toBe(true);
+    expect(String(envelope.details)).toContain("company 1");
+    expect(methodsOf(calls)).not.toContain("hr.expense.write");
+  });
+
+  test("target company the caller cannot see is refused before any employee probe", async () => {
+    const { queue, calls } = moveQueue({ "res.company.search_read": [] });
+    const { updateExpense } = buildBillingHandlers(queue);
+    const result = await updateExpense({ record_id: 443, values: { company_id: 8, employee_id: 4 } });
+
+    expect(result.isError).toBe(true);
+    const envelope = JSON.parse(result.content[0].text);
+    expect(envelope.error).toBe("company_access_denied");
+    expect(envelope.recoverable).toBe(false);
+    expect(methodsOf(calls)).toEqual(["hr.expense.read", "res.company.search_read"]);
+  });
+
+  test("employees linked to different users are refused rather than guessed", async () => {
+    const { queue, calls } = moveQueue({
+      "hr.employee.search_read": [{ id: 4, name: "Other Person", company_id: [8, "USL MEDIA"], user_id: [9, "Other"] }]
+    });
+    const { updateExpense } = buildBillingHandlers(queue);
+    const result = await updateExpense({ record_id: 443, values: { company_id: 8, employee_id: 4 } });
+
+    expect(result.isError).toBe(true);
+    const envelope = JSON.parse(result.content[0].text);
+    expect(envelope.error).toBe("employee_user_ambiguous");
+    expect(String(envelope.details)).toContain("Other");
+    expect(methodsOf(calls)).not.toContain("hr.expense.write");
+  });
+
+  test("a target employee with no linked user warns but still moves", async () => {
+    const { queue, calls } = moveQueue({
+      "hr.employee.search_read": [{ id: 4, name: "Valentin Viennot", company_id: [8, "USL MEDIA"], user_id: false }]
+    });
+    const { updateExpense } = buildBillingHandlers(queue);
+    const result = await updateExpense({ record_id: 443, values: { company_id: 8, employee_id: 4 } });
+
+    expect(result.isError).toBeUndefined();
+    const warnings = (result.structuredContent as { warnings?: string[] }).warnings ?? [];
+    expect(warnings.some((w) => w.includes("no linked Odoo user"))).toBe(true);
+    expect(methodsOf(calls)).toContain("hr.expense.write");
+  });
+
+  test("company-bound references missing from the target company are refused by name", async () => {
+    const { queue, calls } = moveQueue({
+      "hr.expense.read": {
+        ...bareDraft,
+        product_id: [5, "Taxi"],
+        tax_ids: [3],
+        analytic_distribution: { "7": 100 }
+      },
+      "product.product.search_read": [],
+      "account.tax.search_read": [{ id: 3, company_id: [1, "Unstatic Labs"] }],
+      "account.analytic.account.search_read": [{ id: 7, company_id: [1, "Unstatic Labs"] }]
+    });
+    const { updateExpense } = buildBillingHandlers(queue);
+    const result = await updateExpense({ record_id: 443, values: { company_id: 8, employee_id: 4 } });
+
+    expect(result.isError).toBe(true);
+    const envelope = JSON.parse(result.content[0].text);
+    expect(envelope.error).toBe("company_field_conflict");
+    expect(envelope.recoverable).toBe(true);
+    expect([...envelope.blocked_fields].sort()).toEqual(["analytic_distribution", "product_id", "tax_ids"]);
+    for (const field of ["product_id", "tax_ids", "analytic_distribution"]) {
+      expect(String(envelope.details)).toContain(field);
+    }
+    expect(methodsOf(calls)).not.toContain("hr.expense.write");
+  });
+
+  test("explicit replacements and clears are probed and applied in the same single write", async () => {
+    const { queue, calls } = moveQueue({
+      "hr.expense.read": {
+        ...bareDraft,
+        product_id: [5, "Taxi"],
+        tax_ids: [3],
+        analytic_distribution: { "7": 100 }
+      },
+      "product.product.search_read": [{ id: 77, company_id: [8, "USL MEDIA"] }],
+      "account.tax.search_read": [{ id: 12, company_id: false }]
+    });
+    const { updateExpense } = buildBillingHandlers(queue);
+    const values = {
+      company_id: 8,
+      employee_id: 4,
+      product_id: 77,
+      tax_ids: [[6, 0, [12]]],
+      analytic_distribution: {}
+    };
+    const result = await updateExpense({ record_id: 443, values });
+
+    expect(result.isError).toBeUndefined();
+    const writes = calls.filter((c) => c.method === "write");
+    expect(writes).toHaveLength(1);
+    expect(writes[0].args.vals).toEqual(values);
+    // The cleared analytic distribution is not probed; the replacements are.
+    const probed = calls.filter((c) => c.method === "search_read" && c.model.startsWith("account.analytic"));
+    expect(probed).toHaveLength(0);
+    const productProbe = calls.find((c) => c.model === "product.product");
+    expect(productProbe?.args.domain).toEqual([
+      ["id", "in", [77]],
+      "|",
+      ["company_id", "=", false],
+      ["company_id", "=", 8]
+    ]);
+  });
+
+  test("account.account residency falls back to company_ids when company_id does not exist", async () => {
+    let accountReads = 0;
+    const { queue, calls } = moveQueue({
+      "hr.expense.read": { ...bareDraft, account_id: [601, "Expenses"] },
+      "account.account.search_read": (args: Record<string, unknown>) => {
+        accountReads += 1;
+        if ((args.fields as string[]).includes("company_id")) throw new Error("Invalid field 'company_id'");
+        return [{ id: 601, company_ids: [8] }];
+      }
+    });
+    const { updateExpense } = buildBillingHandlers(queue);
+    const result = await updateExpense({ record_id: 443, values: { company_id: 8, employee_id: 4 } });
+
+    expect(result.isError).toBeUndefined();
+    expect(accountReads).toBe(2);
+    expect(calls.filter((c) => c.method === "write")).toHaveLength(1);
+  });
+
+  test("an unreadable company-bound field fails closed", async () => {
+    const { queue, calls } = moveQueue({
+      "hr.expense.read": { ...bareDraft, tax_ids: [3] },
+      "account.tax.search_read": () => {
+        throw new Error("access denied");
+      }
+    });
+    const { updateExpense } = buildBillingHandlers(queue);
+    const result = await updateExpense({ record_id: 443, values: { company_id: 8, employee_id: 4 } });
+
+    expect(result.isError).toBe(true);
+    const envelope = JSON.parse(result.content[0].text);
+    expect(envelope.error).toBe("company_field_conflict");
+    expect(envelope.blocked_fields).toEqual(["tax_ids"]);
+    expect(methodsOf(calls)).not.toContain("hr.expense.write");
+  });
+
+  test("company_id without employee_id is refused before any probe", async () => {
+    const { queue, calls } = moveQueue();
+    const { updateExpense } = buildBillingHandlers(queue);
+    const result = await updateExpense({ record_id: 443, values: { company_id: 8 } });
+
+    expect(result.isError).toBe(true);
+    const envelope = JSON.parse(result.content[0].text);
+    expect(envelope.error).toBe("company_employee_pairing_required");
+    expect(envelope.recoverable).toBe(true);
+    expect(methodsOf(calls)).toEqual(["hr.expense.read"]);
+  });
+
+  test("a non-positive company_id is refused locally", async () => {
+    const { queue, calls } = moveQueue();
+    const { updateExpense } = buildBillingHandlers(queue);
+    const result = await updateExpense({ record_id: 443, values: { company_id: false, employee_id: 4 } });
+
+    expect(result.isError).toBe(true);
+    const envelope = JSON.parse(result.content[0].text);
+    expect(envelope.error).toBe("invalid_company_reassignment");
+    expect(methodsOf(calls)).toEqual(["hr.expense.read"]);
+  });
+
+  test("a non-draft expense is refused before any company or employee probe", async () => {
+    const { queue, calls } = moveQueue({ "hr.expense.read": { ...bareDraft, state: "approved" } });
+    const { updateExpense } = buildBillingHandlers(queue);
+    const result = await updateExpense({ record_id: 443, values: { company_id: 8, employee_id: 4 } });
+
+    expect(result.isError).toBe(true);
+    const envelope = JSON.parse(result.content[0].text);
+    expect(envelope.error).toBe("draft_required");
+    expect(methodsOf(calls)).toEqual(["hr.expense.read"]);
+  });
+
+  test("a currency difference warns without blocking", async () => {
+    const { queue } = moveQueue({
+      "res.company.search_read": [{ id: 8, name: "USL MEDIA", currency_id: [2, "USD"] }]
+    });
+    const { updateExpense } = buildBillingHandlers(queue);
+    const result = await updateExpense({ record_id: 443, values: { company_id: 8, employee_id: 4 } });
+
+    expect(result.isError).toBeUndefined();
+    const warnings = (result.structuredContent as { warnings?: string[] }).warnings ?? [];
+    expect(warnings.some((w) => w.includes("USD"))).toBe(true);
+  });
+
+  test("a write that survives but disappears from view reports success with a warning", async () => {
+    for (const confirm of [
+      null,
+      () => {
+        throw new Error("access denied on the moved record");
+      }
+    ]) {
+      const { queue } = moveQueue({ confirm });
+      const { updateExpense } = buildBillingHandlers(queue);
+      const result = await updateExpense({ record_id: 443, values: { company_id: 8, employee_id: 4 } });
+
+      expect(result.isError).toBeUndefined();
+      const structured = result.structuredContent as { ok: boolean; warnings?: string[] };
+      expect(structured.ok).toBe(true);
+      expect((structured.warnings ?? []).some((w) => w.includes("could not be re-read"))).toBe(true);
+    }
+  });
+});
+
+describe("expense reassignment helpers", () => {
+  const record = {
+    id: 443,
+    state: "draft",
+    company_id: [1, "Unstatic Labs"],
+    employee_id: [1, "VV"],
+    product_id: [5, "Taxi"],
+    account_id: false,
+    tax_ids: [3],
+    analytic_distribution: { "7": 100 }
+  };
+
+  test("parseExpenseMoveRequest ignores values without company/employee keys", () => {
+    expect(parseExpenseMoveRequest({ date: "2026-07-04" }, record)).toEqual({ kind: "none" });
+  });
+
+  test("parseExpenseMoveRequest resolves targets against the record", () => {
+    expect(parseExpenseMoveRequest({ company_id: 8, employee_id: [4, "VV"] }, record)).toEqual({
+      kind: "move",
+      targetCompanyId: 8,
+      targetEmployeeId: 4,
+      currentCompanyId: 1,
+      currentEmployeeId: 1,
+      companySupplied: true,
+      employeeSupplied: true
+    });
+    // Employee-only edit: the company target falls back to the record's own company.
+    expect(parseExpenseMoveRequest({ employee_id: 4 }, record)).toMatchObject({
+      kind: "move",
+      targetCompanyId: 1,
+      targetEmployeeId: 4,
+      companySupplied: false
+    });
+  });
+
+  test("parseExpenseMoveRequest rejects unparsable and non-positive ids", () => {
+    expect(parseExpenseMoveRequest({ company_id: false }, record)).toEqual({
+      kind: "invalid",
+      field: "company_id",
+      value: false
+    });
+    expect(parseExpenseMoveRequest({ company_id: 8, employee_id: 0 }, record)).toMatchObject({
+      kind: "invalid",
+      field: "employee_id"
+    });
+  });
+
+  test("requiresEmployeeReassignment is true only for an actual company change", () => {
+    const move = parseExpenseMoveRequest({ company_id: 8, employee_id: 4 }, record);
+    const sameCompany = parseExpenseMoveRequest({ company_id: 1, employee_id: 4 }, record);
+    expect(move.kind === "move" && requiresEmployeeReassignment(move)).toBe(true);
+    expect(sameCompany.kind === "move" && requiresEmployeeReassignment(sameCompany)).toBe(false);
+  });
+
+  test("retainedCompanyBoundFields keeps record values and replacements, drops explicit clears", () => {
+    expect(retainedCompanyBoundFields(record, {})).toEqual(["product_id", "tax_ids", "analytic_distribution"]);
+    expect(
+      retainedCompanyBoundFields(record, {
+        product_id: false,
+        tax_ids: [[6, 0, []]],
+        analytic_distribution: {}
+      })
+    ).toEqual([]);
+    expect(retainedCompanyBoundFields(record, { product_id: 77 })).toEqual([
+      "product_id",
+      "tax_ids",
+      "analytic_distribution"
+    ]);
+    expect(companyBoundFieldIds(record, { product_id: 77 }, "product_id")).toEqual([77]);
+    expect(companyBoundFieldIds(record, { tax_ids: [[6, 0, [12]], [4, 13]] }, "tax_ids")).toEqual([12, 13]);
+    expect(COMPANY_BOUND_EXPENSE_FIELDS).toEqual(["product_id", "account_id", "tax_ids", "analytic_distribution"]);
+  });
+
+  test("analyticAccountIdsFromDistribution splits comma-composite keys", () => {
+    // Integer-like keys sort first in JS objects, so compare as a set.
+    expect(analyticAccountIdsFromDistribution({ "3,7": 100, "7": 50 }).sort()).toEqual([3, 7]);
+    expect(analyticAccountIdsFromDistribution('{"12":100}')).toEqual([12]);
+    expect(analyticAccountIdsFromDistribution(false)).toEqual([]);
+    expect(analyticAccountIdsFromDistribution({})).toEqual([]);
+  });
+
+  test("incompatibleCompanyBoundFields accepts shared and target-owned records only", () => {
+    expect(
+      incompatibleCompanyBoundFields([
+        { field: "product_id", ids: [77], targetCompanyId: 8, rows: [{ id: 77, companyIds: [8] }] },
+        { field: "tax_ids", ids: [12], targetCompanyId: 8, rows: [{ id: 12, companyIds: [] }] },
+        { field: "account_id", ids: [601], targetCompanyId: 8, rows: [{ id: 601, companyIds: [8, 9] }] }
+      ])
+    ).toEqual([]);
+    expect(
+      incompatibleCompanyBoundFields([
+        { field: "product_id", ids: [5], targetCompanyId: 8, rows: [{ id: 5, companyIds: [1] }] },
+        { field: "tax_ids", ids: [3, 4], targetCompanyId: 8, rows: [{ id: 3, companyIds: [8] }] },
+        { field: "account_id", ids: [601], targetCompanyId: 8, rows: [{ id: 601, companyIds: null }] },
+        { field: "analytic_distribution", ids: [7], targetCompanyId: 8, rows: [], failed: true }
+      ])
+    ).toEqual(["product_id", "tax_ids", "account_id", "analytic_distribution"]);
+  });
+
+  test("company_id/employee_id are allowlisted while lifecycle fields stay blocked", () => {
+    expect(DRAFT_EXPENSE_FIELDS.has("company_id")).toBe(true);
+    expect(DRAFT_EXPENSE_FIELDS.has("employee_id")).toBe(true);
+    const { allowed, blocked } = partitionAllowlistedValues(
+      { company_id: 8, employee_id: 4, journal_id: 2, state: "draft", payment_mode: "own_account" },
+      DRAFT_EXPENSE_FIELDS
+    );
+    expect(allowed).toEqual({ company_id: 8, employee_id: 4 });
+    expect(blocked.sort()).toEqual(["journal_id", "payment_mode", "state"]);
   });
 });
 
