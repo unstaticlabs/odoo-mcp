@@ -1,6 +1,7 @@
 import { describe, expect, mock, test } from "bun:test";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { TtlCache } from "../cache";
+import { OdooError } from "../odoo";
 import type { OdooQueue } from "../odoo-queue";
 import { registerProjectsTools } from "./projects";
 import { validatedToolHandler } from "./structured-test-util";
@@ -21,6 +22,21 @@ function dispatchQueue(responder: (model: string, method: string, args: Record<s
     snapshot: () => ({ odoo_calls: 0 }),
     delta: () => ({ odoo_calls: 0 })
   } as unknown as OdooQueue;
+}
+
+/** Verbatim Odoo 19 text for a field gated behind a group the API user is not in. */
+function aclFieldError(field: string): OdooError {
+  const details =
+    `You do not have enough rights to access the field "${field}" on Project (project.project). ` +
+    "Operation: read. Groups: allowed for groups 'Use Stages on Project'.";
+  return new OdooError({
+    message: details,
+    code: "permission_denied",
+    httpStatus: 403,
+    model: "project.project",
+    method: "search_read",
+    details
+  });
 }
 
 function buildProjectsServer(queue: OdooQueue) {
@@ -258,6 +274,81 @@ describe("projects read tools", () => {
     expect(result.structuredContent?.records).toEqual([
       { id: 4, name: "Demo", _web_url: "http://example.com/odoo/project/4" }
     ]);
+  });
+
+  test("list_projects default fields exclude the ACL-gated stage_id", async () => {
+    const calls: Record<string, unknown>[] = [];
+    const queue = dispatchQueue((_model, _method, args) => {
+      calls.push(args);
+      return [{ id: 4, name: "Demo", partner_id: [7, "ACME"], user_id: [2, "Mitchell"] }];
+    });
+    const { handler } = buildProjectsServer(queue);
+
+    const result = await handler("projects.list_projects")({});
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].fields).toEqual(["id", "name", "partner_id", "user_id"]);
+    expect(calls[0].fields).not.toContain("stage_id");
+    expect(result.isError).toBeUndefined();
+    expect((result.structuredContent?.records as Record<string, unknown>[])[0]._web_url).toBe(
+      "http://example.com/odoo/project/4"
+    );
+    expect(result.structuredContent?.warnings).toEqual([]);
+  });
+
+  test("list_projects degrades instead of failing when Odoo refuses an explicitly requested field", async () => {
+    const calls: Record<string, unknown>[] = [];
+    const queue = dispatchQueue((_model, _method, args) => {
+      calls.push(args);
+      if ((args.fields as string[]).includes("stage_id")) throw aclFieldError("stage_id");
+      return [{ id: 4, name: "Demo" }];
+    });
+    const { handler } = buildProjectsServer(queue);
+
+    const result = await handler("projects.list_projects")({ fields: ["id", "name", "stage_id"] });
+
+    expect(result.isError).toBeUndefined();
+    expect(calls).toHaveLength(2);
+    expect(calls[1].fields).toEqual(["id", "name"]);
+    expect(result.structuredContent?.records).toEqual([
+      { id: 4, name: "Demo", _web_url: "http://example.com/odoo/project/4" }
+    ]);
+    expect(result.structuredContent?.omitted_fields).toContainEqual({ field: "stage_id", reason: "acl-denied" });
+    expect((result.structuredContent?.warnings as string[]).some((w) => w.includes("stage_id"))).toBe(true);
+  });
+
+  test("list_projects with readable explicit fields is unchanged — one call, no warnings", async () => {
+    const calls: Record<string, unknown>[] = [];
+    const queue = dispatchQueue((_model, _method, args) => {
+      calls.push(args);
+      return [{ id: 4, name: "Demo" }];
+    });
+    const { handler } = buildProjectsServer(queue);
+
+    const result = await handler("projects.list_projects")({ fields: ["id", "name"] });
+
+    expect(calls).toHaveLength(1);
+    expect(result.isError).toBeUndefined();
+    expect(result.structuredContent?.returned_fields).toEqual(["id", "name"]);
+    expect(result.structuredContent?.omitted_fields).toEqual([]);
+    expect(result.structuredContent?.warnings).toEqual([]);
+  });
+
+  test("list_projects still fails closed when id itself is unreadable", async () => {
+    const calls: Record<string, unknown>[] = [];
+    const queue = dispatchQueue((_model, _method, args) => {
+      calls.push(args);
+      throw aclFieldError("id");
+    });
+    const { handler } = buildProjectsServer(queue);
+
+    const result = await handler("projects.list_projects")({});
+
+    expect(result.isError).toBe(true);
+    expect(calls).toHaveLength(1);
+    const envelope = JSON.parse(result.content[0].text);
+    expect(envelope.refusing_layer).toBe("odoo_acl");
+    expect(envelope.model).toBe("project.project");
   });
 
   test("get_task returns null when missing", async () => {

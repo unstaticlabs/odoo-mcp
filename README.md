@@ -367,7 +367,7 @@ For `search_records`, `get_record`, `batch_read`, `projects.list_tasks`, and `pr
 
 - **`fields` omitted / `null`** → a **curated per-model preset** from `MODEL_FIELD_PRESETS` (no extra Odoo call):
   - `project.task` → `id`, `name`, `stage_id`, `project_id`
-  - `project.project` → `id`, `name`, `partner_id`, `user_id`, `stage_id`
+  - `project.project` → `id`, `name`, `partner_id`, `user_id` (`stage_id` is excluded: Odoo gates it behind the *Use Stages on Project* group, so requesting it by default would fail the read for users without it)
   - `res.partner` → `id`, `name`, `email`, `phone`
   - `res.users` → `id`, `name`, `login`, `email`
   - unknown models → `id`, `display_name`
@@ -380,8 +380,16 @@ Tool responses include structured field reporting alongside the records:
   [Record links](#record-links--surface-urls-not-bare-ids)). Server-added, not an Odoo field,
   so it never appears in `returned_fields` and never needs requesting
 - `returned_fields` — fields present in the Odoo rows
-- `omitted_fields` — `{ field, reason }` where `reason` is `absent-from-rows` or `unknown-field` (the latter only when a cached `fields_get` result is already available)
-- `warnings` — when an **explicitly requested** field is omitted
+- `omitted_fields` — `{ field, reason }` where `reason` is one of:
+  - `absent-from-rows` — requested, but Odoo returned no such key on the rows
+  - `unknown-field` — not a field of the model (only when a cached `fields_get` result is already available)
+  - `acl-denied` — the Odoo user cannot read the field; the connector dropped it, retried, and returned the remaining columns (always accompanied by a warning)
+- `warnings` — when an **explicitly requested** field is omitted, or on any `acl-denied` omission
+
+`search_records`, `projects.list_projects`, and `projects.list_tasks` **degrade rather than fail** on
+a per-field `AccessError`: the field Odoo named is dropped (up to two drops per call) and the read is
+retried, so an ACL-gated convenience field costs you a column and a warning, not the whole result.
+`id` is never dropped, and an `["__all__"]` read has no field list to trim, so both still error.
 
 Use `get_fields` when you need the full field schema; the default read path does **not** call `fields_get`.
 
