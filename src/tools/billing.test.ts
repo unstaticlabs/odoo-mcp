@@ -19,7 +19,9 @@ import {
   DRAFT_VENDOR_BILL_FIELDS,
   EXPENSE_AUDIT_FIELDS,
   EXPENSE_DUPLICATE_HEURISTIC,
+  EXPENSE_PAYMENT_MODES,
   VENDOR_BILL_REVIEW_STATES,
+  invalidPaymentMode,
   invalidReviewState
 } from "./billing";
 import { registerSafeWritePlannerTools } from "./bookkeeping";
@@ -84,6 +86,17 @@ describe("registerBillingWriteTools", () => {
     expect(registry["billing.update_draft_expense"]).toBeDefined();
     expect(registry["billing.configure_draft_vendor_bill"]).toBeDefined();
     expect(registry["billing.attach_source_pdf"]).toBeDefined();
+  });
+
+  test("update_draft_expense description and values describe list payment_mode", () => {
+    const server = new McpServer({ name: "test", version: "0.0.0" });
+    registerBillingWriteTools(server, () => props, dispatchQueue(() => null));
+    const tool = (server as any)._registeredTools["billing.update_draft_expense"];
+    expect(String(tool.description)).toContain("payment_mode");
+    expect(String(tool.description)).toContain("own_account");
+    expect(String(tool.description)).toContain("company_account");
+    const valuesDescribe = String(tool.inputSchema.shape.values.description ?? "");
+    expect(valuesDescribe).toContain("payment_mode");
   });
 });
 
@@ -422,6 +435,41 @@ describe("billing allowlist helpers", () => {
     expect(VENDOR_BILL_REVIEW_STATES.has("reviewed")).toBe(true);
   });
 
+  test("payment_mode is allowlisted on expenses while state and payment_state stay blocked", () => {
+    const { allowed, blocked } = partitionAllowlistedValues(
+      { payment_mode: "company_account", state: "posted", payment_state: "paid" },
+      DRAFT_EXPENSE_FIELDS
+    );
+    expect(allowed).toEqual({ payment_mode: "company_account" });
+    expect(blocked).toContain("state");
+    expect(blocked).toContain("payment_state");
+  });
+
+  test("payment_mode is not allowlisted on vendor bills", () => {
+    const { allowed, blocked } = partitionAllowlistedValues(
+      { payment_mode: "company_account", ref: "X" },
+      DRAFT_VENDOR_BILL_FIELDS
+    );
+    expect(allowed).toEqual({ ref: "X" });
+    expect(blocked).toContain("payment_mode");
+  });
+
+  test("invalidPaymentMode accepts own_account/company_account and rejects others", () => {
+    expect(invalidPaymentMode({ payment_mode: "own_account" })).toBeNull();
+    expect(invalidPaymentMode({ payment_mode: "company_account" })).toBeNull();
+    expect(invalidPaymentMode({ payment_mode: "bogus" })).toBe("bogus");
+    expect(invalidPaymentMode({ date: "2026-07-04" })).toBeNull();
+    expect(invalidPaymentMode({ payment_mode: 1 })).toBe("1");
+    expect(EXPENSE_PAYMENT_MODES.has("own_account")).toBe(true);
+    expect(EXPENSE_PAYMENT_MODES.has("company_account")).toBe(true);
+  });
+
+  test("blockedInvoiceLineFields flags nested payment_mode", () => {
+    expect(blockedInvoiceLineFields([[0, 0, { name: "Fee", payment_mode: "company_account" }]])).toContain(
+      "invoice_line_ids.payment_mode"
+    );
+  });
+
   test("isDraftRecord uses state and derived workflow status", () => {
     expect(isDraftRecord({ state: "draft" })).toBe(true);
     expect(isDraftRecord({ state: "approved" })).toBe(false);
@@ -535,6 +583,144 @@ describe("billing.update_draft_expense", () => {
       { model: "hr.expense", method: "read", args: { ids: [42], fields: ["id", "state"] } },
       { model: "hr.expense", method: "write", args: { ids: [42], vals: { total_amount: 28.61 } } }
     ]);
+  });
+
+  test("payment_mode company_account alone on a draft expense succeeds", async () => {
+    const calls: { model: string; method: string; args: Record<string, unknown> }[] = [];
+    const queue = dispatchQueue((model, method, args) => {
+      calls.push({ model, method, args });
+      if (method === "read") return [{ id: 394, state: "draft" }];
+      if (method === "write") return true;
+      return null;
+    });
+    const { updateExpense } = buildBillingHandlers(queue);
+    const result = await updateExpense({ record_id: 394, values: { payment_mode: "company_account" } });
+
+    expect(result.isError).toBeUndefined();
+    expect(result.structuredContent?.ok).toBe(true);
+    expect(calls).toEqual([
+      { model: "hr.expense", method: "read", args: { ids: [394], fields: ["id", "state"] } },
+      {
+        model: "hr.expense",
+        method: "write",
+        args: { ids: [394], vals: { payment_mode: "company_account" } }
+      }
+    ]);
+  });
+
+  test("payment_mode own_account alone on a draft expense succeeds", async () => {
+    const calls: { model: string; method: string; args: Record<string, unknown> }[] = [];
+    const queue = dispatchQueue((model, method, args) => {
+      calls.push({ model, method, args });
+      if (method === "read") return [{ id: 394, state: "draft" }];
+      if (method === "write") return true;
+      return null;
+    });
+    const { updateExpense } = buildBillingHandlers(queue);
+    const result = await updateExpense({ record_id: 394, values: { payment_mode: "own_account" } });
+
+    expect(result.isError).toBeUndefined();
+    expect(result.structuredContent?.ok).toBe(true);
+    expect(calls[1].args.vals).toEqual({ payment_mode: "own_account" });
+  });
+
+  test("payment_mode combined with another allowlisted field writes both", async () => {
+    const calls: { model: string; method: string; args: Record<string, unknown> }[] = [];
+    const queue = dispatchQueue((model, method, args) => {
+      calls.push({ model, method, args });
+      if (method === "read") return [{ id: 394, state: "draft" }];
+      if (method === "write") return true;
+      return null;
+    });
+    const { updateExpense } = buildBillingHandlers(queue);
+    const result = await updateExpense({
+      record_id: 394,
+      values: { date: "2026-07-04", payment_mode: "company_account" }
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(calls[1].method).toBe("write");
+    expect(calls[1].args.vals).toEqual({ date: "2026-07-04", payment_mode: "company_account" });
+  });
+
+  test("invalid payment_mode fails closed with no write", async () => {
+    const calls: string[] = [];
+    const queue = dispatchQueue((model, method) => {
+      calls.push(`${model}.${method}`);
+      if (method === "read") return [{ id: 394, state: "draft" }];
+      return null;
+    });
+    const { updateExpense } = buildBillingHandlers(queue);
+    const result = await updateExpense({ record_id: 394, values: { payment_mode: "bogus" } });
+
+    expect(result.isError).toBe(true);
+    const envelope = JSON.parse(result.content[0].text);
+    expect(envelope.error).toBe("invalid_payment_mode");
+    expect(envelope.recoverable).toBe(true);
+    expect(calls).toEqual(["hr.expense.read"]);
+  });
+
+  test("payment_mode alongside a blocked lifecycle key still reports write_blocked", async () => {
+    const calls: string[] = [];
+    const queue = dispatchQueue((model, method) => {
+      calls.push(`${model}.${method}`);
+      if (method === "read") return [{ id: 394, state: "draft" }];
+      return null;
+    });
+    const { updateExpense } = buildBillingHandlers(queue);
+    const result = await updateExpense({
+      record_id: 394,
+      values: { payment_mode: "company_account", state: "approved" }
+    });
+
+    expect(result.isError).toBe(true);
+    const envelope = JSON.parse(result.content[0].text);
+    expect(envelope.error).toBe("write_blocked");
+    expect(envelope.blocked_fields).toContain("state");
+    expect(calls).toEqual(["hr.expense.read"]);
+  });
+
+  test("lifecycle and payment keys remain write_blocked on their own", async () => {
+    const cases: Array<[string, unknown]> = [
+      ["payment_state", "paid"],
+      ["sheet_id", 5],
+      ["account_move_id", 9],
+      ["approval_state", "approved"],
+      ["move_type", "in_invoice"],
+      ["journal_id", 1]
+    ];
+    for (const [key, value] of cases) {
+      const calls: string[] = [];
+      const queue = dispatchQueue((model, method) => {
+        calls.push(`${model}.${method}`);
+        if (method === "read") return [{ id: 394, state: "draft" }];
+        return null;
+      });
+      const { updateExpense } = buildBillingHandlers(queue);
+      const result = await updateExpense({ record_id: 394, values: { [key]: value } });
+
+      expect(result.isError).toBe(true);
+      const envelope = JSON.parse(result.content[0].text);
+      expect(envelope.error).toBe("write_blocked");
+      expect(envelope.blocked_fields).toContain(key);
+      expect(calls).toEqual(["hr.expense.read"]);
+    }
+  });
+
+  test("non-draft expense with only payment_mode is refused with no write", async () => {
+    const calls: string[] = [];
+    const queue = dispatchQueue((model, method) => {
+      calls.push(`${model}.${method}`);
+      if (method === "read") return [{ id: 394, state: "approved" }];
+      return null;
+    });
+    const { updateExpense } = buildBillingHandlers(queue);
+    const result = await updateExpense({ record_id: 394, values: { payment_mode: "company_account" } });
+
+    expect(result.isError).toBe(true);
+    const envelope = JSON.parse(result.content[0].text);
+    expect(envelope.error).toBe("draft_required");
+    expect(calls).toEqual(["hr.expense.read"]);
   });
 });
 
@@ -783,6 +969,23 @@ describe("billing.configure_draft_vendor_bill", () => {
     const envelope = JSON.parse(result.content[0].text);
     expect(envelope.error).toBe("write_blocked");
     expect(envelope.blocked_fields).toContain("state");
+    expect(calls).toEqual(["account.move.read"]);
+  });
+
+  test("payment_mode on a draft vendor bill is write_blocked with no write", async () => {
+    const calls: string[] = [];
+    const queue = dispatchQueue((model, method) => {
+      calls.push(`${model}.${method}`);
+      if (method === "read") return [{ id: 9647, state: "draft", move_type: "in_invoice" }];
+      return null;
+    });
+    const { configureBill } = buildBillingHandlers(queue);
+    const result = await configureBill({ record_id: 9647, values: { payment_mode: "company_account" } });
+
+    expect(result.isError).toBe(true);
+    const envelope = JSON.parse(result.content[0].text);
+    expect(envelope.error).toBe("write_blocked");
+    expect(envelope.blocked_fields).toContain("payment_mode");
     expect(calls).toEqual(["account.move.read"]);
   });
 
