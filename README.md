@@ -79,6 +79,8 @@ The server never logs, stores, or echoes your key.
 | `billing.approve_expense` | write | `record_ids` (1–50 positive ints), `context` (**required**) — `hr.expense` submitted → approved; refuses when Odoo's `can_approve` is false. Never posts or pays |
 | `billing.configure_draft_vendor_bill` | write | `record_id` (positive int), `values` (allowlisted draft `account.move` `in_invoice` header: `partner_id`, dates, `ref`, `fiscal_position_id`, `currency_id`, `narration`, `payment_reference`, `review_state` (`todo` / `reviewed`), plus `invoice_line_ids`), `context` (optional) — draft vendor bills only; reset via `call_model_method` `button_draft` |
 | `billing.attach_source_pdf` | write | `bill_id` (positive int), `source_attachment_id` (positive int), `page_from`/`page_to` (positive ints, optional — 1-based inclusive; omit both to copy the whole PDF), `max_bytes` (positive int, default `10485760`), `name` (1–255 chars, optional), `context` (**required**) — copies or page-extracts a source PDF in-Worker onto a draft `in_invoice` as a new `ir.attachment`. Draft vendor bills only; never posts, never touches the source, not generic attachment CRUD |
+| `billing.copy_or_relink_source_attachment` | write | exactly one of `source_attachment_id` / `source_document_id` (positive int), `target_model` (enum `account.move`, default), `target_id` (positive int), `mode` (`copy` \| `relink`, default `copy`), `name` (1–255 chars, optional), `max_bytes` (positive int, default `10485760`), `context` (**required**) — `copy` creates a new `ir.attachment` holding the same bytes on a draft `in_invoice` and leaves the source untouched (de-duplication: file the evidence before deleting the shell bill); `relink` repoints the `documents.document` filing instead (destructive to the previous link, Documents app required). Refuses URL-only and oversize sources; reports the copy's `checksum` / `file_size` |
+| `inventory.create_draft_vendor_receipt` | write | `partner_id`, `location_dest_id` (positive ints), `picking_type_id` / `warehouse_id` / `company_id` (positive ints, optional), `scheduled_date` (`YYYY-MM-DD` or ISO datetime), `origin` / `note` (optional), `lines` (1–200 × `{ product_id, product_uom_id, quantity > 0, name? }`), `dry_run` (bool, default `false`), `context` (**required**) — creates one **draft** incoming `stock.picking` with nested `move_ids`. Destination must be internal; `picking_type_id` resolves from `code=incoming` when omitted; `dry_run` previews the exact vals with zero writes. No validate path: `button_validate` / `action_validate` stay human-only and denied on generic tools |
 | `bookkeeping.link_source_document` | write | `document_id` (positive int), `target_model` (enum `account.move`\|`project.task`), `target_id` (positive int), `context` (**required**) — links an existing Documents file to a business record via `res_model`/`res_id`; never copies bytes or creates `ir.attachment`; hard-fails when the Documents app is absent |
 | `feedback.submit` | write | `title` (5–120 chars), `message` (20–4000 chars; concrete details, no secrets), `category` (`bug` \| `documentation_gap` \| `missing_feature` \| `dx_friction`), `tool_name` (string, optional) — files an `[agent-feedback]` card in the maintainers' tracker; see [Agent feedback](#agent-feedback) |
 
@@ -131,11 +133,11 @@ Do **not** guess a UI route from an id, and do not hand-build one from a route y
 |---|---|---|
 | Record rows | `_web_url` on every row | `search_records`, `search_records_compact`, `browse_records`, `batch_read`, `projects.list_projects`, `projects.list_tasks`, `projects.list_stages` |
 | Single record | `_web_url` on the record | `get_record`, `expand_record` (`record`), `projects.get_task` |
-| Write result | `web_url` | `create_record`, `update_record`, `projects.create_task`, `billing.update_draft_expense`, `billing.configure_draft_vendor_bill` |
+| Write result | `web_url` | `create_record`, `update_record`, `projects.create_task`, `billing.update_draft_expense`, `billing.configure_draft_vendor_bill`, `inventory.create_draft_vendor_receipt` |
 | Per-entry write result | `web_url` on each `results[]` entry | `batch_update` |
 | Domain rows | `web_url` per row | `billing.audit_expenses` |
 | Documents | `web_url` (+ `linked_record_web_url` when filed against a record) | `bookkeeping.search_source_documents` |
-| Two-sided link | `document_web_url` + `target_web_url` | `bookkeeping.link_source_document` |
+| Two-sided link | `document_web_url` + `target_web_url` | `bookkeeping.link_source_document`, `billing.copy_or_relink_source_attachment` (`relink`; `copy` returns `target_web_url` + `attachment_web_url`) |
 | Feedback card | `url` | `feedback.submit` |
 
 Tools that take an id you already have (`post_message`, `batch_post_message`,
@@ -208,7 +210,14 @@ and identify the record by name plus `model,id` — do not invent a route.
   required `context`). Generic `create_record` on `ir.attachment` is **denied** — that
   denial is deliberate, so do not route around it. To link a file already filed in the
   Documents app, use `bookkeeping.link_source_document`; for draft vendor bills,
-  `billing.attach_source_pdf`.
+  `billing.attach_source_pdf` (fresh page-split bytes) or
+  `billing.copy_or_relink_source_attachment` (an attachment/document that already exists).
+- **Evidence stranded on a duplicate bill → `billing.copy_or_relink_source_attachment`.** When a
+  zero-value duplicate shell is about to be deleted, `mode: copy` (the default) puts a new
+  `ir.attachment` with the same bytes on the canonical draft bill and leaves the source untouched,
+  so the shell can then go. `mode: relink` moves the `documents.document` filing instead and is
+  **destructive** to the previous link. Supply exactly one source; the target must be a draft
+  `in_invoice`.
 - **Operational text** may reference banking, B2C exports, VAT, payroll handoffs, deadlines — the
   connector classifies by **model + method + field names**, not free-text keywords.
 - **Draft vendor-bill / expense prep** — use `billing.update_draft_expense` /
@@ -226,6 +235,11 @@ and identify the record by name plus `model,id` — do not invent a route.
   plus name / `country_id` / contact), then set `partner_id` on the draft bill. Banks,
   receivable/payable property accounts, payment terms, and credit/debit limits stay
   MCP-blocked; partner identity is not a `bookkeeping.plan_safe_write` path.
+- **Draft vendor receipts → `inventory.create_draft_vendor_receipt`.** Recording what physically
+  arrived (close-time evidence) creates one **draft** incoming `stock.picking` with its move lines,
+  from a vendor into an internal location. `dry_run: true` previews the exact vals with zero writes.
+  The receipt is left unvalidated: the tool exposes no `button_validate` / `action_validate` path,
+  and those methods stay denied on the generic tools, so moving stock remains a human action in Odoo.
 - **Inventory master data** — `product.category`, `stock.location` and `product.template` (and *only*
   those three inventory models) accept `create_record` / `update_record` / `call_model_method` writes
   under the caller's own Odoo ACLs. A create is refused when it would duplicate an existing record:
@@ -233,7 +247,9 @@ and identify the record by name plus `model,id` — do not invent a route.
   `name` under the same `company_id` for templates — plus the same `default_code` under that company
   when an internal reference is supplied. The refusal names the existing id. `product.product`,
   `stock.picking`, `stock.move`, `stock.quant` and the rest of `product.*` / `stock.*` stay blocked on
-  generic write tools, and `unlink` on the three graduated models still needs a `confirmation_token`.
+  generic write tools — the one narrow exception is the dedicated draft-receipt tool above, which is
+  not a widening of this policy — and `unlink` on the three graduated models still needs a
+  `confirmation_token`.
 - **Reversible expense lifecycle** — prefer the dedicated tools `billing.reset_expense` /
   `billing.submit_expense` / `billing.approve_expense`. They are the **only** lifecycle path on
   `/accounting/mcp`, which ships no generic write tools. On the full `/mcp` surface the same

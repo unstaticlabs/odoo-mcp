@@ -430,6 +430,44 @@ describe("refusals on graduated paths are structured, never opaque", () => {
     }
     expect(calls).toEqual([]);
   });
+
+  /**
+   * ODOO2298 shipped `inventory.create_draft_vendor_receipt`, a dedicated draft-receipt write.
+   * Its existence must not widen the generic surface: updating or validating a picking stays denied.
+   */
+  test("stock.picking / stock.move updates stay denied even though a draft-receipt tool now exists", async () => {
+    const { queue, calls } = recordingQueue(() => [1]);
+    const { updateRecord } = buildHandlers(queue);
+
+    for (const model of ["stock.picking", "stock.move"]) {
+      const result = await updateRecord({ model, record_id: 4, values: { origin: "PO-1" } });
+      expect(result.isError).toBe(true);
+      const envelope = JSON.parse(result.content[0].text);
+      expect(envelope.error).toBe("write_blocked");
+      expect(envelope.refusing_layer).toBe("connector_policy");
+    }
+    expect(calls).toEqual([]);
+  });
+
+  test("receipt validation stays blocked on the generic escape hatch", async () => {
+    const { queue, calls } = recordingQueue(() => true);
+    const { callModelMethod } = buildHandlers(queue);
+
+    for (const method of ["button_validate", "action_validate", "_action_done"]) {
+      const result = await callModelMethod({
+        model: "stock.picking",
+        method,
+        ids: [4242],
+        context: "validate the receipt"
+      });
+      expect(result.isError, `${method} must be refused`).toBe(true);
+      const envelope = JSON.parse(result.content[0].text);
+      expect(envelope.error).toBe("write_blocked");
+      expect(envelope.intent).toBe("disallowed");
+      expect(envelope.refusing_layer).toBe("connector_policy");
+    }
+    expect(calls).toEqual([]);
+  });
 });
 
 describe("irreversible operations stay confirmation-gated", () => {

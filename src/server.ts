@@ -6,6 +6,7 @@ import { OdooQueue } from "./odoo-queue";
 import { TtlCache } from "./cache";
 import { registerBillingReadTools, registerBillingWriteTools, registerExpenseLifecycleTools } from "./tools/billing";
 import { registerFeedbackTools } from "./tools/feedback";
+import { registerInventoryTools } from "./tools/inventory";
 import {
   registerBookkeepingTools,
   registerReportLineTools,
@@ -65,6 +66,7 @@ export class McpAgent extends OdooAgentBase {
     registerBillingReadTools(this.server, getProps, this.odooQueue);
     registerBillingWriteTools(this.server, getProps, this.odooQueue);
     registerExpenseLifecycleTools(this.server, getProps, this.odooQueue);
+    registerInventoryTools(this.server, getProps, this.odooQueue);
     registerFeedbackTools(this.server, getProps, this.odooQueue, this.cache);
     registerBookkeepingTools(this.server, getProps, this.odooQueue, this.cache);
     registerReturnPreviewTools(this.server, getProps, this.odooQueue, this.cache);
@@ -88,6 +90,7 @@ export class AccountingAgent extends OdooAgentBase {
     registerBillingReadTools(this.server, getProps, this.odooQueue);
     registerBillingWriteTools(this.server, getProps, this.odooQueue);
     registerExpenseLifecycleTools(this.server, getProps, this.odooQueue);
+    registerInventoryTools(this.server, getProps, this.odooQueue);
     registerFeedbackTools(this.server, getProps, this.odooQueue, this.cache);
     registerBookkeepingTools(this.server, getProps, this.odooQueue, this.cache);
     registerReturnPreviewTools(this.server, getProps, this.odooQueue, this.cache);
