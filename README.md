@@ -73,7 +73,7 @@ The server never logs, stores, or echoes your key.
 | `bookkeeping.preview_returns` | read | `company` (positive int), `from`/`to` (string), `return_type_xmlids` (string[] min 1) — which `account.return` cards should exist; blank periodicity → `configuration_issues` |
 | `bookkeeping.plan_safe_write` | validate-only | `operation` (enum: `create_or_update_report_external_value`, `create_manual_tax_return`, `update_return_type_periodicity`, `create_lock_exception`), `company` (string), `values` (object) — dry-run write plan + HMAC confirmation token; never writes |
 | `billing.audit_expenses` | read | `state` / `product_id` / `analytic_account_id` (optional; analytic post-filters `analytic_distribution` keys), `date_from`/`date_to`, `company_id`, `limit` (1–100, default 50), `offset`, `order` — population audit with account/taxes/payment_mode/attachments, in-page duplicate candidates, and totals |
-| `billing.update_draft_expense` | write | `record_id` (positive int), `values` (allowlisted draft `hr.expense` prep fields: date/name/description/product/account/analytics/qty/price/**total_amount**/tax/reference/**payment_mode** (own_account | company_account — who paid; draft prep, not a lifecycle action); `total_amount_currency` is not writable), `context` (optional) — draft-only; lifecycle via `billing.reset_expense` / `billing.submit_expense` / `billing.approve_expense` |
+| `billing.update_draft_expense` | write | `record_id` (positive int), `values` (allowlisted draft `hr.expense` prep fields: date/name/description/product/account/analytics/qty/price/**total_amount**/tax/reference/**payment_mode** (own_account | company_account — who paid; draft prep, not a lifecycle action)/**company_id**/**employee_id**; `total_amount_currency` is not writable), `context` (optional) — draft-only; lifecycle via `billing.reset_expense` / `billing.submit_expense` / `billing.approve_expense`. `company_id` + `employee_id` are draft-**preparation** only (mis-routed legal entity): both required together, the target employee must belong to the target company, the caller must have access to it, and company-bound fields (product/account/taxes/analytic) that do not exist there are refused by name — never silently kept or cleared. Validated first, then one atomic write |
 | `billing.reset_expense` | write | `record_ids` (1–50 positive ints), `context` (**required**) — `hr.expense` submitted/approved/refused → draft. All-or-nothing; validated against live state and `can_reset` first |
 | `billing.submit_expense` | write | `record_ids` (1–50 positive ints), `context` (**required**) — `hr.expense` draft → submitted |
 | `billing.approve_expense` | write | `record_ids` (1–50 positive ints), `context` (**required**) — `hr.expense` submitted → approved; refuses when Odoo's `can_approve` is false. Never posts or pays |
@@ -223,6 +223,11 @@ and identify the record by name plus `model,id` — do not invent a route.
 - **Draft vendor-bill / expense prep** — use `billing.update_draft_expense` /
   `billing.configure_draft_vendor_bill` (draft-only allowlisted fields; no validate/post).
   Expense monetary prep uses `total_amount`; `total_amount_currency` is audit-only and refused on write.
+  A draft expense that OCR or the email gateway filed against the **wrong legal entity** is fixed before
+  submit by writing `company_id` + `employee_id` together on `billing.update_draft_expense`: the target
+  company, the target employee and every company-bound reference are validated first, and the move then
+  lands in a single write — mismatches are refused by name rather than silently carried across
+  (see [`docs/bookkeeping.md`](docs/bookkeeping.md#cross-company-draft-expense-reassignment)).
   When one supplier PDF holds several vendors' invoices, `billing.attach_source_pdf` copies or
   page-extracts it onto each draft bill in-Worker — no generic `ir.attachment` CRUD needed.
   For a **new French vendor**, create/update `res.partner` via generic `create_record` /
