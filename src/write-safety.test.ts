@@ -13,6 +13,7 @@
  */
 import { describe, test, expect } from "bun:test";
 import { annotateActionExecutability, assessWriteOperation, isMutatingOdooMethod } from "./write-safety";
+import { RES_COMPANY_DEFAULT_TAX_FIELDS } from "./safety";
 import { FINANCE_KEYWORD_PM_TEXT } from "./write-safety.fixtures";
 
 /** Ordinary PM notes — no banking/B2C/VAT/deadline vocabulary (negative control for keyword invariance). */
@@ -456,6 +457,121 @@ describe("assessWriteOperation — graduated inventory master data (ODOO2240, OD
   test("sibling inventory models stay non-executable and default-denied", () => {
     for (const model of ["product.product", "stock.picking", "stock.move", "stock.quant"]) {
       const verdict = assessWriteOperation({ model, method: "write", args: { ids: [1], vals: { name: "x" } } });
+      expect(verdict.allowed).toBe(false);
+      expect(verdict.intent).toBe("disallowed");
+      expect(annotateActionExecutability(model, "write").executable).toBe(false);
+    }
+  });
+});
+
+describe("assessWriteOperation — res.company default taxes (ODOO2297)", () => {
+  test("the allowlist is exactly the two default-tax fields", () => {
+    expect([...RES_COMPANY_DEFAULT_TAX_FIELDS].sort()).toEqual(["account_purchase_tax_id", "account_sale_tax_id"]);
+  });
+
+  for (const field of ["account_sale_tax_id", "account_purchase_tax_id"]) {
+    test(`${field} is reversible configuration on write and create`, () => {
+      const write = assessWriteOperation({
+        model: "res.company",
+        method: "write",
+        args: { ids: [1], vals: { [field]: 12 } }
+      });
+      expect(write.allowed).toBe(true);
+      expect(write.policy_rule).toBe("reversible_configuration");
+      expect(write.risk_class).toBe("reversible_configuration");
+
+      const create = assessWriteOperation({
+        model: "res.company",
+        method: "create",
+        args: { vals_list: [{ [field]: 12 }] }
+      });
+      expect(create.allowed).toBe(true);
+      expect(create.risk_class).toBe("reversible_configuration");
+    });
+  }
+
+  test("both default taxes may move in one write", () => {
+    const verdict = assessWriteOperation({
+      model: "res.company",
+      method: "write",
+      args: { ids: [1], vals: { account_sale_tax_id: 3, account_purchase_tax_id: 4 } }
+    });
+    expect(verdict.allowed).toBe(true);
+  });
+
+  for (const field of ["name", "currency_id", "vat", "bank_ids", "email", "partner_id", "country_id"]) {
+    test(`${field} stays blocked and is named in the refusal`, () => {
+      const verdict = assessWriteOperation({
+        model: "res.company",
+        method: "write",
+        args: { ids: [1], vals: { [field]: "x" } }
+      });
+      expect(verdict.allowed).toBe(false);
+      expect(verdict.blocked_fields).toEqual([field]);
+      expect(verdict.recoverable).toBe(true);
+    });
+  }
+
+  test("a denied field poisons the whole payload — the tax field is not written for the caller", () => {
+    const verdict = assessWriteOperation({
+      model: "res.company",
+      method: "write",
+      args: { ids: [1], vals: { account_sale_tax_id: 3, name: "Renamed SARL" } }
+    });
+    expect(verdict.allowed).toBe(false);
+    expect(verdict.blocked_fields).toEqual(["name"]);
+    expect(verdict.policy_rule).toBe("sensitive_model_method_denied");
+  });
+
+  test("other account_* / tax_* company fields are NOT let in by pattern luck", () => {
+    for (const field of ["account_default_pos_receivable_account_id", "tax_calculation_rounding_method"]) {
+      const verdict = assessWriteOperation({
+        model: "res.company",
+        method: "write",
+        args: { ids: [1], vals: { [field]: 1 } }
+      });
+      expect(verdict.allowed).toBe(false);
+      expect(verdict.blocked_fields).toEqual([field]);
+    }
+  });
+
+  test("unlink is confirmation-gated, and discovery says so", () => {
+    const verdict = assessWriteOperation({ model: "res.company", method: "unlink", args: { ids: [1] } });
+    expect(verdict.allowed).toBe(false);
+    expect(verdict.policy_rule).toBe("irreversible_confirmation_required");
+    expect(verdict.risk_class).toBe("destructive");
+
+    const ann = annotateActionExecutability("res.company", "unlink");
+    expect(ann.executable).toBe(true);
+    expect(ann.confirmation_required).toBe(true);
+    expect(ann.alternative).toBe("confirmation_token");
+  });
+
+  test("methods beyond create/write/unlink stay denied — admitting the model is not a CRUD opening", () => {
+    for (const method of ["action_post", "message_post", "action_archive", "copy", "toggle_active"]) {
+      const verdict = assessWriteOperation({ model: "res.company", method, args: { ids: [1] } });
+      expect(verdict.allowed).toBe(false);
+      expect(annotateActionExecutability("res.company", method).executable).toBe(false);
+    }
+  });
+
+  test("create/write are executable in list_model_actions", () => {
+    for (const method of ["create", "write"]) {
+      const ann = annotateActionExecutability("res.company", method);
+      expect(ann.executable).toBe(true);
+      expect(ann.confirmation_required).toBeUndefined();
+    }
+  });
+
+  test("sibling res.* models, res.config.settings and sale.order stay default-denied", () => {
+    // res.config.settings is the other place these defaults are editable in the UI — admitting
+    // res.company must not open a second, unclassified route to the same fields.
+    for (const model of ["res.users", "res.currency", "res.partner.bank", "res.config.settings", "sale.order"]) {
+      const verdict = assessWriteOperation({
+        model,
+        method: "write",
+        args: { ids: [1], vals: { account_sale_tax_id: 3 } }
+      });
       expect(verdict.allowed).toBe(false);
       expect(verdict.intent).toBe("disallowed");
       expect(annotateActionExecutability(model, "write").executable).toBe(false);

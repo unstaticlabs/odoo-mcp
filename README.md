@@ -250,6 +250,18 @@ and identify the record by name plus `model,id` — do not invent a route.
   generic write tools — the one narrow exception is the dedicated draft-receipt tool above, which is
   not a widening of this policy — and `unlink` on the three graduated models still needs a
   `confirmation_token`.
+- **Company default taxes** — `res.company` is admitted to the generic write tools for exactly two
+  fields: **`account_sale_tax_id`** and **`account_purchase_tax_id`**. They decide which tax a future
+  invoice/bill line pre-fills with, never touch a posted entry, and execute under the caller's own
+  Odoo ACLs. Every other company field — `name`, `currency_id`, `vat`, journals, `bank_ids`, the rest
+  of `account_*` / `tax_*` — is refused by name, and a payload mixing an allowed tax field with a
+  denied one is refused whole (nothing is written for you). Lock-boundary fields
+  (`fiscalyear_lock_date`, `tax_lock_date`, `hard_lock_date`, any `*_lock_date`) are reachable but
+  **confirmation-gated**: they return `confirmation_required` + `confirmation_token` and never move a
+  lock in one call, whichever tool is used. `unlink` on a company needs a token too. Unlike every other
+  model, a `res.company` mutation **requires** a non-empty write `context` (audit-logged server-side,
+  never sent to Odoo, never an authorization bypass). `res.config.settings` and other `res.*` models
+  stay blocked, and this is not a `bookkeeping.plan_safe_write` path.
 - **Reversible expense lifecycle** — prefer the dedicated tools `billing.reset_expense` /
   `billing.submit_expense` / `billing.approve_expense`. They are the **only** lifecycle path on
   `/accounting/mcp`, which ships no generic write tools. On the full `/mcp` surface the same
@@ -365,10 +377,11 @@ Every write tool accepts an optional `context` string (≤ 500 chars): one sente
 agent-declared intent, e.g. `"user asked to move task 42 to Review"`. It is **audit-only** —
 logged server-side as a structured `write_context` line (visible in Workers Logs /
 `wrangler tail`), **never sent to Odoo**, and **never consulted by the write-safety gate**,
-which continues to classify purely by model + method + field structure. **Exception:**
-allowlisted reversible lifecycle via `call_model_method` **requires** non-empty `context`
-(still audit-only — never a keyword authz bypass). Do not put credentials or sensitive
-personal data in it.
+which continues to classify purely by model + method + field structure. **Exceptions** — where a
+non-empty `context` is **required**: allowlisted reversible lifecycle via `call_model_method`, and
+any `res.company` mutation on the generic write tools (still audit-only — never a keyword authz
+bypass; the gate refuses a denied company field whatever the context says). Do not put credentials
+or sensitive personal data in it.
 
 ### Agent feedback
 

@@ -96,20 +96,89 @@ describe("lock-sensitive writes require confirmation", () => {
   });
 });
 
-describe("known gap: lock-date fields live on a model the connector still default-denies", () => {
-  test("res.company writes are refused before the lock-boundary class can apply", () => {
-    // In Odoo 18/19 `fiscalyear_lock_date` / `tax_lock_date` are res.company fields, and res.company
-    // is not on any allowlist — so the write is denied generically, not as lock_sensitive. The
-    // field-level escalation above is therefore only load-bearing for models already reachable
-    // (account.*). If res.company is ever admitted, this test will fail and the lock gate becomes
-    // the thing standing between an agent and a company's lock dates — which is the intent.
+describe("gap closed: res.company is admitted, so the lock fence now stands on its own", () => {
+  // In Odoo 18/19 `fiscalyear_lock_date` / `tax_lock_date` / `hard_lock_date` are res.company fields.
+  // The model used to be default-denied, which meant a lock write was refused generically and the
+  // field-level escalation was only load-bearing for account.*. Now that res.company is admitted for
+  // its two default-tax fields (card ODOO2297), the lock class is the thing standing between an agent
+  // and a company's lock dates — these tests assert the classifier owns that, not the default deny.
+  for (const field of ["fiscalyear_lock_date", "tax_lock_date", "hard_lock_date", "purchase_lock_date"]) {
+    test(`res.company write of ${field} reaches the lock-sensitive class`, () => {
+      const verdict = assessWriteOperation({
+        model: "res.company",
+        method: "write",
+        args: { ids: [1], vals: { [field]: "2026-01-01" } }
+      });
+      expect(verdict.allowed).toBe(false);
+      expect(verdict.policy_rule).toBe("irreversible_confirmation_required");
+      expect(verdict.risk_class).toBe("lock_sensitive");
+      expect(verdict.reason).toContain(field);
+    });
+  }
+
+  test("a lock date rides along with an allowlisted tax field without downgrading the class", () => {
     const verdict = assessWriteOperation({
       model: "res.company",
       method: "write",
-      args: { ids: [1], vals: { fiscalyear_lock_date: "2026-01-01" } }
+      args: { ids: [1], vals: { account_sale_tax_id: 3, tax_lock_date: "2026-01-01" } }
     });
     expect(verdict.allowed).toBe(false);
-    expect(verdict.policy_rule).not.toBe("irreversible_confirmation_required");
+    expect(verdict.policy_rule).toBe("irreversible_confirmation_required");
+    expect(verdict.risk_class).toBe("lock_sensitive");
+  });
+
+  test("update_record cannot move a res.company lock date without a token", async () => {
+    const { queue, calls } = dispatchQueue(() => true);
+    const result = await handlers(queue).updateRecord({
+      model: "res.company",
+      record_id: 1,
+      values: { fiscalyear_lock_date: "2026-01-01" },
+      context: "closing FY2025"
+    });
+    const envelope = envelopeOf(result);
+    expect(envelope.error).toBe("confirmation_required");
+    expect(envelope.risk_class).toBe("lock_sensitive");
+    expect(typeof envelope.confirmation_token).toBe("string");
+    expect(calls).toEqual([]);
+  });
+
+  test("create_record cannot set a res.company lock date without a token", async () => {
+    const { queue, calls } = dispatchQueue(() => [5]);
+    const result = await handlers(queue).createRecord({
+      model: "res.company",
+      values: { account_sale_tax_id: 3, tax_lock_date: "2026-01-01" },
+      context: "new entity setup"
+    });
+    expect(envelopeOf(result).error).toBe("confirmation_required");
+    expect(calls).toEqual([]);
+  });
+
+  test("call_model_method cannot move a lock date through the escape hatch either", async () => {
+    const { queue, calls } = dispatchQueue(() => true);
+    const result = await handlers(queue).callModelMethod({
+      model: "res.company",
+      method: "write",
+      ids: [1],
+      kwargs: { vals: { hard_lock_date: "2026-01-01" } },
+      context: "hard close"
+    });
+    expect(envelopeOf(result).error).toBe("confirmation_required");
+    expect(calls).toEqual([]);
+  });
+
+  test("the lock write executes once the issued token is supplied", async () => {
+    const { queue, calls } = dispatchQueue(() => true);
+    const h = handlers(queue);
+    const args = {
+      model: "res.company",
+      record_id: 1,
+      values: { fiscalyear_lock_date: "2026-01-01" },
+      context: "closing FY2025"
+    };
+    const token = envelopeOf(await h.updateRecord(args)).confirmation_token as string;
+    const executed = await h.updateRecord({ ...args, confirmation_token: token });
+    expect(executed.isError).toBeUndefined();
+    expect(calls.map((c) => c.method)).toEqual(["write"]);
   });
 });
 
