@@ -39,8 +39,13 @@ import {
   type WriteBlockedIntent
 } from "./shared";
 
-/** Default fields for project.project list/get (matches MODEL_FIELD_PRESETS). */
-export const DEFAULT_PROJECT_FIELDS = ["id", "name", "partner_id", "user_id", "stage_id"];
+/**
+ * Default fields for project.project list/get — keep in lockstep with MODEL_FIELD_PRESETS.
+ * `stage_id` is excluded on purpose: Odoo gates it behind `project.group_project_stages` ("Use
+ * Stages on Project"), so a user without that group gets an AccessError for the whole read. Callers
+ * that want it must request it explicitly, and get the drop-and-retry + `acl-denied` field report.
+ */
+export const DEFAULT_PROJECT_FIELDS = ["id", "name", "partner_id", "user_id"];
 /** Default fields for project.task.type (stages). */
 export const DEFAULT_STAGE_FIELDS = ["id", "name", "sequence", "fold"];
 
