@@ -13,7 +13,7 @@ reads, normalize the shapes, and refuse to write until a human confirms.
 |---|---|
 | Expense population **audit** (account/VAT/payment/attachments/duplicates/totals) | `billing.audit_expenses` (read-only) |
 | Create / update **VAT-complete vendor** (`res.partner` identity: `vat`, `siret`, `company_registry`, plus name / `country_id` / contact) | Generic `create_record` / `update_record` — then attach via `billing.configure_draft_vendor_bill` (`partner_id`, draft-only). Partner identity is **not** a `bookkeeping.plan_safe_write` concern; banks / property accounts / credit limits remain MCP-denied |
-| Draft vendor-bill / expense **preparatory** fields (draft-only; expense amount via `total_amount` — `total_amount_currency` is audit-only; expense payer via `payment_mode` (`own_account` / `company_account`); vendor-bill review-queue status via `review_state`) | `billing.update_draft_expense`, `billing.configure_draft_vendor_bill` |
+| Draft vendor-bill / expense **preparatory** fields (draft-only; expense amount via `total_amount` — `total_amount_currency` is audit-only; expense payer ("Paid By") via `payment_mode` (`own_account` / `company_account`); vendor-bill review-queue status via `review_state`) | `billing.update_draft_expense`, `billing.configure_draft_vendor_bill` |
 | Draft expense filed against the **wrong legal entity** (OCR / email mis-routing) | `billing.update_draft_expense` with `company_id` **and** `employee_id` together — draft-preparation only; validated then applied in one write; no post / approve / pay / reconcile ([details](#cross-company-draft-expense-reassignment)) |
 | **Attach / page-split a source PDF** onto a draft vendor bill (composite supplier PDFs) | `billing.attach_source_pdf` (draft `in_invoice` only; extract or copy in-Worker). Not generic `ir.attachment` CRUD |
 | **Link an already-filed Documents file** to an `account.move` / `project.task` (one durable copy, no byte duplication) | `bookkeeping.link_source_document` (write; sets `documents.document` `res_model`/`res_id` only; requires the Documents app; `/mcp` + `/accounting/mcp` only). **Not** `billing.attach_source_pdf` (which copies/page-splits PDF **bytes** onto a draft bill) and not the read side — verify links with `bookkeeping.search_source_documents` |
@@ -67,7 +67,7 @@ Reversible CRUD on `hr.expense` / `hr.expense.sheet` / `account.move` is **not**
    `action_reset_expense_sheets` / vendor-bill `button_draft`) on the full `/mcp` surface.
 2. `billing.update_draft_expense` / `billing.configure_draft_vendor_bill` — draft preparatory fields only.
    Expense monetary prep uses `total_amount`; `total_amount_currency` is audit-only and refused on write.
-   Expense payer prep uses `payment_mode` (`own_account` / `company_account`) on draft expenses only —
+   Expense payer prep uses `payment_mode` — Odoo's **Paid By** — (`own_account` / `company_account`) on draft expenses only —
    a who-paid correction that does not submit, approve, post, or pay; lifecycle stays in step 1/step 3.
    Expense `company_id` + `employee_id` are draft-**preparation** fields here too — they fix an expense
    that landed in the wrong legal entity, and they are validated together before a single write
@@ -160,8 +160,9 @@ Draft bill/expense prep is **not** part of `plan_safe_write`. Generic writes are
 An expense that OCR or the email gateway filed against the wrong company is fixed with
 `billing.update_draft_expense` by writing `company_id` **and** `employee_id` together. This is a
 draft-**preparation** step only: it never posts, approves, pays, or reconciles, non-draft records are
-still refused with `draft_required` first, and `HARD_DENY_FIELDS` (`state`, `journal_id`,
-`payment_mode`, …) stay blocked.
+still refused with `draft_required` first, and `HARD_DENY_FIELDS` (`state`, `payment_state`,
+`journal_id`, `account_move_id`, …) stay blocked. `payment_mode` ("Paid By") is *not* hard-denied —
+it is an allowlisted draft-expense prep field (still refused on vendor-bill headers and invoice lines).
 
 Everything is validated before anything is written — a refusal issues **zero** writes, and an accepted
 move lands as **one** `write` (carrying `allowed_company_ids` for both companies) followed by a

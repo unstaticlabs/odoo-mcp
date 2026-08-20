@@ -1286,6 +1286,8 @@ export function registerBillingWriteTools(
   const draftExpenseValuesDescribe =
     `Allowlisted preparatory keys only: ${draftExpenseFieldList}. ` +
     "Use total_amount for monetary corrections; total_amount_currency is audit/read-only and not writable. " +
+    'payment_mode is Odoo\'s "Paid By" (own_account = employee paid, company_account = company paid); ' +
+    "draft-prep only — it does not submit, approve, post, or pay. " +
     expenseReassignmentNote;
 
   server.registerTool(
@@ -1295,9 +1297,10 @@ export function registerBillingWriteTools(
       description:
         "Write: update preparatory fields on a draft hr.expense only. Allowlisted fields: " +
         `${draftExpenseFieldList}. Use total_amount for monetary corrections; total_amount_currency is ` +
-        "not writable (audit/read-only). payment_mode accepts own_account (employee paid) or " +
-        "company_account (company paid) — a draft-only correction of who paid; it does not submit, " +
-        "approve, post, or pay. Refuses non-draft records and lifecycle/payment fields. " +
+        'not writable (audit/read-only). payment_mode is Odoo\'s "Paid By" field: own_account ' +
+        "(employee paid) or company_account (company paid) — a draft-only correction of who paid, " +
+        "for an expense whose Paid By landed wrong on import. It does not submit, approve, post, or " +
+        "pay. Refuses non-draft records and lifecycle/payment fields. " +
         `${expenseReassignmentNote} ` +
         "Does not validate, post, or delete. For reset→edit→resubmit/reapprove hygiene use " +
         "call_model_method on allowlisted methods (action_reset / action_submit / action_approve) " +
