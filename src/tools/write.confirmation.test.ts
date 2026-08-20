@@ -1,17 +1,21 @@
 /**
  * confirmation_token discoverability + kwargs fence (#2261) and delete_record top-level
  * confirmation_token fence for #2260/#2263 (ChatGPT tools/list caching / nested-only bug).
+ * call_model_method schema lock + account.move.line.reconcile round-trip for #2295.
  *
  * Asserts published schema shape and that kwargs-only tokens are lifted (not silent no-ops)
  * and stripped before Odoo JSON-2. Also locks that delete_record accepts an optional top-level
  * confirmation_token (not under a nested container) and honours it on irreversible unlink.
  */
 import { describe, expect, mock, test } from "bun:test";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { OdooQueue } from "../odoo-queue";
+import { issueConfirmationToken, TOKEN_TTL_MS } from "../safety";
 import { validatedToolHandler } from "./structured-test-util";
-import { registerWriteTools, resolveConfirmationFromKwargs } from "./write";
+import { buildIrreversibleWritePlan, registerWriteTools, resolveConfirmationFromKwargs } from "./write";
 
 const props = { odooBaseUrl: "http://example.com", odooDb: "test-db", odooApiKey: "secret-key" };
 const SECRET = "test-confirmation-secret";
@@ -45,11 +49,15 @@ describe("confirmation_token published schema", () => {
   test("every mutating write tool advertises optional top-level confirmation_token", () => {
     const server = new McpServer({ name: "test", version: "0.0.0" });
     registerWriteTools(server, () => props, dispatchQueue(() => true).queue, () => SECRET);
-    const tools = (server as unknown as { _registeredTools: Record<string, { inputSchema: { shape: Record<string, unknown> } }> })
-      ._registeredTools;
+    const tools = registeredTools(server);
 
     for (const name of MUTATING_TOOLS) {
-      expect(tools[name]?.inputSchema.shape.confirmation_token).toBeDefined();
+      const schema = tools[name]?.inputSchema;
+      expect(schema?.shape.confirmation_token).toBeDefined();
+
+      const json = z.toJSONSchema(z.object(schema.shape));
+      expect(json.properties?.confirmation_token).toBeDefined();
+      expect(json.required ?? []).not.toContain("confirmation_token");
     }
   });
 });
@@ -175,12 +183,6 @@ describe("kwargs confirmation lift on call_model_method", () => {
 const REPRO_MODEL = "account.analytic.account";
 const REPRO_ID = 16;
 
-function buildDeleteHandler(queue: OdooQueue) {
-  const server = new McpServer({ name: "test", version: "0.0.0" });
-  registerWriteTools(server, () => props, queue, () => SECRET);
-  return validatedToolHandler(server, "delete_record") as (args: unknown) => Promise<ToolResult>;
-}
-
 function registeredTools(server: McpServer) {
   return (
     server as unknown as {
@@ -190,6 +192,18 @@ function registeredTools(server: McpServer) {
       >;
     }
   )._registeredTools;
+}
+
+function buildDeleteHandler(queue: OdooQueue) {
+  const server = new McpServer({ name: "test", version: "0.0.0" });
+  registerWriteTools(server, () => props, queue, () => SECRET);
+  return validatedToolHandler(server, "delete_record") as (args: unknown) => Promise<ToolResult>;
+}
+
+function buildCallModelMethodHandler(queue: OdooQueue) {
+  const server = new McpServer({ name: "test", version: "0.0.0" });
+  registerWriteTools(server, () => props, queue, () => SECRET);
+  return validatedToolHandler(server, "call_model_method") as (args: unknown) => Promise<ToolResult>;
 }
 
 describe("delete_record top-level confirmation_token fence (#2260/#2263)", () => {
@@ -301,5 +315,245 @@ describe("delete_record top-level confirmation_token fence (#2260/#2263)", () =>
     expect(crossRecord.isError).toBe(true);
     expect(envelopeOf(crossRecord).policy_rule).toBe("irreversible_confirmation_invalid");
     expect(calls.some((c) => c.method === "unlink")).toBe(false);
+  });
+});
+
+/**
+ * call_model_method must expose the same optional top-level confirmation_token as delete_record
+ * (#2295). Reconcile is the documented high-risk recipe; stale ChatGPT connector caches on older
+ * server versions were the reported failure mode, not a missing schema field.
+ */
+describe("call_model_method top-level confirmation_token fence (#2295)", () => {
+  test("registered inputSchema exposes optional top-level confirmation_token", () => {
+    const server = new McpServer({ name: "test", version: "0.0.0" });
+    registerWriteTools(server, () => props, dispatchQueue(() => true).queue, () => SECRET);
+    const schema = registeredTools(server).call_model_method.inputSchema;
+
+    expect(schema.shape.confirmation_token).toBeDefined();
+    expect(Object.keys(schema.shape).sort()).toEqual([
+      "args",
+      "confirmation_token",
+      "context",
+      "ids",
+      "kwargs",
+      "method",
+      "model"
+    ]);
+
+    expect(schema.safeParse({ model: "account.move.line", method: "reconcile", ids: [5] }).success).toBe(true);
+
+    const parsed = schema.safeParse({
+      model: "account.move.line",
+      method: "reconcile",
+      ids: [5],
+      confirmation_token: "tok-abc"
+    });
+    expect(parsed.success).toBe(true);
+    expect(parsed.data.confirmation_token).toBe("tok-abc");
+
+    const json = z.toJSONSchema(z.object(schema.shape));
+    expect(json.properties?.confirmation_token).toBeDefined();
+    expect(json.required ?? []).not.toContain("confirmation_token");
+
+    const deleteJson = z.toJSONSchema(z.object(registeredTools(server).delete_record.inputSchema.shape));
+    const callTokenSchema = json.properties?.confirmation_token;
+    const deleteTokenSchema = deleteJson.properties?.confirmation_token;
+    expect(
+      callTokenSchema &&
+        typeof callTokenSchema === "object" &&
+        "description" in callTokenSchema &&
+        deleteTokenSchema &&
+        typeof deleteTokenSchema === "object" &&
+        "description" in deleteTokenSchema
+        ? callTokenSchema.description
+        : undefined
+    ).toBe(
+      deleteTokenSchema &&
+        typeof deleteTokenSchema === "object" &&
+        "description" in deleteTokenSchema
+        ? deleteTokenSchema.description
+        : undefined
+    );
+  });
+
+  test("tools/list advertises optional top-level confirmation_token for call_model_method", async () => {
+    const [clientT, serverT] = InMemoryTransport.createLinkedPair();
+    const server = new McpServer({ name: "test", version: "0.0.0" });
+    registerWriteTools(server, () => props, dispatchQueue(() => true).queue, () => SECRET);
+    await server.connect(serverT);
+
+    const client = new Client({ name: "t", version: "0.0.0" }, { capabilities: {} });
+    await client.connect(clientT);
+
+    const tool = (await client.listTools()).tools.find((t) => t.name === "call_model_method");
+    expect(tool).toBeDefined();
+    expect(tool!.inputSchema.properties?.confirmation_token).toBeDefined();
+    expect(tool!.inputSchema.required ?? []).not.toContain("confirmation_token");
+    expect(Object.keys(tool!.inputSchema.properties ?? {}).sort()).toEqual([
+      "args",
+      "confirmation_token",
+      "context",
+      "ids",
+      "kwargs",
+      "method",
+      "model"
+    ]);
+
+    await client.close();
+    await server.close();
+  });
+});
+
+/** account.move.line.reconcile — documented caller recipe with top-level confirmation_token (#2295). */
+const RECONCILE_MODEL = "account.move.line";
+const RECONCILE_IDS = [401, 402];
+const RECONCILE_CONTEXT = "reconcile bank line against invoice";
+
+describe("account.move.line.reconcile top-level confirmation (#2295)", () => {
+  test("preflight then top-level token round-trip", async () => {
+    const { queue, calls } = dispatchQueue(() => true);
+    const callModelMethod = buildCallModelMethodHandler(queue);
+
+    const preflight = await callModelMethod({
+      model: RECONCILE_MODEL,
+      method: "reconcile",
+      ids: RECONCILE_IDS,
+      context: RECONCILE_CONTEXT
+    });
+    expect(preflight.isError).toBe(true);
+    const envelope = envelopeOf(preflight);
+    expect(envelope.error).toBe("confirmation_required");
+    expect(envelope.confirmation_required).toBe(true);
+    expect(envelope.refusing_layer).toBe("connector_policy");
+    expect(envelope.risk_class).toBe("irreversible_payment");
+    expect(typeof envelope.confirmation_token).toBe("string");
+    expect(String(envelope.confirmation_token).length).toBeGreaterThan(0);
+    expect(String(envelope.next_step)).toContain("top-level");
+    expect(envelope.would_execute).toEqual({
+      model: RECONCILE_MODEL,
+      method: "reconcile",
+      ids: RECONCILE_IDS
+    });
+    expect(calls.some((c) => c.method === "reconcile")).toBe(false);
+
+    const token = envelope.confirmation_token as string;
+    const confirmed = await callModelMethod({
+      model: RECONCILE_MODEL,
+      method: "reconcile",
+      ids: RECONCILE_IDS,
+      context: RECONCILE_CONTEXT,
+      confirmation_token: token
+    });
+    expect(confirmed.isError).toBeUndefined();
+
+    const reconciles = calls.filter((c) => c.method === "reconcile");
+    expect(reconciles).toHaveLength(1);
+    expect(reconciles[0].model).toBe(RECONCILE_MODEL);
+    expect(reconciles[0].args).not.toHaveProperty("confirmation_token");
+    expect(reconciles[0].args.ids).toEqual(RECONCILE_IDS);
+  });
+
+  test("round-trip with non-empty kwargs forwards writeoff_vals and strips the token", async () => {
+    const kwargs = { writeoff_vals: { account_id: 12 } };
+    const { queue, calls } = dispatchQueue(() => true);
+    const callModelMethod = buildCallModelMethodHandler(queue);
+
+    const preflight = await callModelMethod({
+      model: RECONCILE_MODEL,
+      method: "reconcile",
+      ids: RECONCILE_IDS,
+      kwargs,
+      context: RECONCILE_CONTEXT
+    });
+    expect(preflight.isError).toBe(true);
+    const envelope = envelopeOf(preflight);
+    expect(envelope.would_execute).toEqual({
+      model: RECONCILE_MODEL,
+      method: "reconcile",
+      ids: RECONCILE_IDS,
+      kwargs
+    });
+    expect(calls).toEqual([]);
+
+    const confirmed = await callModelMethod({
+      model: RECONCILE_MODEL,
+      method: "reconcile",
+      ids: RECONCILE_IDS,
+      kwargs,
+      context: RECONCILE_CONTEXT,
+      confirmation_token: envelope.confirmation_token as string
+    });
+    expect(confirmed.isError).toBeUndefined();
+
+    const reconcile = calls.find((c) => c.method === "reconcile");
+    expect(reconcile).toBeDefined();
+    expect(reconcile!.args).not.toHaveProperty("confirmation_token");
+    expect(reconcile!.args.ids).toEqual(RECONCILE_IDS);
+    expect(reconcile!.args.writeoff_vals).toEqual({ account_id: 12 });
+  });
+
+  test("invalid, cross-record, mismatched, and expired tokens refuse without reconcile", async () => {
+    const { queue, calls } = dispatchQueue(() => true);
+    const callModelMethod = buildCallModelMethodHandler(queue);
+
+    const garbage = await callModelMethod({
+      model: RECONCILE_MODEL,
+      method: "reconcile",
+      ids: RECONCILE_IDS,
+      context: RECONCILE_CONTEXT,
+      confirmation_token: "not-a-real-token"
+    });
+    expect(garbage.isError).toBe(true);
+    expect(envelopeOf(garbage).policy_rule).toBe("irreversible_confirmation_invalid");
+    expect(calls).toEqual([]);
+
+    const preflight = await callModelMethod({
+      model: RECONCILE_MODEL,
+      method: "reconcile",
+      ids: [401],
+      context: RECONCILE_CONTEXT
+    });
+    const token = envelopeOf(preflight).confirmation_token as string;
+    expect(calls).toEqual([]);
+
+    const crossRecord = await callModelMethod({
+      model: RECONCILE_MODEL,
+      method: "reconcile",
+      ids: RECONCILE_IDS,
+      context: RECONCILE_CONTEXT,
+      confirmation_token: token
+    });
+    expect(crossRecord.isError).toBe(true);
+    expect(envelopeOf(crossRecord).policy_rule).toBe("irreversible_confirmation_invalid");
+    expect(calls.some((c) => c.method === "reconcile")).toBe(false);
+
+    const conflict = await callModelMethod({
+      model: RECONCILE_MODEL,
+      method: "reconcile",
+      ids: RECONCILE_IDS,
+      context: RECONCILE_CONTEXT,
+      confirmation_token: "top",
+      kwargs: { confirmation_token: "kw" }
+    });
+    expect(conflict.isError).toBe(true);
+    expect(envelopeOf(conflict).policy_rule).toBe("irreversible_confirmation_invalid");
+    expect(calls.some((c) => c.method === "reconcile")).toBe(false);
+
+    const plan = buildIrreversibleWritePlan({
+      model: RECONCILE_MODEL,
+      method: "reconcile",
+      ids: RECONCILE_IDS
+    });
+    const expiredToken = await issueConfirmationToken(plan, SECRET, Date.now() - TOKEN_TTL_MS - 1000);
+    const expired = await callModelMethod({
+      model: RECONCILE_MODEL,
+      method: "reconcile",
+      ids: RECONCILE_IDS,
+      context: RECONCILE_CONTEXT,
+      confirmation_token: expiredToken
+    });
+    expect(expired.isError).toBe(true);
+    expect(envelopeOf(expired).policy_rule).toBe("irreversible_confirmation_invalid");
+    expect(calls.some((c) => c.method === "reconcile")).toBe(false);
   });
 });
