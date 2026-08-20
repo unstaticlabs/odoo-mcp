@@ -96,15 +96,24 @@ describe("registerBillingWriteTools", () => {
     expect(registry["billing.attach_source_pdf"]).toBeDefined();
   });
 
-  test("update_draft_expense description and values describe list payment_mode", () => {
+  test("update_draft_expense description and values describe list payment_mode (Paid By)", () => {
     const server = new McpServer({ name: "test", version: "0.0.0" });
     registerBillingWriteTools(server, () => props, dispatchQueue(() => null));
     const tool = (server as any)._registeredTools["billing.update_draft_expense"];
     expect(String(tool.description)).toContain("payment_mode");
+    expect(String(tool.description)).toContain("Paid By");
     expect(String(tool.description)).toContain("own_account");
     expect(String(tool.description)).toContain("company_account");
     const valuesDescribe = String(tool.inputSchema.shape.values.description ?? "");
     expect(valuesDescribe).toContain("payment_mode");
+    expect(valuesDescribe).toContain("Paid By");
+  });
+
+  test("configure_draft_vendor_bill does not advertise payment_mode / Paid By", () => {
+    const server = new McpServer({ name: "test", version: "0.0.0" });
+    registerBillingWriteTools(server, () => props, dispatchQueue(() => null));
+    const tool = (server as any)._registeredTools["billing.configure_draft_vendor_bill"];
+    expect(String(tool.description)).not.toContain("Paid By");
   });
 });
 
