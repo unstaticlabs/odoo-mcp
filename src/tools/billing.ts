@@ -1060,7 +1060,9 @@ export function registerBillingReadTools(
         "and product (or both empty) within the returned page — for human review, not an Odoo uniqueness " +
         "constraint. analytic_account_id is post-filtered against analytic_distribution keys after search_read. " +
         "Authz is the caller's Odoo permissions (BYO-key / OAuth props). Tax names are omitted in v1 (ids only) " +
-        "to stay within ~3 batched Odoo calls. Does not validate, post, approve, or write.",
+        "to stay within ~3 batched Odoo calls. Attachment refs are ids only — call `bookkeeping.fetch_attachment` " +
+        "to read a receipt (JPEG/PNG come back as an inline image; PDFs as bounded base64). " +
+        "Does not validate, post, approve, or write.",
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
       inputSchema: {
         state: z.union([z.string(), z.array(z.string())]).optional(),

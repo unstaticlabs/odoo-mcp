@@ -578,7 +578,9 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
         "replacing the get_record → search_records → ... relation-chasing chain. Each hop through OdooQueue costs " +
         "≥1s, so this tool caps itself at 8 Odoo calls per invocation; once the cap is hit, remaining sections " +
         'degrade to {"error": "call budget exceeded (max 8 Odoo calls per invocation)"} instead of failing the ' +
-        "whole call. Preferred way to read one task's chatter; avoid bulk mail.message search_records across many res_ids." +
+        "whole call. Preferred way to read one task's chatter; avoid bulk mail.message search_records across many res_ids. " +
+        "`attachments` is ir.attachment metadata only — call `bookkeeping.fetch_attachment` with an attachment id " +
+        "for the bytes, and for an inline image of JPEG/PNG evidence." +
         RECORD_LINK_NOTE,
       annotations: { readOnlyHint: true, openWorldHint: false },
       inputSchema: {

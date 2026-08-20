@@ -3,6 +3,7 @@ import { z } from "zod";
 import { readGroupCompat } from "../aggregation";
 import { type CachedFieldMeta, type TtlCache, getFieldsCached, resolveXmlIdCached } from "../cache";
 import { normalizeRecord, normalizeRecords } from "../normalizer";
+import { base64ToBytes } from "../pdf-pages";
 import { OdooError, companyRpcContext, type OdooConnection } from "../odoo";
 import type { OdooQueue } from "../odoo-queue";
 import {
@@ -23,6 +24,7 @@ import {
   logWriteContext,
   mcpError,
   mcpErrorFromException,
+  mcpImageContent,
   mcpStructured,
   mcpWriteBlockedError,
   redactDetails,
@@ -1200,6 +1202,86 @@ export function registerReportLineTools(server: McpServer, getProps: () => Props
 
 const ATTACHMENT_LIST_FIELDS = ["name", "mimetype", "file_size", "checksum", "type", "url", "res_field", "create_date"];
 
+/** Mimetypes returned as MCP image content parts (vision-capable in ChatGPT/Claude). */
+export const VISION_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
+
+/** Declared mimetypes too generic to trust — worth magic-byte sniffing (Odoo mail attachments hit this). */
+const GENERIC_MIME_TYPES = new Set(["application/octet-stream", "binary/octet-stream"]);
+
+/** Base64 chars covering the 18 bytes the magic-byte sniffer needs (4 chars = 3 bytes). */
+const SNIFF_BASE64_CHARS = 24;
+
+/** Exported for unit testing. Lowercase a declared mimetype, drop parameters, fold common aliases; Odoo `false` → null. */
+export function normalizeMimetype(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const base = value.split(";")[0].trim().toLowerCase();
+  if (!base) return null;
+  if (base === "image/jpg" || base === "image/pjpeg") return "image/jpeg";
+  if (base === "image/x-png") return "image/png";
+  return base;
+}
+
+/**
+ * Exported for unit testing. Magic-byte sniff an image mimetype from the HEAD of a base64 payload —
+ * only the first 18 bytes are ever decoded, so a 10 MiB receipt costs no Worker memory. Invalid
+ * base64 returns null rather than throwing.
+ */
+export function sniffImageMimetype(base64: string): string | null {
+  const stripped = base64.replace(/\s+/g, "").slice(0, SNIFF_BASE64_CHARS);
+  let bytes: Uint8Array;
+  try {
+    bytes = base64ToBytes(stripped);
+  } catch {
+    return null;
+  }
+  const at = (i: number) => bytes[i];
+  if (bytes.length >= 3 && at(0) === 0xff && at(1) === 0xd8 && at(2) === 0xff) return "image/jpeg";
+  if (
+    bytes.length >= 8 &&
+    at(0) === 0x89 &&
+    at(1) === 0x50 &&
+    at(2) === 0x4e &&
+    at(3) === 0x47 &&
+    at(4) === 0x0d &&
+    at(5) === 0x0a &&
+    at(6) === 0x1a &&
+    at(7) === 0x0a
+  )
+    return "image/png";
+  if (bytes.length >= 4 && at(0) === 0x47 && at(1) === 0x49 && at(2) === 0x46 && at(3) === 0x38) return "image/gif";
+  if (
+    bytes.length >= 12 &&
+    at(0) === 0x52 &&
+    at(1) === 0x49 &&
+    at(2) === 0x46 &&
+    at(3) === 0x46 &&
+    at(8) === 0x57 &&
+    at(9) === 0x45 &&
+    at(10) === 0x42 &&
+    at(11) === 0x50
+  )
+    return "image/webp";
+  return null;
+}
+
+/**
+ * Exported for unit testing. The mimetype to emit an image content part under, or null when the
+ * payload is not vision material. A declared `application/pdf` is never sniffed into an image.
+ */
+export function resolveVisionMimetype(declared: unknown, base64: string): string | null {
+  const normalized = normalizeMimetype(declared);
+  if (normalized && VISION_MIME_TYPES.has(normalized)) return normalized;
+  if (normalized === null || GENERIC_MIME_TYPES.has(normalized)) return sniffImageMimetype(base64);
+  return null;
+}
+
+/** Exported for unit testing. Decoded byte count of a base64 payload without decoding it. */
+export function estimateBase64DecodedBytes(base64: string): number {
+  const stripped = base64.replace(/\s+/g, "");
+  const padding = stripped.endsWith("==") ? 2 : stripped.endsWith("=") ? 1 : 0;
+  return Math.floor(((stripped.length - padding) * 3) / 4);
+}
+
 interface AttachmentRow {
   id: number;
   res_field: string | false;
@@ -1477,7 +1559,9 @@ export function registerSourceDocumentTools(server: McpServer, getProps: () => P
     {
       title: "List Source Documents",
       description:
-        "List the ir.attachment source documents on a record (e.g. account.move), tagging each as original_source, official_pdf, or other.",
+        "List the ir.attachment source documents on a record (e.g. account.move), tagging each as original_source, " +
+        "official_pdf, or other. Metadata only — call `bookkeeping.fetch_attachment` with a returned attachment id " +
+        "to get the bytes (and an inline image for JPEG/PNG receipts).",
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
       inputSchema: {
         model: z.string().default("account.move"),
@@ -1558,7 +1642,12 @@ export function registerSourceDocumentTools(server: McpServer, getProps: () => P
     {
       title: "Fetch Attachment",
       description:
-        "Fetch an ir.attachment's metadata and, unless it's a URL-type attachment or exceeds max_bytes, its base64-encoded content.",
+        "Read-only: fetch an ir.attachment's metadata plus, for stored attachments within max_bytes, its " +
+        "base64-encoded content. JPEG/PNG (also GIF/WebP) additionally come back as an MCP image content part, " +
+        "so the model can read the receipt directly instead of staring at base64 — a mimetype-less or " +
+        "application/octet-stream attachment is magic-byte sniffed. PDFs return base64 only: the connector never " +
+        "rasterizes or OCRs a PDF. A type=url attachment returns the url with no bytes; anything over max_bytes " +
+        "is refused with a size error instead of content.",
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
       inputSchema: {
         attachment_id: z.number().int().positive(),
@@ -1569,7 +1658,13 @@ export function registerSourceDocumentTools(server: McpServer, getProps: () => P
         mimetype: z.unknown(),
         file_size: z.unknown().describe("Size in bytes (Odoo may return false for URL attachments)"),
         url: z.unknown().optional().describe("Present for type=url attachments (no content is fetched)"),
-        base64: z.unknown().optional().describe("Base64-encoded file content; present for stored attachments within max_bytes")
+        base64: z.unknown().optional().describe("Base64-encoded file content; present for stored attachments within max_bytes"),
+        image_included: z.boolean().describe("True when this result also carries an MCP image content part the model can see"),
+        image_mimetype: z.string().optional().describe("Mimetype of the emitted image content part"),
+        image_omitted_reason: z
+          .enum(["url_attachment", "no_content", "unsupported_mimetype"])
+          .optional()
+          .describe("Why no image part was emitted (PDFs are unsupported_mimetype by design — no rasterization/OCR)")
       }
     },
     async ({ attachment_id, max_bytes }) => {
@@ -1584,7 +1679,14 @@ export function registerSourceDocumentTools(server: McpServer, getProps: () => P
         if (!meta) return mcpError(`No ir.attachment record found for id ${attachment_id}`);
 
         if (meta.type === "url") {
-          return mcpStructured({ name: meta.name, mimetype: meta.mimetype, file_size: meta.file_size, url: meta.url });
+          return mcpStructured({
+            name: meta.name,
+            mimetype: meta.mimetype,
+            file_size: meta.file_size,
+            url: meta.url,
+            image_included: false,
+            image_omitted_reason: "url_attachment" as const
+          });
         }
 
         const fileSize = meta.file_size as number;
@@ -1599,8 +1701,35 @@ export function registerSourceDocumentTools(server: McpServer, getProps: () => P
           fields: ["name", "mimetype", "file_size", "type", "url", "datas"]
         })) as Array<Record<string, unknown>>;
         const data = dataRows[0];
+        const base = { name: data.name, mimetype: data.mimetype, file_size: data.file_size };
 
-        return mcpStructured({ name: data.name, mimetype: data.mimetype, file_size: data.file_size, base64: data.datas });
+        if (!data.datas) {
+          return mcpStructured({ ...base, image_included: false, image_omitted_reason: "no_content" as const });
+        }
+
+        // Second-line guard: Odoo reports file_size: false on some rows, and `false > max_bytes` is
+        // false — so size the payload itself before it reaches the client.
+        const datas = String(data.datas);
+        const decodedBytes = estimateBase64DecodedBytes(datas);
+        if (decodedBytes > max_bytes) {
+          return mcpError(
+            `Attachment ${attachment_id} decodes to about ${decodedBytes} bytes, exceeding max_bytes (${max_bytes}). Base64 encoding inflates the payload ~1.37x against Worker memory limits, so it was not returned. Raise max_bytes if you really need this file.`
+          );
+        }
+
+        const visionMime = resolveVisionMimetype(data.mimetype, datas);
+        if (visionMime) {
+          return mcpStructured({ ...base, base64: data.datas, image_included: true, image_mimetype: visionMime }, undefined, [
+            mcpImageContent(datas.replace(/\s+/g, ""), visionMime)
+          ]);
+        }
+
+        return mcpStructured({
+          ...base,
+          base64: data.datas,
+          image_included: false,
+          image_omitted_reason: "unsupported_mimetype" as const
+        });
       } catch (err) {
         return mcpErrorFromException(err, { model: "ir.attachment", method: "read" });
       }
@@ -1615,7 +1744,8 @@ export function registerSourceDocumentTools(server: McpServer, getProps: () => P
         "Read-only: search the Odoo Documents repository (documents.document) by filename, folder, tags, owner, " +
         "upload window, or linked record (res_model/res_id), and return normalized metadata — folder/tag/owner refs, " +
         "create/write dates, mimetype, file size, checksum, and the backing ir.attachment ref. Never returns file " +
-        "content (use bookkeeping.fetch_attachment with the returned attachment id). When the Documents module is " +
+        "content (use `bookkeeping.fetch_attachment` with the returned attachment id — it returns an inline image for " +
+        "JPEG/PNG). When the Documents module is " +
         "not installed or ACLs deny it, returns an empty list plus a warning instead of failing.",
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
       inputSchema: {

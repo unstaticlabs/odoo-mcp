@@ -245,15 +245,26 @@ export function mcpError(text: string) {
  * legacy text shape (e.g. a bare JSON array) that differs from the structured envelope —
  * existing text-only consumers keep their format, schema-aware clients get the typed object.
  *
+ * `extraContent` carries non-text blocks (e.g. {@link mcpImageContent} vision parts) appended AFTER
+ * the text rendering, so the JSON text block stays at `content[0]` for text-only consumers.
+ *
  * NOTE: once a tool declares an outputSchema, the SDK rejects any non-error result WITHOUT
  * structuredContent — every success path of such a tool must go through this helper (or set
  * structuredContent itself). Error results (`isError: true`) are exempt.
  */
-export function mcpStructured<T extends Record<string, unknown>>(output: T, text?: string) {
+export function mcpStructured<T extends Record<string, unknown>>(output: T, text?: string, extraContent?: McpImageContent[]) {
   return {
-    content: [{ type: "text" as const, text: text ?? JSON.stringify(output, null, 2) }],
+    content: [{ type: "text" as const, text: text ?? JSON.stringify(output, null, 2) }, ...(extraContent ?? [])],
     structuredContent: output
   };
+}
+
+/** MCP image content block (base64 payload, no `data:` prefix). */
+export type McpImageContent = { type: "image"; data: string; mimeType: string };
+
+/** Build a vision content part so the model can actually see an image attachment. */
+export function mcpImageContent(data: string, mimeType: string): McpImageContent {
+  return { type: "image" as const, data, mimeType };
 }
 
 /** A normalized Odoo record: field names to arbitrary JSON values (fields are caller-chosen). */

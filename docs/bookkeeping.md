@@ -615,7 +615,8 @@ for a failure the caller could fix or retry.
 ### 4.6 `bookkeeping.fetch_attachment`
 
 Fetch an `ir.attachment`'s metadata and, unless it is a URL-type attachment or exceeds
-`max_bytes`, its base64-encoded content.
+`max_bytes`, its base64-encoded content — plus, for image attachments, an inline MCP image
+content part the model can actually read (see **Vision vs PDF** below).
 
 | Field | Type | Required | Default | Notes |
 |---|---|---|---|---|
@@ -634,7 +635,62 @@ Fetch an `ir.attachment`'s metadata and, unless it is a URL-type attachment or e
 { "name": "facture.pdf", "mimetype": "application/pdf", "file_size": 51234, "base64": "JVBERi0xLjQ…" }
 ```
 
-> A `type: "url"` attachment returns `{ name, mimetype, file_size, url }` with no `base64`.
+> A `type: "url"` attachment returns `{ name, mimetype, file_size, url }` with no `base64` and costs a
+> single Odoo call. Over-size attachments return an error envelope instead of content — the declared
+> `file_size` is checked before any byte is read (still one call), and the decoded size of `datas` is
+> re-checked afterwards for the rows where Odoo reports `file_size: false`.
+
+#### Vision vs PDF
+
+Every success also carries `image_included`. When the attachment is a JPEG, PNG, GIF, or WebP within
+`max_bytes`, the result adds an **MCP `image` content part** next to the JSON text block, so the model
+actually sees the receipt instead of a base64 wall. The JSON rendering stays at `content[0]`, so
+text-only consumers are unaffected.
+
+```json
+{
+  "name": "ticket-restaurant.jpg",
+  "mimetype": "image/jpeg",
+  "file_size": 184320,
+  "base64": "/9j/4AAQSkZJRg…",
+  "image_included": true,
+  "image_mimetype": "image/jpeg"
+}
+```
+
+Mail-sourced receipts often land in Odoo as `application/octet-stream` (or with no mimetype at all).
+Those are **magic-byte sniffed** — only the first 18 bytes are decoded — and still come back as an
+image when they really are one.
+
+A PDF gets bounded base64 and nothing else:
+
+```json
+{
+  "name": "facture.pdf",
+  "mimetype": "application/pdf",
+  "file_size": 51234,
+  "base64": "JVBERi0xLjQ…",
+  "image_included": false,
+  "image_omitted_reason": "unsupported_mimetype"
+}
+```
+
+The connector **never rasterizes or OCRs a PDF** — the same contract as `billing.attach_source_pdf`
+below, which slices pages without touching their content. `image_omitted_reason`
+is `url_attachment` for a `type: "url"` row, `no_content` when the attachment stores no bytes, and
+`unsupported_mimetype` for everything else (PDFs, XML, ZIP, …).
+
+#### Evidence workflow
+
+Metadata first, bytes last — the metadata tools never return `datas`:
+
+| Step | Tool | Yields |
+|---|---|---|
+| 1 | `expand_record`, `billing.audit_expenses`, §4.4 `bookkeeping.list_source_documents`, §4.5 `bookkeeping.search_source_documents` | attachment **ids** + metadata |
+| 2 | `bookkeeping.fetch_attachment` | bytes, plus an inline image for JPEG/PNG/GIF/WebP |
+
+The 10 MiB default exists because base64 inflates a payload ~1.37× against Worker memory; raise
+`max_bytes` deliberately, per call.
 
 #### Composite source PDFs → `billing.attach_source_pdf`
 

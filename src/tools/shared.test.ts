@@ -2,6 +2,8 @@ import { describe, expect, mock, test } from "bun:test";
 import { z } from "zod";
 import { OdooError } from "../odoo";
 import {
+  mcpImageContent,
+  mcpStructured,
   resolveFieldPreset,
   resolveFields,
   resolveNamedPreset,
@@ -1503,5 +1505,25 @@ describe("project.project presets exclude the ACL-gated stage_id", () => {
     expect(FIELD_PRESET_MODEL_OVERRIDES.tracking_minimal["project.project"]).toContain("stage_id");
     expect(MODEL_FIELD_PRESETS["project.task"]).toEqual(DEFAULT_TASK_FIELDS);
     expect(MODEL_FIELD_PRESETS["project.task"]).toContain("stage_id");
+  });
+});
+
+describe("mcpStructured content blocks", () => {
+  test("without extra content it yields exactly one text block", () => {
+    const result = mcpStructured({ name: "receipt.pdf", image_included: false });
+
+    expect(result.content.length).toBe(1);
+    expect(result.content[0]).toEqual({ type: "text", text: JSON.stringify({ name: "receipt.pdf", image_included: false }, null, 2) });
+    expect(result.structuredContent).toEqual({ name: "receipt.pdf", image_included: false });
+  });
+
+  test("extra image content is appended after the text block, structuredContent unchanged", () => {
+    const output = { name: "receipt.png", image_included: true };
+    const result = mcpStructured(output, undefined, [mcpImageContent("AAA", "image/png")]);
+
+    expect(result.content.length).toBe(2);
+    expect(result.content[0].type).toBe("text");
+    expect(result.content[1]).toEqual({ type: "image", data: "AAA", mimeType: "image/png" });
+    expect(result.structuredContent).toEqual(output);
   });
 });
