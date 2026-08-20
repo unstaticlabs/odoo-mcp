@@ -14,6 +14,7 @@ reads, normalize the shapes, and refuse to write until a human confirms.
 | Expense population **audit** (account/VAT/payment/attachments/duplicates/totals) | `billing.audit_expenses` (read-only) |
 | Create / update **VAT-complete vendor** (`res.partner` identity: `vat`, `siret`, `company_registry`, plus name / `country_id` / contact) | Generic `create_record` / `update_record` — then attach via `billing.configure_draft_vendor_bill` (`partner_id`, draft-only). Partner identity is **not** a `bookkeeping.plan_safe_write` concern; banks / property accounts / credit limits remain MCP-denied |
 | Draft vendor-bill / expense **preparatory** fields (draft-only; expense amount via `total_amount` — `total_amount_currency` is audit-only; expense payer via `payment_mode` (`own_account` / `company_account`); vendor-bill review-queue status via `review_state`) | `billing.update_draft_expense`, `billing.configure_draft_vendor_bill` |
+| Draft expense filed against the **wrong legal entity** (OCR / email mis-routing) | `billing.update_draft_expense` with `company_id` **and** `employee_id` together — draft-preparation only; validated then applied in one write; no post / approve / pay / reconcile ([details](#cross-company-draft-expense-reassignment)) |
 | **Attach / page-split a source PDF** onto a draft vendor bill (composite supplier PDFs) | `billing.attach_source_pdf` (draft `in_invoice` only; extract or copy in-Worker). Not generic `ir.attachment` CRUD |
 | **Link an already-filed Documents file** to an `account.move` / `project.task` (one durable copy, no byte duplication) | `bookkeeping.link_source_document` (write; sets `documents.document` `res_model`/`res_id` only; requires the Documents app; `/mcp` + `/accounting/mcp` only). **Not** `billing.attach_source_pdf` (which copies/page-splits PDF **bytes** onto a draft bill) and not the read side — verify links with `bookkeeping.search_source_documents` |
 | **Attach newly generated evidence bytes** (audit workbook, export, report) to a `project.task` | `projects.attach_file` (write; `/mcp` + `/projects/mcp`; creates one binary `ir.attachment` with `res_model=project.task`, required `context`, 10 MiB decoded cap). Use this when the bytes do **not** yet exist in Odoo: `bookkeeping.link_source_document` is link-only (no new bytes, Documents app required) and `billing.attach_source_pdf` only targets draft vendor bills. Generic `create_record` on `ir.attachment` stays denied |
@@ -66,6 +67,10 @@ Reversible CRUD on `hr.expense` / `hr.expense.sheet` / `account.move` is **not**
    Expense monetary prep uses `total_amount`; `total_amount_currency` is audit-only and refused on write.
    Expense payer prep uses `payment_mode` (`own_account` / `company_account`) on draft expenses only —
    a who-paid correction that does not submit, approve, post, or pay; lifecycle stays in step 1/step 3.
+   Expense `company_id` + `employee_id` are draft-**preparation** fields here too — they fix an expense
+   that landed in the wrong legal entity, and they are validated together before a single write
+   ([Cross-company draft expense reassignment](#cross-company-draft-expense-reassignment)). No post,
+   approve, pay, or reconcile.
    Vendor-bill header prep includes `currency_id` (foreign-currency drafts can be set here rather than
    requiring generic `update_record` on `account.move`) and `review_state` (`todo` / `reviewed` — Reviewed /
    To Review queue status flip only; does not validate, post, reconcile, or pay).
@@ -139,6 +144,40 @@ Method names for the generic path (aligned with curated `actions-map` + upstream
 Draft bill/expense prep is **not** part of `plan_safe_write`. Generic writes are action-classified
 (reversible → Odoo; irreversible → confirmation). Deny envelopes carry `refusing_layer` /
 `policy_rule` / `risk_class` / `next_step` and route agents to the matching next step.
+
+#### Cross-company draft expense reassignment
+
+An expense that OCR or the email gateway filed against the wrong company is fixed with
+`billing.update_draft_expense` by writing `company_id` **and** `employee_id` together. This is a
+draft-**preparation** step only: it never posts, approves, pays, or reconciles, non-draft records are
+still refused with `draft_required` first, and `HARD_DENY_FIELDS` (`state`, `journal_id`,
+`payment_mode`, …) stay blocked.
+
+Everything is validated before anything is written — a refusal issues **zero** writes, and an accepted
+move lands as **one** `write` (carrying `allowed_company_ids` for both companies) followed by a
+read-only re-read that reports the observed `state` / `company` / `employee`:
+
+1. both fields together — the tool never picks an employee for you (employee records are per-company
+   and routinely duplicated per entity);
+2. the caller's Odoo user must be able to see the target company;
+3. the target employee must belong to the target company, and must be linked to the same Odoo user as
+   the current employee (a different linked user is a different person → refusal, not a guess);
+4. company-bound references that would follow the expense — `product_id`, `account_id`, `tax_ids`,
+   `analytic_distribution` — must exist in the target company (company-shared records are fine).
+   Anything else is refused **by name**; nothing is ever cleared implicitly and no cross-company
+   reference is ever kept. Re-issue the same call with explicit replacements valid in the target
+   company, or explicit clears (`product_id: false`, `account_id: false`, `tax_ids: [[6, 0, []]]`,
+   `analytic_distribution: {}`) — replacements are probed the same way and applied by the same single
+   write. A different company currency is a non-blocking `warnings` entry, not a refusal.
+
+| `error` | When | `recoverable` |
+|---|---|---|
+| `company_employee_pairing_required` | `company_id` changed without an explicit `employee_id` | `true` |
+| `company_access_denied` | the authenticated user cannot see the target company | `false` |
+| `employee_company_mismatch` | the target employee is missing/invisible or not in the target company | `true` |
+| `employee_user_ambiguous` | source and target employees are linked to different Odoo users | `false` |
+| `company_field_conflict` | retained company-bound fields do not exist in the target company; `blocked_fields` lists them | `true` |
+| `invalid_company_reassignment` | `company_id` / `employee_id` is not a positive Odoo id (including an explicit `false` — this tool moves expenses, it never un-assigns them) | `true` |
 
 #### Inventory master data (`product.category`, `stock.location`, `product.template`)
 
