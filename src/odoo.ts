@@ -22,6 +22,18 @@ export function companyRpcContext(companyId: number): { allowed_company_ids: num
   return { allowed_company_ids: [companyId], company_id: companyId };
 }
 
+/**
+ * Multi-company RPC context spanning several companies at once: moving a draft record between
+ * legal entities needs BOTH the source and the target company visible in the same call.
+ * `activeCompanyId` is the company that company-dependent defaults resolve against.
+ */
+export function companiesRpcContext(
+  companyIds: number[],
+  activeCompanyId: number
+): { allowed_company_ids: number[]; company_id: number } {
+  return { allowed_company_ids: [...new Set(companyIds)], company_id: activeCompanyId };
+}
+
 export type OdooErrorCode =
   | "unauthorized"
   | "permission_denied"

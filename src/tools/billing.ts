@@ -1,6 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { deriveWorkflowStatus } from "../normalizer";
+import { companiesRpcContext, type OdooConnection, type OdooRpcContext } from "../odoo";
 import type { OdooQueue } from "../odoo-queue";
 import type { Props } from "../server";
 import { getReversibleLifecycleRule } from "../lifecycle-allowlist";
@@ -97,7 +98,13 @@ const zExpenseAuditRow = z.object({
   })
 });
 
-/** Preparatory fields allowed on draft `hr.expense` writes (v1). */
+/**
+ * Preparatory fields allowed on draft `hr.expense` writes.
+ *
+ * `company_id` / `employee_id` are draft **preparation** only: they exist to fix an expense that
+ * was OCR'd or emailed into the wrong legal entity, and they go through the reassignment preflight
+ * below (never a bare write). Nothing here posts, approves, pays, or reconciles.
+ */
 export const DRAFT_EXPENSE_FIELDS = new Set([
   "date",
   "name",
@@ -112,8 +119,40 @@ export const DRAFT_EXPENSE_FIELDS = new Set([
   "reference",
   // Who paid: employee (own_account) vs company (company_account). Not a lifecycle field:
   // it does not submit, approve, post, or pay. Draft-only, and reversible.
-  "payment_mode"
+  "payment_mode",
+  "company_id",
+  "employee_id"
 ]);
+
+/** Fields read off the draft expense before the reassignment preflight (supersedes the id/state read). */
+export const EXPENSE_MOVE_READ_FIELDS = [
+  "id",
+  "state",
+  "company_id",
+  "employee_id",
+  "product_id",
+  "account_id",
+  "tax_ids",
+  "analytic_distribution",
+  "currency_id"
+] as const;
+
+/** Fields written back on the post-write confirmation re-read. */
+const EXPENSE_MOVE_CONFIRM_FIELDS = ["id", "state", "company_id", "employee_id"] as const;
+
+/**
+ * `hr.expense` fields whose value is bound to the expense's company, so it cannot silently survive
+ * a move to another company. Each one is probed against the target company before the write and,
+ * when it does not exist there, refused by name — never cleared, never carried across.
+ */
+export const COMPANY_BOUND_EXPENSE_FIELDS = [
+  "product_id",
+  "account_id",
+  "tax_ids",
+  "analytic_distribution"
+] as const;
+
+export type CompanyBoundExpenseField = (typeof COMPANY_BOUND_EXPENSE_FIELDS)[number];
 
 /** Header fields allowed on draft vendor-bill (`account.move` in_invoice) writes (v1). */
 export const DRAFT_VENDOR_BILL_FIELDS = new Set([
@@ -258,6 +297,195 @@ export function isDraftRecord(record: Record<string, unknown>): boolean {
   return record.state === "draft";
 }
 
+// ---- Cross-company reassignment of a draft expense (pure preflight helpers) ----
+
+/** A requested `company_id` / `employee_id` change, resolved against the record's current values. */
+export type ExpenseMoveRequest = {
+  /** Company the expense ends up in — the requested one, or the current one when only the employee moves. */
+  targetCompanyId: number | null;
+  /** Employee the expense ends up on — the requested one, or the current one when only the company moves. */
+  targetEmployeeId: number | null;
+  currentCompanyId: number | null;
+  currentEmployeeId: number | null;
+  companySupplied: boolean;
+  employeeSupplied: boolean;
+};
+
+/**
+ * `none` — neither key was written, so the plain draft-update path applies unchanged.
+ * `invalid` — a key was written but does not parse as a positive Odoo id (including an explicit
+ * `false`: this tool moves expenses between companies, it never un-assigns them).
+ */
+export type ExpenseMoveParse =
+  | { kind: "none" }
+  | { kind: "invalid"; field: "company_id" | "employee_id"; value: unknown }
+  | ({ kind: "move" } & ExpenseMoveRequest);
+
+/** Positive Odoo id out of a number / `[id, name]` / `{id}` relation value; null when unparsable. */
+function relationId(value: unknown): number | null {
+  const collapsed = collapseMany2one(value);
+  if (!collapsed) return null;
+  return Number.isInteger(collapsed.id) && collapsed.id > 0 ? collapsed.id : null;
+}
+
+/**
+ * Resolve a requested `company_id` / `employee_id` change against the record's live values.
+ * Pure — exported for unit testing.
+ */
+export function parseExpenseMoveRequest(
+  values: Record<string, unknown>,
+  record: Record<string, unknown>
+): ExpenseMoveParse {
+  const companySupplied = "company_id" in values;
+  const employeeSupplied = "employee_id" in values;
+  if (!companySupplied && !employeeSupplied) return { kind: "none" };
+
+  const requestedCompanyId = companySupplied ? relationId(values.company_id) : null;
+  if (companySupplied && requestedCompanyId === null) {
+    return { kind: "invalid", field: "company_id", value: values.company_id };
+  }
+  const requestedEmployeeId = employeeSupplied ? relationId(values.employee_id) : null;
+  if (employeeSupplied && requestedEmployeeId === null) {
+    return { kind: "invalid", field: "employee_id", value: values.employee_id };
+  }
+
+  const currentCompanyId = relationId(record.company_id);
+  const currentEmployeeId = relationId(record.employee_id);
+  return {
+    kind: "move",
+    targetCompanyId: requestedCompanyId ?? currentCompanyId,
+    targetEmployeeId: requestedEmployeeId ?? currentEmployeeId,
+    currentCompanyId,
+    currentEmployeeId,
+    companySupplied,
+    employeeSupplied
+  };
+}
+
+/**
+ * True when the expense actually changes legal entity — the case that forces an explicit
+ * `employee_id` (employee records are per-company and often duplicated, and this tool never
+ * picks one for the caller).
+ */
+export function requiresEmployeeReassignment(request: ExpenseMoveRequest): boolean {
+  return request.targetCompanyId !== request.currentCompanyId;
+}
+
+/**
+ * Analytic account ids referenced by an `analytic_distribution` map. Keys are strings and, since
+ * Odoo 17, may be comma-composite (`"3,7"` = one distribution line across two plans).
+ * Pure — exported for unit testing.
+ */
+export function analyticAccountIdsFromDistribution(distribution: unknown): number[] {
+  if (distribution === false || distribution == null) return [];
+  let raw: unknown = distribution;
+  if (typeof distribution === "string") {
+    try {
+      raw = JSON.parse(distribution);
+    } catch {
+      return [];
+    }
+  }
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return [];
+  const ids = new Set<number>();
+  for (const key of Object.keys(raw as Record<string, unknown>)) {
+    for (const part of key.split(",")) {
+      const id = Number.parseInt(part.trim(), 10);
+      if (Number.isInteger(id) && id > 0) ids.add(id);
+    }
+  }
+  return [...ids];
+}
+
+/** Ids referenced by an x2many `tax_ids` value: a bare id list or Odoo command tuples (6/4 add ids). */
+function taxIdsFromValue(value: unknown): number[] {
+  if (!Array.isArray(value)) return [];
+  const ids = new Set<number>();
+  for (const item of value) {
+    if (typeof item === "number") {
+      if (item > 0) ids.add(item);
+      continue;
+    }
+    if (!Array.isArray(item)) continue;
+    const [op, , payload] = item as unknown[];
+    // (6, 0, ids) replace-all and (4, id) link are the only commands that leave a tax attached.
+    if (op === 6 && Array.isArray(payload)) {
+      for (const id of payload) if (typeof id === "number" && id > 0) ids.add(id);
+    } else if (op === 4 && typeof item[1] === "number" && item[1] > 0) {
+      ids.add(item[1]);
+    }
+  }
+  return [...ids];
+}
+
+/**
+ * Ids the expense would reference on `field` after the write: the caller's explicit value when they
+ * supplied one, otherwise what the record holds today. Empty means nothing to check — either the
+ * field is unset or the caller explicitly cleared it (`false` / `[]` / `[[6, 0, []]]` / `{}`).
+ */
+export function companyBoundFieldIds(
+  record: Record<string, unknown>,
+  values: Record<string, unknown>,
+  field: CompanyBoundExpenseField
+): number[] {
+  const effective = field in values ? values[field] : record[field];
+  if (field === "tax_ids") return taxIdsFromValue(effective);
+  if (field === "analytic_distribution") return analyticAccountIdsFromDistribution(effective);
+  const id = relationId(effective);
+  return id === null ? [] : [id];
+}
+
+/**
+ * Company-bound fields that would still carry a reference after the write — the record's own value
+ * when untouched, or the caller's replacement when they supplied one (a replacement is validated
+ * against the target company too, not waved through). Explicit clears drop out.
+ * Pure — exported for unit testing.
+ */
+export function retainedCompanyBoundFields(
+  record: Record<string, unknown>,
+  values: Record<string, unknown>
+): CompanyBoundExpenseField[] {
+  return COMPANY_BOUND_EXPENSE_FIELDS.filter((field) => companyBoundFieldIds(record, values, field).length > 0);
+}
+
+/** Outcome of one company-residency probe, ready for {@link incompatibleCompanyBoundFields}. */
+export type CompanyBoundProbe = {
+  field: CompanyBoundExpenseField;
+  /** Ids the field would reference after the write. */
+  ids: number[];
+  targetCompanyId: number;
+  /**
+   * One entry per probed record that came back. `companyIds` is `[]` for a company-shared record
+   * (`company_id === false`) and `null` when the model exposed no company field at all — unknown
+   * residency fails closed, like a missing row.
+   */
+  rows: Array<{ id: number; companyIds: number[] | null }>;
+  /** Set when the probe itself failed; the field is then treated as incompatible (fail closed). */
+  failed?: boolean;
+};
+
+/**
+ * Fields whose referenced records are neither company-shared nor owned by the target company —
+ * i.e. references that would silently break if the expense moved. Pure — exported for unit testing.
+ */
+export function incompatibleCompanyBoundFields(probes: CompanyBoundProbe[]): string[] {
+  const incompatible: string[] = [];
+  for (const probe of probes) {
+    if (probe.failed) {
+      incompatible.push(probe.field);
+      continue;
+    }
+    const companiesById = new Map(probe.rows.map((row) => [row.id, row.companyIds]));
+    const allResident = probe.ids.every((id) => {
+      const companies = companiesById.get(id);
+      if (companies == null) return false; // not returned by the probe, or residency unknown
+      return companies.length === 0 || companies.includes(probe.targetCompanyId);
+    });
+    if (!allResident) incompatible.push(probe.field);
+  }
+  return incompatible;
+}
+
 /**
  * Default byte cap for `billing.attach_source_pdf`, matching `bookkeeping.fetch_attachment`:
  * base64 inflates a payload ~1.37x, so this is the size we are willing to hold in Worker memory.
@@ -322,6 +550,282 @@ function firstRecord(rows: unknown): Record<string, unknown> | null {
   const row = rows[0];
   if (!row || typeof row !== "object" || Array.isArray(row)) return null;
   return row as Record<string, unknown>;
+}
+
+function recordList(rows: unknown): Record<string, unknown>[] {
+  if (!Array.isArray(rows)) return [];
+  return rows.filter(
+    (row): row is Record<string, unknown> => !!row && typeof row === "object" && !Array.isArray(row)
+  );
+}
+
+// ---- Cross-company reassignment preflight (reads only — never writes) ----
+
+/** Model probed for each company-bound expense field. */
+const COMPANY_BOUND_PROBE_MODELS: Readonly<Record<CompanyBoundExpenseField, string>> = {
+  product_id: "product.product",
+  account_id: "account.account",
+  tax_ids: "account.tax",
+  analytic_distribution: "account.analytic.account"
+};
+
+/**
+ * Company residency of a probed row: `[]` when the record is shared across companies
+ * (`company_id === false`), `null` when the row exposed no company key at all (unknown → fails closed).
+ */
+function companyIdsFromProbeRow(row: Record<string, unknown>): number[] | null {
+  let known = false;
+  const ids = new Set<number>();
+  if ("company_id" in row) {
+    known = true;
+    const id = relationId(row.company_id);
+    if (id !== null) ids.add(id);
+  }
+  // Odoo 19 moved account.account off company_id onto a company_ids list (see bookkeeping.ts).
+  if ("company_ids" in row) {
+    known = true;
+    if (Array.isArray(row.company_ids)) {
+      for (const entry of row.company_ids) {
+        if (typeof entry === "number" && entry > 0) ids.add(entry);
+      }
+    }
+  }
+  return known ? [...ids] : null;
+}
+
+/** Read-only residency probe for one company-bound field. A failing read fails closed. */
+async function probeCompanyBoundField(
+  queue: OdooQueue,
+  conn: OdooConnection,
+  field: CompanyBoundExpenseField,
+  ids: number[],
+  targetCompanyId: number,
+  context: OdooRpcContext
+): Promise<CompanyBoundProbe> {
+  const probeModel = COMPANY_BOUND_PROBE_MODELS[field];
+  const domain: unknown[] =
+    field === "product_id"
+      ? [["id", "in", ids], "|", ["company_id", "=", false], ["company_id", "=", targetCompanyId]]
+      : [["id", "in", ids]];
+
+  const read = async (fields: string[]) =>
+    recordList(await queue.enqueue(conn, probeModel, "search_read", { domain, fields, context }));
+
+  let rows: Record<string, unknown>[];
+  try {
+    rows = await read(["id", "company_id"]);
+  } catch {
+    // account.account carries company_ids instead of company_id on Odoo 19; anything else, or a
+    // second failure, leaves residency unknown and the field is refused rather than carried over.
+    if (field !== "account_id") return { field, ids, targetCompanyId, rows: [], failed: true };
+    try {
+      rows = await read(["id", "company_ids"]);
+    } catch {
+      return { field, ids, targetCompanyId, rows: [], failed: true };
+    }
+  }
+
+  return {
+    field,
+    ids,
+    targetCompanyId,
+    rows: rows.flatMap((row) => {
+      const id = relationId(row.id);
+      return id === null ? [] : [{ id, companyIds: companyIdsFromProbeRow(row) }];
+    })
+  };
+}
+
+type ExpenseMovePreflight =
+  | { ok: true; warnings: string[]; context?: OdooRpcContext }
+  | { ok: false; response: ReturnType<typeof billingBlocked> };
+
+/**
+ * Validate a requested `company_id` / `employee_id` change on a draft expense. Issues reads only —
+ * every refusal here happens before the single `write`, so a rejected move leaves Odoo untouched.
+ * Nothing is ever cleared or re-pointed implicitly: a reference that does not exist in the target
+ * company is reported by name for the caller to replace or clear explicitly.
+ */
+async function preflightExpenseMove(
+  queue: OdooQueue,
+  conn: OdooConnection,
+  recordId: number,
+  record: Record<string, unknown>,
+  values: Record<string, unknown>,
+  request: ExpenseMoveRequest
+): Promise<ExpenseMovePreflight> {
+  const model = "hr.expense";
+  const warnings: string[] = [];
+  const { targetCompanyId, targetEmployeeId, currentCompanyId, currentEmployeeId } = request;
+  const companyChanged = requiresEmployeeReassignment(request);
+
+  // Both companies must stay visible for the duration of the move: on Odoo 19 a company_id domain
+  // leaf alone does not defeat record rules for a company outside the user's default set.
+  const moveContext =
+    targetCompanyId === null
+      ? undefined
+      : companiesRpcContext(
+          currentCompanyId === null ? [targetCompanyId] : [currentCompanyId, targetCompanyId],
+          targetCompanyId
+        );
+
+  // a. Employee records are per-company and routinely duplicated per legal entity, so the tool
+  //    refuses to choose one; the caller names it.
+  if (companyChanged && !request.employeeSupplied) {
+    return {
+      ok: false,
+      response: billingBlocked(
+        { model },
+        {
+          error: "company_employee_pairing_required",
+          reason:
+            `Moving hr.expense ${recordId} to company ${targetCompanyId} also requires an explicit employee_id: ` +
+            "employee records are per-company and often duplicated across legal entities, and this tool will " +
+            "not choose one for you. Re-issue the call with company_id and employee_id together.",
+          recoverable: true
+        }
+      )
+    };
+  }
+
+  if (companyChanged && targetCompanyId !== null) {
+    // b. The caller's own Odoo user must be able to see the target company.
+    const companyRows = await queue.enqueue(conn, "res.company", "search_read", {
+      domain: [["id", "=", targetCompanyId]],
+      fields: ["id", "name", "currency_id"]
+    });
+    const company = firstRecord(companyRows);
+    if (!company) {
+      return {
+        ok: false,
+        response: billingBlocked(
+          { model },
+          {
+            error: "company_access_denied",
+            reason:
+              `The authenticated Odoo user cannot access company ${targetCompanyId}, so hr.expense ${recordId} ` +
+              "cannot be moved there. Ask an administrator to grant access to that company, or perform the move " +
+              "in the Odoo UI."
+          }
+        )
+      };
+    }
+
+    // f. Company currency is not blocking — totals are simply worth re-checking before submit.
+    const targetCurrency = collapseMany2one(company.currency_id);
+    const currentCurrency = collapseMany2one(record.currency_id);
+    if (targetCurrency && currentCurrency && targetCurrency.id !== currentCurrency.id) {
+      warnings.push(
+        `Target company ${targetCompanyId} uses ${targetCurrency.name || `currency ${targetCurrency.id}`} while ` +
+          `the expense is in ${currentCurrency.name || `currency ${currentCurrency.id}`}; re-check company-currency ` +
+          "totals before submitting."
+      );
+    }
+  }
+
+  // c. The employee must actually belong to the company the expense ends up in.
+  if (request.employeeSupplied && targetEmployeeId !== null && targetCompanyId !== null) {
+    const employeeRows = await queue.enqueue(conn, "hr.employee", "search_read", {
+      domain: [["id", "=", targetEmployeeId]],
+      fields: ["id", "name", "company_id", "user_id"],
+      ...(moveContext ? { context: moveContext } : {})
+    });
+    const employee = firstRecord(employeeRows);
+    const employeeCompanyId = employee ? relationId(employee.company_id) : null;
+    if (!employee || employeeCompanyId !== targetCompanyId) {
+      return {
+        ok: false,
+        response: billingBlocked(
+          { model },
+          {
+            error: "employee_company_mismatch",
+            reason:
+              `hr.employee ${targetEmployeeId} ` +
+              (employee
+                ? `belongs to company ${employeeCompanyId ?? "none"}, not to target company ${targetCompanyId}.`
+                : `is not visible to the authenticated Odoo user, so it cannot be checked against target company ${targetCompanyId}.`) +
+              ` Pass the employee record that belongs to company ${targetCompanyId}.`,
+            recoverable: true
+          }
+        )
+      };
+    }
+
+    // d. A company move usually means swapping to the same person's record in the other entity.
+    //    Two records linked to different users is a different person — refuse rather than guess.
+    if (companyChanged && currentEmployeeId !== null && currentEmployeeId !== targetEmployeeId) {
+      const sourceRows = await queue.enqueue(conn, "hr.employee", "read", {
+        ids: [currentEmployeeId],
+        fields: ["id", "name", "user_id"],
+        ...(moveContext ? { context: moveContext } : {})
+      });
+      const sourceUser = collapseMany2one(firstRecord(sourceRows)?.user_id);
+      const targetUser = collapseMany2one(employee.user_id);
+      if (sourceUser && targetUser && sourceUser.id !== targetUser.id) {
+        return {
+          ok: false,
+          response: billingBlocked(
+            { model },
+            {
+              error: "employee_user_ambiguous",
+              reason:
+                `hr.employee ${targetEmployeeId} (company ${targetCompanyId}) is linked to user ` +
+                `${targetUser.name || targetUser.id} while the current employee ${currentEmployeeId} is linked to ` +
+                `user ${sourceUser.name || sourceUser.id}; refusing to guess. Pass the employee record linked to ` +
+                "the same user, or perform the move in the Odoo UI."
+            }
+          )
+        };
+      }
+      if (!targetUser && sourceUser) {
+        warnings.push(
+          `hr.employee ${targetEmployeeId} has no linked Odoo user while employee ${currentEmployeeId} is linked to ` +
+            `user ${sourceUser.name || sourceUser.id}; the reassignment was applied as requested, but check that ` +
+            "the target employee is the same person."
+        );
+      }
+    }
+  }
+
+  // e. References that would follow the expense into the target company must exist there.
+  if (companyChanged && targetCompanyId !== null && moveContext) {
+    const fields = retainedCompanyBoundFields(record, values);
+    const probes = await Promise.all(
+      fields.map((field) =>
+        probeCompanyBoundField(
+          queue,
+          conn,
+          field,
+          companyBoundFieldIds(record, values, field),
+          targetCompanyId,
+          moveContext
+        )
+      )
+    );
+    const incompatible = incompatibleCompanyBoundFields(probes);
+    if (incompatible.length > 0) {
+      return {
+        ok: false,
+        response: billingBlocked(
+          { model },
+          {
+            error: "company_field_conflict",
+            reason:
+              `hr.expense ${recordId} still references records that do not exist in company ${targetCompanyId}: ` +
+              `${incompatible.join(", ")} (a reference whose company cannot be read is refused the same way). ` +
+              "Nothing was written and nothing is cleared implicitly. Re-issue the same call with explicit " +
+              "replacements valid in that company, or explicit clears (product_id: false, account_id: false, " +
+              "tax_ids: [[6, 0, []]], analytic_distribution: {}); they are applied together with the move in a " +
+              "single write.",
+            blocked_fields: incompatible,
+            recoverable: true
+          }
+        )
+      };
+    }
+  }
+
+  return { ok: true, warnings, ...(moveContext ? { context: moveContext } : {}) };
 }
 
 // ---- Expense population audit (read-only) ----
@@ -744,9 +1248,16 @@ export function registerBillingWriteTools(
   queue: OdooQueue
 ) {
   const draftExpenseFieldList = [...DRAFT_EXPENSE_FIELDS].join(", ");
+  const expenseReassignmentNote =
+    "company_id + employee_id may be changed only as a draft preparation step (fixing OCR/email mis-routing " +
+    "into the wrong legal entity): both must be given together, the target employee must belong to the target " +
+    "company, the caller must have access to that company, and company-bound fields (product/account/taxes/" +
+    "analytic) that do not exist in the target company are refused with the exact field list rather than " +
+    "silently kept. Never posts, approves, pays, or reconciles.";
   const draftExpenseValuesDescribe =
     `Allowlisted preparatory keys only: ${draftExpenseFieldList}. ` +
-    "Use total_amount for monetary corrections; total_amount_currency is audit/read-only and not writable.";
+    "Use total_amount for monetary corrections; total_amount_currency is audit/read-only and not writable. " +
+    expenseReassignmentNote;
 
   server.registerTool(
     "billing.update_draft_expense",
@@ -758,6 +1269,7 @@ export function registerBillingWriteTools(
         "not writable (audit/read-only). payment_mode accepts own_account (employee paid) or " +
         "company_account (company paid) — a draft-only correction of who paid; it does not submit, " +
         "approve, post, or pay. Refuses non-draft records and lifecycle/payment fields. " +
+        `${expenseReassignmentNote} ` +
         "Does not validate, post, or delete. For reset→edit→resubmit/reapprove hygiene use " +
         "call_model_method on allowlisted methods (action_reset / action_submit / action_approve) " +
         "with write context and a compatible record state (see list_model_actions executable:true).",
@@ -771,6 +1283,8 @@ export function registerBillingWriteTools(
         ok: z.boolean(),
         record_id: z.number().int(),
         state: z.string(),
+        company: zCollapsedM2o.optional().describe("Company observed on the post-write re-read"),
+        employee: zCollapsedM2o.optional().describe("Employee observed on the post-write re-read"),
         web_url: z.string().optional().describe("Canonical clickable Odoo URL — confirm the write as [record name](web_url)"),
         warnings: z.array(z.string()).optional()
       }
@@ -782,7 +1296,7 @@ export function registerBillingWriteTools(
         const conn = requireConnection(getProps());
         const rows = await queue.enqueue(conn, model, "read", {
           ids: [record_id],
-          fields: ["id", "state"]
+          fields: [...EXPENSE_MOVE_READ_FIELDS]
         });
         const record = firstRecord(rows);
         if (!record) {
@@ -843,10 +1357,70 @@ export function registerBillingWriteTools(
           );
         }
 
-        await queue.enqueue(conn, model, "write", { ids: [record_id], vals: allowed });
-        const state = deriveWorkflowStatus(record) ?? "draft";
-        const webUrl = buildRecordUrl(conn.url, model, record_id, record);
-        return mcpStructured({ ok: true, record_id, state, ...(webUrl ? { web_url: webUrl } : {}) });
+        // A company/employee reassignment is validated in full before anything is written; every
+        // refusal below leaves Odoo untouched, and an accepted move is applied by the same single
+        // write as the rest of `values` (no partial-apply path).
+        const move = parseExpenseMoveRequest(allowed, record);
+        if (move.kind === "invalid") {
+          return billingBlocked(
+            { model },
+            {
+              error: "invalid_company_reassignment",
+              reason:
+                `${move.field}=${JSON.stringify(move.value ?? null)} is not a positive Odoo id. ` +
+                "company_id / employee_id take an id (or an [id, name] pair) — this tool moves a draft expense " +
+                "between companies, it never un-assigns one.",
+              recoverable: true
+            }
+          );
+        }
+
+        const warnings: string[] = [];
+        let moveContext: OdooRpcContext | undefined;
+        if (move.kind === "move") {
+          const preflight = await preflightExpenseMove(queue, conn, record_id, record, allowed, move);
+          if (!preflight.ok) return preflight.response;
+          warnings.push(...preflight.warnings);
+          moveContext = preflight.context;
+        }
+
+        await queue.enqueue(conn, model, "write", {
+          ids: [record_id],
+          vals: allowed,
+          ...(moveContext ? { context: moveContext } : {})
+        });
+
+        // Confirm from Odoo rather than echoing the request: after a move, company/employee are the
+        // whole point of the call. The write has already landed, so a re-read that comes back empty
+        // or fails outright degrades to a warning — it must never be reported as a failed write.
+        const confirmedRows = await queue
+          .enqueue(conn, model, "read", {
+            ids: [record_id],
+            fields: [...EXPENSE_MOVE_CONFIRM_FIELDS],
+            ...(moveContext ? { context: moveContext } : {})
+          })
+          .catch(() => null);
+        const confirmed = firstRecord(confirmedRows);
+        if (!confirmed) {
+          warnings.push(
+            `The write succeeded but hr.expense ${record_id} could not be re-read afterwards (it is no longer ` +
+              "visible in this context); the values below are the ones read before the write."
+          );
+        }
+        const observed = confirmed ?? record;
+        const state = deriveWorkflowStatus(observed) ?? "draft";
+        const company = collapseMany2one(observed.company_id);
+        const employee = collapseMany2one(observed.employee_id);
+        const webUrl = buildRecordUrl(conn.url, model, record_id, observed);
+        return mcpStructured({
+          ok: true,
+          record_id,
+          state,
+          ...(company ? { company } : {}),
+          ...(employee ? { employee } : {}),
+          ...(webUrl ? { web_url: webUrl } : {}),
+          ...(warnings.length > 0 ? { warnings } : {})
+        });
       } catch (err) {
         return mcpErrorFromException(err, { model, method: "write" });
       }
