@@ -588,6 +588,9 @@ describe("endpoint tool surfaces", () => {
     expect(names.has("billing.configure_draft_vendor_bill")).toBe(true);
     // Draft-bill source-PDF attach ships on the accounting surface without opening generic CRUD.
     expect(names.has("billing.attach_source_pdf")).toBe(true);
+    expect(names.has("billing.copy_or_relink_source_attachment")).toBe(true);
+    // Draft vendor receipts are close-time evidence, so they ship on the accounting surface too.
+    expect(names.has("inventory.create_draft_vendor_receipt")).toBe(true);
     expect(names.has("feedback.submit")).toBe(true);
     // Purity: no raw CRUD, no other domains — the point of the split.
     expect(names.has("search_records")).toBe(false);
@@ -606,6 +609,20 @@ describe("endpoint tool surfaces", () => {
     expect(names.has("bookkeeping.get_snapshot")).toBe(false);
     expect(names.has("search_records")).toBe(false);
     expect(names.has("create_record")).toBe(false);
+    expect(names.has("inventory.create_draft_vendor_receipt")).toBe(false);
+    expect(names.has("billing.copy_or_relink_source_attachment")).toBe(false);
+  });
+
+  test("the ODOO2298 evidence tools ship on /mcp and /accounting/mcp but never on /projects/mcp", async () => {
+    const generic = await toolNames(McpAgent);
+    const accounting = await toolNames(AccountingAgent);
+    const projects = await toolNames(ProjectsAgent);
+
+    for (const name of ["inventory.create_draft_vendor_receipt", "billing.copy_or_relink_source_attachment"]) {
+      expect(generic.has(name), `${name} on /mcp`).toBe(true);
+      expect(accounting.has(name), `${name} on /accounting/mcp`).toBe(true);
+      expect(projects.has(name), `${name} on /projects/mcp`).toBe(false);
+    }
   });
 
   test("projects.attach_file ships on /mcp and /projects/mcp but never on /accounting/mcp", async () => {
@@ -2826,6 +2843,8 @@ describe("tool metadata (title/annotations)", () => {
       "billing.update_draft_expense",
       "billing.configure_draft_vendor_bill",
       "billing.attach_source_pdf",
+      "billing.copy_or_relink_source_attachment",
+      "inventory.create_draft_vendor_receipt",
       "projects.create_task",
       "projects.attach_file",
       "feedback.submit"
@@ -2868,7 +2887,13 @@ describe("tool metadata (title/annotations)", () => {
       expect(tools[name].description).toContain("never as a bare id");
     }
 
-    for (const name of ["create_record", "update_record", "batch_update", "projects.create_task"]) {
+    for (const name of [
+      "create_record",
+      "update_record",
+      "batch_update",
+      "projects.create_task",
+      "inventory.create_draft_vendor_receipt"
+    ]) {
       expect(tools[name].description, `${name} must document web_url`).toContain("web_url");
       expect(tools[name].description).toMatch(/never as a bare id|not as an id/);
     }

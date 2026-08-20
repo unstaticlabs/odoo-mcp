@@ -6,6 +6,7 @@ import { OdooQueue } from "./odoo-queue";
 import { TtlCache } from "./cache";
 import { registerBillingReadTools, registerBillingWriteTools, registerExpenseLifecycleTools } from "./tools/billing";
 import { registerFeedbackTools } from "./tools/feedback";
+import { registerInventoryTools } from "./tools/inventory";
 import {
   registerBookkeepingTools,
   registerReportLineTools,
@@ -39,7 +40,7 @@ export interface Props extends Record<string, unknown> {
 
 // Bump this on every future tool-surface change: it's the cache-busting key clients use to
 // refetch the tool list (also stamped into feedback.submit cards to identify the surface seen).
-export const SERVER_VERSION = "0.18.1";
+export const SERVER_VERSION = "0.18.2";
 
 /**
  * Shared plumbing for every endpoint-specific agent. Subclasses differ only in
@@ -65,6 +66,7 @@ export class McpAgent extends OdooAgentBase {
     registerBillingReadTools(this.server, getProps, this.odooQueue);
     registerBillingWriteTools(this.server, getProps, this.odooQueue);
     registerExpenseLifecycleTools(this.server, getProps, this.odooQueue);
+    registerInventoryTools(this.server, getProps, this.odooQueue);
     registerFeedbackTools(this.server, getProps, this.odooQueue, this.cache);
     registerBookkeepingTools(this.server, getProps, this.odooQueue, this.cache);
     registerReturnPreviewTools(this.server, getProps, this.odooQueue, this.cache);
@@ -88,6 +90,7 @@ export class AccountingAgent extends OdooAgentBase {
     registerBillingReadTools(this.server, getProps, this.odooQueue);
     registerBillingWriteTools(this.server, getProps, this.odooQueue);
     registerExpenseLifecycleTools(this.server, getProps, this.odooQueue);
+    registerInventoryTools(this.server, getProps, this.odooQueue);
     registerFeedbackTools(this.server, getProps, this.odooQueue, this.cache);
     registerBookkeepingTools(this.server, getProps, this.odooQueue, this.cache);
     registerReturnPreviewTools(this.server, getProps, this.odooQueue, this.cache);
