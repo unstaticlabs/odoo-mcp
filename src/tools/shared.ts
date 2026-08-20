@@ -371,7 +371,16 @@ export interface ErrorContext {
   method?: string;
 }
 
-export type WriteBlockedIntent = "project_management" | "financial_mutation" | "disallowed";
+/**
+ * What the refused write was trying to do. `inventory_operation` covers stock documents
+ * (`inventory.*`): they move goods, not money, so labelling them `financial_mutation` would tell
+ * the agent to go looking for a ledger gate that does not exist.
+ */
+export type WriteBlockedIntent =
+  | "project_management"
+  | "financial_mutation"
+  | "inventory_operation"
+  | "disallowed";
 
 export type WriteBlockedErrorEnvelope = ErrorEnvelope & {
   error: "write_blocked";

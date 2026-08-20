@@ -1401,8 +1401,8 @@ export function isDocumentsUnavailableError(err: unknown): boolean {
 
 const zRelationRef = z.object({ id: z.number().int(), name: z.string() }).nullable();
 
-/** Normalized `documents.document` row shared by search + link tools. */
-const zSourceDocument = z.object({
+/** Normalized `documents.document` row shared by search + link tools (and billing's relink mode). */
+export const zSourceDocument = z.object({
   id: z.number().int(),
   name: z.string(),
   folder: zRelationRef,
@@ -1438,7 +1438,7 @@ const DOCUMENTS_PRECONDITION_MESSAGE =
  * Hard refusal when the Documents app is missing or denied — never a soft-degrade, never a
  * traceback-only failure. Odoo detail text is redacted into the log only.
  */
-function documentsPreconditionError(err: unknown) {
+export function documentsPreconditionError(err: unknown) {
   console.warn(
     `documents.document unavailable: ${redactDetails(err instanceof Error ? err.message : String(err))}`
   );

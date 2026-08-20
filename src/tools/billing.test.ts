@@ -23,6 +23,7 @@ import {
   invalidReviewState
 } from "./billing";
 import { registerSafeWritePlannerTools } from "./bookkeeping";
+import { OdooError } from "../odoo";
 import { validatedToolHandler } from "./structured-test-util";
 import { TtlCache } from "../cache";
 
@@ -72,6 +73,9 @@ function buildBillingHandlers(queue: OdooQueue) {
     ) => Promise<ToolResult>,
     attachSourcePdf: validatedToolHandler(server, "billing.attach_source_pdf") as (
       args: unknown
+    ) => Promise<ToolResult>,
+    copyOrRelink: validatedToolHandler(server, "billing.copy_or_relink_source_attachment") as (
+      args: unknown
     ) => Promise<ToolResult>
   };
 }
@@ -84,6 +88,7 @@ describe("registerBillingWriteTools", () => {
     expect(registry["billing.update_draft_expense"]).toBeDefined();
     expect(registry["billing.configure_draft_vendor_bill"]).toBeDefined();
     expect(registry["billing.attach_source_pdf"]).toBeDefined();
+    expect(registry["billing.copy_or_relink_source_attachment"]).toBeDefined();
   });
 });
 
@@ -1097,6 +1102,406 @@ describe("billing.attach_source_pdf", () => {
         }
       );
       expect(envelope.error).toBe("oversize");
+      expect(calls.some((c) => c.method === "create")).toBe(false);
+    });
+  });
+});
+
+describe("billing.copy_or_relink_source_attachment", () => {
+  type Call = { model: string; method: string; args: Record<string, unknown> };
+
+  const SOURCE_BYTES = bytesToBase64(new TextEncoder().encode("scanned vendor invoice"));
+  const SOURCE_META = {
+    id: 555,
+    name: "acme-invoice-jun.pdf",
+    mimetype: "application/pdf",
+    file_size: 22,
+    type: "binary",
+    checksum: "abc123",
+    // Still filed against the zero-value duplicate the agent is about to delete.
+    res_model: "account.move",
+    res_id: 9099
+  };
+  const SOURCE_DOCUMENT = {
+    id: 300,
+    name: "acme-invoice-jun.pdf",
+    folder_id: [2, "Vendor bills"],
+    tag_ids: [],
+    owner_id: [1, "Mitchell"],
+    res_model: "account.move",
+    res_id: 9099,
+    create_date: "2026-06-30 09:00:00",
+    write_date: "2026-06-30 09:00:00",
+    mimetype: "application/pdf",
+    file_size: 22,
+    checksum: "abc123",
+    attachment_id: [555, "acme-invoice-jun.pdf"]
+  };
+
+  /**
+   * Stands up the source (attachment and/or Documents row), the target bill, the create and the
+   * read-back, recording every call so "the bill is only ever read" stays assertable.
+   */
+  function copyQueue(
+    opts: {
+      bill?: Record<string, unknown> | null;
+      meta?: Record<string, unknown> | null;
+      document?: Record<string, unknown> | null;
+      documentsUnavailable?: boolean;
+      datas?: unknown;
+      createdId?: number;
+      copyRow?: Record<string, unknown> | null;
+      relinkedDocument?: Record<string, unknown>;
+      failMessagePost?: boolean;
+    } = {}
+  ) {
+    const calls: Call[] = [];
+    let documentReads = 0;
+    const queue = dispatchQueue((model, method, args) => {
+      calls.push({ model, method, args });
+      if (model === "documents.document") {
+        if (opts.documentsUnavailable) {
+          throw new OdooError({
+            message: "Object documents.document doesn't exist",
+            code: "model_or_method_not_found",
+            httpStatus: 404,
+            model: "documents.document",
+            method,
+            details: "Object documents.document doesn't exist"
+          });
+        }
+        if (method === "write") return true;
+        documentReads += 1;
+        if (opts.document === null) return [];
+        const base = opts.document ?? SOURCE_DOCUMENT;
+        // The second read is the post-write read-back.
+        return [documentReads > 1 ? (opts.relinkedDocument ?? { ...base, res_model: "account.move", res_id: 9647 }) : base];
+      }
+      if (model === "account.move" && method === "read") {
+        return opts.bill === null ? [] : [opts.bill ?? { id: 9647, state: "draft", move_type: "in_invoice" }];
+      }
+      if (model === "account.move" && method === "message_post") {
+        if (opts.failMessagePost) throw new Error("odoo message_post boom");
+        return 123;
+      }
+      if (model === "ir.attachment" && method === "read") {
+        const fields = (args.fields as string[]) ?? [];
+        if (fields.includes("datas")) return [{ id: 555, datas: opts.datas ?? SOURCE_BYTES }];
+        const ids = (args.ids as number[]) ?? [];
+        if (ids[0] === (opts.createdId ?? 8001)) {
+          return opts.copyRow === null
+            ? []
+            : [
+                opts.copyRow ?? {
+                  id: opts.createdId ?? 8001,
+                  name: "acme-invoice-jun.pdf",
+                  mimetype: "application/pdf",
+                  file_size: 22,
+                  checksum: "abc123"
+                }
+              ];
+        }
+        return opts.meta === null ? [] : [opts.meta ?? SOURCE_META];
+      }
+      if (model === "ir.attachment" && method === "create") return [opts.createdId ?? 8001];
+      return null;
+    });
+    return { queue, calls };
+  }
+
+  const baseArgs = {
+    source_attachment_id: 555,
+    target_id: 9647,
+    context: "de-duplicating bill 9099 into canonical draft 9647 before deleting the shell"
+  };
+
+  test("registers as a write tool that routes between the four attachment paths", () => {
+    const server = new McpServer({ name: "test", version: "0.0.0" });
+    registerBillingWriteTools(server, () => props, dispatchQueue(() => null));
+    const tool = (server as any)._registeredTools["billing.copy_or_relink_source_attachment"];
+
+    expect(tool.annotations.readOnlyHint).toBe(false);
+    expect(tool.annotations.destructiveHint).toBe(false);
+    expect(String(tool.description).startsWith("Write:")).toBe(true);
+    expect(tool.description).toContain("billing.attach_source_pdf");
+    expect(tool.description).toContain("bookkeeping.link_source_document");
+    expect(tool.description).toContain("projects.attach_file");
+
+    const shape = tool.inputSchema.shape;
+    expect(shape.context.safeParse("").success).toBe(false);
+    expect(shape.context.safeParse(undefined).success).toBe(false);
+    expect(shape.mode.safeParse("copy").success).toBe(true);
+    expect(shape.mode.safeParse("move").success).toBe(false);
+    expect(shape.target_model.safeParse("project.task").success).toBe(false);
+    expect(shape.mode.parse(undefined)).toBe("copy");
+  });
+
+  test("copies an orphaned attachment onto the canonical draft bill, preserving name and checksum", async () => {
+    const { queue, calls } = copyQueue();
+    const { copyOrRelink } = buildBillingHandlers(queue);
+
+    const result = await copyOrRelink(baseArgs);
+
+    expect(result.isError).toBeUndefined();
+    expect(result.structuredContent).toMatchObject({
+      ok: true,
+      mode: "copy",
+      target_id: 9647,
+      attachment_id: 8001,
+      source_attachment_id: 555,
+      name: "acme-invoice-jun.pdf",
+      mimetype: "application/pdf",
+      file_size: 22,
+      checksum: "abc123",
+      target_web_url: "http://example.com/odoo/vendor-bills/9647",
+      attachment_web_url: "http://example.com/odoo/ir.attachment/8001"
+    });
+
+    const create = calls.find((c) => c.method === "create")!;
+    const vals = (create.args.vals_list as Record<string, unknown>[])[0];
+    expect(create.model).toBe("ir.attachment");
+    expect(vals).toEqual({
+      name: "acme-invoice-jun.pdf",
+      type: "binary",
+      mimetype: "application/pdf",
+      datas: SOURCE_BYTES,
+      res_model: "account.move",
+      res_id: 9647
+    });
+
+    // The source is only ever read, and the bill is only ever read + stamped.
+    expect(calls.map((c) => `${c.model}.${c.method}`)).toEqual([
+      "ir.attachment.read",
+      "account.move.read",
+      "ir.attachment.read",
+      "ir.attachment.create",
+      "ir.attachment.read",
+      "account.move.message_post"
+    ]);
+    const body = String(calls.find((c) => c.method === "message_post")!.args.body);
+    expect(body).toContain("mode=copy");
+    expect(body).toContain("source_attachment=555");
+    expect(body).toContain("de-duplicating bill 9099");
+  });
+
+  test("warns that the source was still filed against another bill, so the shell is safe to delete", async () => {
+    const { queue } = copyQueue();
+    const { copyOrRelink } = buildBillingHandlers(queue);
+
+    const result = await copyOrRelink(baseArgs);
+
+    expect((result.structuredContent?.warnings as string[]).join(" ")).toContain("account.move,9099");
+  });
+
+  test("a checksum that does not match the source is surfaced, not swallowed", async () => {
+    const { queue } = copyQueue({
+      copyRow: { id: 8001, name: "acme-invoice-jun.pdf", mimetype: "application/pdf", file_size: 22, checksum: "deadbeef" }
+    });
+    const { copyOrRelink } = buildBillingHandlers(queue);
+
+    const result = await copyOrRelink(baseArgs);
+
+    expect(result.structuredContent?.checksum).toBe("deadbeef");
+    expect((result.structuredContent?.warnings as string[]).join(" ")).toContain("differs from the source's abc123");
+  });
+
+  test("a source_document_id resolves the bytes through the Documents row", async () => {
+    const { queue, calls } = copyQueue();
+    const { copyOrRelink } = buildBillingHandlers(queue);
+
+    const result = await copyOrRelink({
+      source_document_id: 300,
+      target_id: 9647,
+      context: "copy the filed evidence onto the canonical bill"
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(result.structuredContent).toMatchObject({
+      mode: "copy",
+      source_document_id: 300,
+      source_attachment_id: 555,
+      attachment_id: 8001
+    });
+    // No documents.document write in copy mode — the filing is left exactly as it was.
+    expect(calls.some((c) => c.model === "documents.document" && c.method === "write")).toBe(false);
+  });
+
+  test("an explicit name overrides the preserved source name", async () => {
+    const { queue, calls } = copyQueue();
+    const { copyOrRelink } = buildBillingHandlers(queue);
+
+    await copyOrRelink({ ...baseArgs, name: "ACME June invoice.pdf" });
+
+    const vals = (calls.find((c) => c.method === "create")!.args.vals_list as Record<string, unknown>[])[0];
+    expect(vals.name).toBe("ACME June invoice.pdf");
+  });
+
+  test("a chatter failure degrades to provenance_warning rather than hiding the copy", async () => {
+    const { queue } = copyQueue({ failMessagePost: true });
+    const { copyOrRelink } = buildBillingHandlers(queue);
+
+    const result = await copyOrRelink(baseArgs);
+
+    expect(result.isError).toBeUndefined();
+    expect(result.structuredContent?.attachment_id).toBe(8001);
+    expect(String(result.structuredContent?.provenance_warning)).toContain("9647");
+  });
+
+  describe("relink mode", () => {
+    const relinkArgs = {
+      source_document_id: 300,
+      target_id: 9647,
+      mode: "relink" as const,
+      context: "move the Documents filing onto the surviving bill"
+    };
+
+    test("repoints the Documents row and reports what the link used to be", async () => {
+      const { queue, calls } = copyQueue();
+      const { copyOrRelink } = buildBillingHandlers(queue);
+
+      const result = await copyOrRelink(relinkArgs);
+
+      expect(result.isError).toBeUndefined();
+      expect(result.structuredContent).toMatchObject({
+        ok: true,
+        mode: "relink",
+        changed: true,
+        target_id: 9647,
+        source_document_id: 300,
+        previous_link: { res_model: "account.move", res_id: 9099 },
+        document_web_url: "http://example.com/odoo/documents/300",
+        target_web_url: "http://example.com/odoo/vendor-bills/9647"
+      });
+      expect((result.structuredContent?.document as any).res_id).toBe(9647);
+
+      const write = calls.find((c) => c.method === "write")!;
+      expect(write.model).toBe("documents.document");
+      expect(write.args).toEqual({ ids: [300], vals: { res_model: "account.move", res_id: 9647 } });
+      // No bytes are duplicated in relink mode.
+      expect(calls.some((c) => c.model === "ir.attachment")).toBe(false);
+      expect((result.structuredContent?.warnings as string[]).join(" ")).toContain("no longer exists");
+    });
+
+    test("a document already on the target is left alone", async () => {
+      const { queue, calls } = copyQueue({
+        document: { ...SOURCE_DOCUMENT, res_id: 9647 },
+        relinkedDocument: { ...SOURCE_DOCUMENT, res_id: 9647 }
+      });
+      const { copyOrRelink } = buildBillingHandlers(queue);
+
+      const result = await copyOrRelink(relinkArgs);
+
+      expect(result.structuredContent?.changed).toBe(false);
+      expect(calls.some((c) => c.method === "write")).toBe(false);
+      expect((result.structuredContent?.warnings as string[]).join(" ")).toContain("already linked");
+    });
+
+    test("relink without a Documents row is refused before any Odoo call, pointing at copy mode", async () => {
+      const { queue, calls } = copyQueue();
+      const { copyOrRelink } = buildBillingHandlers(queue);
+
+      const result = await copyOrRelink({ ...baseArgs, mode: "relink" });
+
+      expect(result.isError).toBe(true);
+      const envelope = JSON.parse(result.content[0].text);
+      expect(envelope.error).toBe("relink_requires_document");
+      expect(envelope.details).toContain("mode=copy");
+      expect(calls).toEqual([]);
+    });
+
+    test("a database without the Documents app fails closed", async () => {
+      const { queue, calls } = copyQueue({ documentsUnavailable: true });
+      const { copyOrRelink } = buildBillingHandlers(queue);
+
+      const result = await copyOrRelink(relinkArgs);
+
+      expect(result.isError).toBe(true);
+      const envelope = JSON.parse(result.content[0].text);
+      expect(envelope.error).toBe("documents_app_unavailable");
+      expect(calls.some((c) => c.method === "write")).toBe(false);
+    });
+  });
+
+  describe("refusals", () => {
+    async function refuse(args: Record<string, unknown>, opts: Parameters<typeof copyQueue>[0] = {}) {
+      const { queue, calls } = copyQueue(opts);
+      const { copyOrRelink } = buildBillingHandlers(queue);
+      const result = await copyOrRelink({ ...baseArgs, ...args });
+      expect(result.isError).toBe(true);
+      return { envelope: JSON.parse(result.content[0].text), calls };
+    }
+
+    test("both sources, or neither, before any Odoo call", async () => {
+      const both = await refuse({ source_document_id: 300 });
+      expect(both.envelope.error).toBe("invalid_source");
+      expect(both.calls).toEqual([]);
+
+      const neither = await refuse({ source_attachment_id: undefined });
+      expect(neither.envelope.error).toBe("invalid_source");
+      expect(neither.calls).toEqual([]);
+    });
+
+    test("a URL-only source has no bytes to copy", async () => {
+      const { envelope, calls } = await refuse(
+        {},
+        { meta: { ...SOURCE_META, type: "url", url: "https://example.com/x.pdf", file_size: false } }
+      );
+      expect(envelope.error).toBe("url_attachment");
+      expect(calls.map((c) => `${c.model}.${c.method}`)).toEqual(["ir.attachment.read"]);
+    });
+
+    test("an oversize source is refused on metadata, before the content read", async () => {
+      const { envelope, calls } = await refuse({ max_bytes: 1024 }, { meta: { ...SOURCE_META, file_size: 20971520 } });
+      expect(envelope.error).toBe("oversize");
+      expect(envelope.details).toContain("1.37x");
+      expect(calls.map((c) => `${c.model}.${c.method}`)).toEqual(["ir.attachment.read"]);
+    });
+
+    test("a source that decodes larger than max_bytes despite an understated file_size", async () => {
+      const { envelope, calls } = await refuse({ max_bytes: 4 }, { meta: { ...SOURCE_META, file_size: 2 } });
+      expect(envelope.error).toBe("oversize");
+      expect(calls.some((c) => c.method === "create")).toBe(false);
+    });
+
+    test("a posted target bill", async () => {
+      const { envelope, calls } = await refuse({}, { bill: { id: 9647, state: "posted", move_type: "in_invoice" } });
+      expect(envelope.error).toBe("draft_required");
+      expect(calls.some((c) => c.method === "create")).toBe(false);
+    });
+
+    test("a customer invoice target", async () => {
+      const { envelope, calls } = await refuse({}, { bill: { id: 9647, state: "draft", move_type: "out_invoice" } });
+      expect(envelope.error).toBe("vendor_bill_required");
+      expect(calls.some((c) => c.method === "create")).toBe(false);
+    });
+
+    test("a missing target bill", async () => {
+      const { envelope } = await refuse({}, { bill: null });
+      expect(envelope.error).toBe("not_found");
+      expect(envelope.model).toBe("account.move");
+    });
+
+    test("a missing source attachment", async () => {
+      const { envelope, calls } = await refuse({}, { meta: null });
+      expect(envelope.error).toBe("not_found");
+      expect(envelope.model).toBe("ir.attachment");
+      expect(calls.some((c) => c.method === "create")).toBe(false);
+    });
+
+    test("a source that stores no content", async () => {
+      const { envelope, calls } = await refuse({}, { datas: false });
+      expect(envelope.error).toBe("empty_source");
+      expect(calls.some((c) => c.method === "create")).toBe(false);
+    });
+
+    test("a Documents row with no attachment behind it", async () => {
+      const { queue, calls } = copyQueue({ document: { ...SOURCE_DOCUMENT, attachment_id: false } });
+      const { copyOrRelink } = buildBillingHandlers(queue);
+
+      const result = await copyOrRelink({ source_document_id: 300, target_id: 9647, context: "copy the evidence" });
+
+      expect(result.isError).toBe(true);
+      expect(JSON.parse(result.content[0].text).error).toBe("no_source_attachment");
       expect(calls.some((c) => c.method === "create")).toBe(false);
     });
   });
