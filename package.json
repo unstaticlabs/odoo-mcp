@@ -11,7 +11,7 @@
     "test": "bun test"
   },
   "dependencies": {
-    "@cloudflare/workers-oauth-provider": "^0.8.1",
+    "@cloudflare/workers-oauth-provider": "^0.10.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "agents": "^0.17.3",
     "pdf-lib": "^1.17.1",
