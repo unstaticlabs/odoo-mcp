@@ -2,7 +2,7 @@ import { type CachedFieldMeta, type TtlCache, getFieldsCached } from "./cache";
 import { INVENTORY_MASTER_DATA_MODELS } from "./inventory-master-data";
 import { type PolicyRule, type RiskClass } from "./lifecycle-allowlist";
 import { PROJECT_TASK_WAITING_STATE } from "./normalizer";
-import { classifyOperation } from "./policy";
+import { classifyOperation, lockSensitiveFields } from "./policy";
 import { OdooError, type OdooConnection } from "./odoo";
 import type { OdooQueue } from "./odoo-queue";
 import { pickExistingFields } from "./tools/bookkeeping";
@@ -797,6 +797,20 @@ const MAIL_ACTIVITY_PM_FIELDS = new Set([
   "res_model_id"
 ]);
 
+/**
+ * The only `res.company` fields a generic MCP write tool may set (card ODOO2297). Both are *default*
+ * taxes: they decide which tax a future invoice/bill line pre-fills with, and nothing else. Changing
+ * one never touches a posted entry, so it is reversible configuration — but the names have to be
+ * listed literally, because `FINANCIAL_FIELD_PATTERNS` (`/^account_/`, `/^tax_/`) would otherwise read
+ * them as ledger mutation. Everything else on the company (name, currency, journals, bank accounts,
+ * fiscal identity) stays denied; `res.company` is deliberately NOT action-classified as a whole.
+ * Exported for unit testing.
+ */
+export const RES_COMPANY_DEFAULT_TAX_FIELDS: ReadonlySet<string> = new Set([
+  "account_sale_tax_id",
+  "account_purchase_tax_id"
+]);
+
 const PARTNER_FINANCIAL_FIELD_DENYLIST = new Set([
   "bank_ids",
   "property_account_receivable_id",
@@ -869,8 +883,12 @@ function pmDenied(
  * Action-based path for formerly prefix-gated models (and any caller of this helper).
  * Irreversible ledger ops need confirmation; reversible config/lifecycle pass to Odoo.
  */
-function classifyByActionRisk(model: string, method: string): PmWriteIntentResult {
-  const op = classifyOperation(model, method);
+function classifyByActionRisk(
+  model: string,
+  method: string,
+  args?: Record<string, unknown>
+): PmWriteIntentResult {
+  const op = classifyOperation(model, method, args);
 
   if (op.requires_confirmation) {
     return {
@@ -1015,6 +1033,69 @@ function classifyResPartner(method: string, args: Record<string, unknown>): PmWr
 }
 
 /**
+ * `res.company` is admitted for exactly one job: pointing the company's default sale / purchase tax
+ * at a different `account.tax`. The model is not on the action-classified list, so every other field
+ * is refused by name rather than by pattern luck — and a payload that also moves a lock boundary
+ * (`fiscalyear_lock_date`, `tax_lock_date`, `hard_lock_date`, …) is handed to the confirmation path
+ * instead of being allowed for its tax portion. Those lock fields live on `res.company` in Odoo
+ * 18/19, so admitting this model is what makes the lock fence load-bearing here.
+ */
+function classifyResCompany(method: string, args: Record<string, unknown>): PmWriteIntentResult {
+  if (method === "unlink") {
+    return classifyByActionRisk("res.company", method);
+  }
+
+  if (method !== "create" && method !== "write") {
+    return pmDenied(
+      "disallowed",
+      `res.company method "${method}" is not allowed via generic write tools; only create/write of ` +
+        `${[...RES_COMPANY_DEFAULT_TAX_FIELDS].join(" / ")} (and unlink, with confirmation) are classified.`
+    );
+  }
+
+  const records = collectPmValueRecords(args);
+  // Same detector policy.ts uses, imported rather than re-expressed, so the two cannot drift apart.
+  const lockFields = new Set(lockSensitiveFields(args));
+  const blocked = fieldsOutsideAllowlist(records, RES_COMPANY_DEFAULT_TAX_FIELDS).filter(
+    (field) => !lockFields.has(field)
+  );
+
+  // Any field outside the allowlist refuses the WHOLE payload — never strip-and-continue, which would
+  // silently write a subset the caller did not ask for.
+  if (blocked.length > 0) {
+    return pmDenied(
+      blocked.some(isFinancialFieldName) ? "financial_mutation" : "disallowed",
+      `res.company write touches fields outside the default-tax allowlist: ${blocked.join(", ")}. ` +
+        `Only ${[...RES_COMPANY_DEFAULT_TAX_FIELDS].join(" and ")} are writable through generic MCP write ` +
+        "tools; company identity, currency, journals and bank details are Odoo-UI / human changes.",
+      blocked,
+      {
+        policy_rule: "sensitive_model_method_denied",
+        risk_class: "reversible_configuration",
+        next_step:
+          "Omit the denied fields and retry (the allowed ones are not written for you), or change the company in the Odoo UI.",
+        recoverable: true
+      }
+    );
+  }
+
+  // Tax + lock in one payload is a lock write, not a tax write: confirmation owns the whole call.
+  if (lockFields.size > 0) {
+    return classifyByActionRisk("res.company", method, args);
+  }
+
+  return {
+    verdict: "allowed",
+    intent: "financial_mutation",
+    policy_rule: "reversible_configuration",
+    risk_class: "reversible_configuration",
+    reason:
+      "res.company default sale/purchase taxes are reversible configuration (they only change what future " +
+      "lines pre-fill with); Odoo ACLs remain the authority."
+  };
+}
+
+/**
  * True when any value record asks Odoo to set the computed Waiting state. Exported for unit testing.
  */
 export function taskValsRequestWaitingState(records: Record<string, unknown>[]): boolean {
@@ -1133,6 +1214,12 @@ export function classifyPmWriteIntent(input: PmWriteIntentInput): PmWriteIntentR
 
   if (model === "mail.activity") {
     return classifyMailActivity(method, input.args);
+  }
+
+  // Narrow graduation, not a prefix opening: only the default-tax fields (and confirmation-gated
+  // lock dates / unlink) are reachable — see classifyResCompany.
+  if (model === "res.company") {
+    return classifyResCompany(method, input.args);
   }
 
   return pmDenied("disallowed", defaultDenyReason(model));

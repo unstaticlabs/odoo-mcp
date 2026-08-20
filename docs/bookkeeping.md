@@ -97,9 +97,14 @@ same policy table ([`src/lifecycle-allowlist.ts`](../src/lifecycle-allowlist.ts)
   same mutation through under a different label;
 - **payment** post/register, **reconcile**, and non-PM **delete**;
 - **lock-sensitive** writes — both `account.lock_exception` CRUD and any write that sets a
-  lock-boundary field (`fiscalyear_lock_date`, `tax_lock_date`, `hard_lock_date`, …) on a reachable
-  model. Note these fields live on `res.company` in Odoo 18/19, which the connector still
-  default-denies, so that escalation is currently load-bearing only for `account.*`;
+  lock-boundary field (`fiscalyear_lock_date`, `tax_lock_date`, `hard_lock_date`, `*_lock_date`, …) on a
+  reachable model. These fields live on `res.company` in Odoo 18/19, and `res.company` is no longer
+  wholesale default-denied: it is admitted for exactly two default-tax fields
+  (`account_sale_tax_id`, `account_purchase_tax_id`, reversible configuration). Everything else on the
+  company stays blocked by name, and the lock-boundary escalation is therefore now load-bearing on
+  `res.company` too — a company lock-date write is `confirmation_required` / `lock_sensitive`, not a
+  generic model-level refusal. Every `res.company` mutation additionally requires a non-empty
+  write `context` (audit-only, never sent to Odoo);
 - **un-posting** — `button_draft` from state `posted`. Resetting a posted move to draft removes an
   accounting record that exists; it is the reverse of `action_post` and carries the same gate. From
   `cancel` there is no live entry to remove, so that direction executes in one call.

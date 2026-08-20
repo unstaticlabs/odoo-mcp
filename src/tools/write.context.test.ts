@@ -187,6 +187,170 @@ describe("context param on write tools", () => {
   });
 });
 
+describe("res.company default-tax writes are audited (ODOO2297)", () => {
+  afterEach(() => {
+    mock.restore();
+  });
+
+  const TAX_VALUES = { account_sale_tax_id: 12 } as const;
+
+  function envelopeOf(result: ToolResult): Record<string, unknown> {
+    return JSON.parse(result.content[0].text) as Record<string, unknown>;
+  }
+
+  test("update_record writes a default tax to Odoo, logs the context, and does not forward it", async () => {
+    const log = spyOn(console, "log").mockImplementation(() => {});
+    const calls: { model: string; method: string; args: Record<string, unknown> }[] = [];
+    const queue = dispatchQueue((model, method, args) => {
+      calls.push({ model, method, args });
+      return true;
+    });
+    const { updateRecord } = buildWriteHandlers(queue);
+
+    const result = await updateRecord({
+      model: "res.company",
+      record_id: 1,
+      values: TAX_VALUES,
+      context: "switch default sale tax to the 20% reverse-charge tax"
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(calls).toEqual([{ model: "res.company", method: "write", args: { ids: [1], vals: TAX_VALUES } }]);
+    expect(calls[0].args).not.toHaveProperty("context");
+    const logged = log.mock.calls.map((c: unknown[]) => JSON.parse(c[0] as string));
+    expect(logged).toContainEqual({
+      event: "write_context",
+      tool: "update_record",
+      model: "res.company",
+      context: "switch default sale tax to the 20% reverse-charge tax"
+    });
+  });
+
+  test("call_model_method writes a default tax under the caller's own ACLs", async () => {
+    const calls: { model: string; method: string }[] = [];
+    const queue = dispatchQueue((model, method) => {
+      calls.push({ model, method });
+      return true;
+    });
+    const { callModelMethod } = buildWriteHandlers(queue);
+
+    const result = await callModelMethod({
+      model: "res.company",
+      method: "write",
+      ids: [1],
+      kwargs: { vals: { account_purchase_tax_id: 9 } },
+      context: "align purchase default with the new fiscal position"
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(calls).toEqual([{ model: "res.company", method: "write" }]);
+  });
+
+  test("batch_update and create_record reach Odoo with allowlisted tax fields and context", async () => {
+    const calls: { model: string; method: string; args: Record<string, unknown> }[] = [];
+    const queue = dispatchQueue((model, method, args) => {
+      calls.push({ model, method, args });
+      return method === "create" ? [7] : true;
+    });
+    const h = buildWriteHandlers(queue);
+
+    const batch = await h.batchUpdate({
+      model: "res.company",
+      updates: [
+        { record_id: 1, values: TAX_VALUES },
+        { record_id: 2, values: { account_purchase_tax_id: 9 } }
+      ],
+      context: "roll the group onto the new default taxes"
+    });
+    expect(batch.isError).toBeUndefined();
+    expect(calls.map((c) => c.args)).toEqual([
+      { ids: [1], vals: TAX_VALUES },
+      { ids: [2], vals: { account_purchase_tax_id: 9 } }
+    ]);
+
+    const created = await h.createRecord({
+      model: "res.company",
+      values: TAX_VALUES,
+      context: "new subsidiary defaults"
+    });
+    expect(created.isError).toBeUndefined();
+    expect(calls[calls.length - 1]).toEqual({ model: "res.company", method: "create", args: { vals_list: [TAX_VALUES] } });
+  });
+
+  test("missing or blank context refuses the write before any Odoo call", async () => {
+    for (const context of [undefined, "   "]) {
+      const calls: unknown[] = [];
+      const queue = dispatchQueue((model, method) => {
+        calls.push({ model, method });
+        return true;
+      });
+      const { updateRecord } = buildWriteHandlers(queue);
+
+      const result = await updateRecord({
+        model: "res.company",
+        record_id: 1,
+        values: TAX_VALUES,
+        ...(context === undefined ? {} : { context })
+      });
+
+      expect(result.isError).toBe(true);
+      const envelope = envelopeOf(result);
+      expect(envelope.error).toBe("write_blocked");
+      expect(envelope.policy_rule).toBe("write_context_required");
+      expect(envelope.recoverable).toBe(true);
+      expect(calls).toEqual([]);
+    }
+  });
+
+  test("create_record, batch_update and delete_record enforce the same audit requirement", async () => {
+    const calls: unknown[] = [];
+    const queue = dispatchQueue((model, method) => {
+      calls.push({ model, method });
+      return [1];
+    });
+    const h = buildWriteHandlers(queue);
+
+    const results = [
+      await h.createRecord({ model: "res.company", values: TAX_VALUES }),
+      await h.batchUpdate({ model: "res.company", updates: [{ record_id: 1, values: TAX_VALUES }] }),
+      await h.deleteRecord({ model: "res.company", record_id: 1 })
+    ];
+    for (const result of results) {
+      expect(envelopeOf(result).policy_rule).toBe("write_context_required");
+    }
+    expect(calls).toEqual([]);
+  });
+
+  test("a non-allowlisted company field is blocked even with context", async () => {
+    const calls: unknown[] = [];
+    const queue = dispatchQueue((model, method) => {
+      calls.push({ model, method });
+      return true;
+    });
+    const { updateRecord } = buildWriteHandlers(queue);
+
+    const result = await updateRecord({
+      model: "res.company",
+      record_id: 1,
+      values: { name: "Renamed SARL" },
+      context: "context is audit-only, never an authorization bypass"
+    });
+
+    expect(result.isError).toBe(true);
+    const envelope = envelopeOf(result);
+    expect(envelope.error).toBe("write_blocked");
+    expect(envelope.blocked_fields).toEqual(["name"]);
+    expect(calls).toEqual([]);
+  });
+
+  test("the audit requirement is scoped to res.company — other models keep context optional", async () => {
+    const queue = dispatchQueue(() => true);
+    const { updateRecord } = buildWriteHandlers(queue);
+    const result = await updateRecord({ model: "project.task", record_id: 7, values: { name: "X" } });
+    expect(result.isError).toBeUndefined();
+  });
+});
+
 describe("call_model_method — reversible lifecycle preflight", () => {
   afterEach(() => {
     mock.restore();
