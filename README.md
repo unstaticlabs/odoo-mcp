@@ -67,12 +67,12 @@ The server never logs, stores, or echoes your key.
 | `bookkeeping.get_snapshot` | read | `company` (string), `date_from`/`date_to` (string), `scopes` (enum[] min 1: `tax_report`, `tax_returns`, `return_types`, `external_values`, `key_accounts`), `key_account_codes` (string[], optional) — batched tax-close snapshot |
 | `bookkeeping.review_key_accounts` | read | `company` (string), `date_to` (string), `account_codes` (string[]) — per-account balance/debit/credit (nullable on query failure), open items, and factual severity (`attention`/`ok`/`info`/`unknown`) |
 | `bookkeeping.explain_report_line` | read | `company` (string), `report_name` (string), `line_code` (string), `date_from`/`date_to` (string) — fact-only diagnosis of why a tax-report line reads its value (e.g. CA12 `box_22` carryover) |
-| `bookkeeping.list_source_documents` | read | `model` (string, default `account.move`), `record_id` (positive int) — `ir.attachment` source docs tagged `original_source`/`official_pdf`/`other` |
+| `bookkeeping.list_source_documents` | read | `model` (string, default `account.move`), `record_id` (positive int) — `ir.attachment` source docs tagged `original_source`/`official_pdf`/`other` (metadata only; see `bookkeeping.fetch_attachment` for bytes/vision) |
 | `bookkeeping.search_source_documents` | read | `filename` (string, `ilike`), `folder_id` / `owner_id` / `res_id` (positive int), `tag_ids` (positive int[]), `date_from`/`date_to` (`create_date` bounds), `res_model` (string), `limit` (1–200, default 80) — searches the Odoo Documents repository (`documents.document`), metadata only (never `datas`); degrades to `documents: []` + a warning when the module is absent or ACLs deny it |
-| `bookkeeping.fetch_attachment` | read | `attachment_id` (positive int), `max_bytes` (positive int, default `10485760`) — attachment metadata + base64 content unless URL-type or over `max_bytes` |
+| `bookkeeping.fetch_attachment` | read | `attachment_id` (positive int), `max_bytes` (positive int, default `10485760`) — attachment metadata + base64 content unless URL-type or over `max_bytes`; JPEG/PNG (also GIF/WebP) additionally return an inline MCP image part so the model can read the receipt; PDFs are base64 only — never rasterized or OCR'd |
 | `bookkeeping.preview_returns` | read | `company` (positive int), `from`/`to` (string), `return_type_xmlids` (string[] min 1) — which `account.return` cards should exist; blank periodicity → `configuration_issues` |
 | `bookkeeping.plan_safe_write` | validate-only | `operation` (enum: `create_or_update_report_external_value`, `create_manual_tax_return`, `update_return_type_periodicity`, `create_lock_exception`), `company` (string), `values` (object) — dry-run write plan + HMAC confirmation token; never writes |
-| `billing.audit_expenses` | read | `state` / `product_id` / `analytic_account_id` (optional; analytic post-filters `analytic_distribution` keys), `date_from`/`date_to`, `company_id`, `limit` (1–100, default 50), `offset`, `order` — population audit with account/taxes/payment_mode/attachments, in-page duplicate candidates, and totals |
+| `billing.audit_expenses` | read | `state` / `product_id` / `analytic_account_id` (optional; analytic post-filters `analytic_distribution` keys), `date_from`/`date_to`, `company_id`, `limit` (1–100, default 50), `offset`, `order` — population audit with account/taxes/payment_mode/attachments, in-page duplicate candidates, and totals (attachment ids only; see `bookkeeping.fetch_attachment` for bytes/vision) |
 | `billing.update_draft_expense` | write | `record_id` (positive int), `values` (allowlisted draft `hr.expense` prep fields: date/name/description/product/account/analytics/qty/price/**total_amount**/tax/reference/**payment_mode** (Odoo "Paid By": own_account | company_account — who paid; draft prep, not a lifecycle action)/**company_id**/**employee_id**; `total_amount_currency` is not writable), `context` (optional) — draft-only; lifecycle via `billing.reset_expense` / `billing.submit_expense` / `billing.approve_expense`. `company_id` + `employee_id` are draft-**preparation** only (mis-routed legal entity): both required together, the target employee must belong to the target company, the caller must have access to it, and company-bound fields (product/account/taxes/analytic) that do not exist there are refused by name — never silently kept or cleared. Validated first, then one atomic write |
 | `billing.reset_expense` | write | `record_ids` (1–50 positive ints), `context` (**required**) — `hr.expense` submitted/approved/refused → draft. All-or-nothing; validated against live state and `can_reset` first |
 | `billing.submit_expense` | write | `record_ids` (1–50 positive ints), `context` (**required**) — `hr.expense` draft → submitted |
@@ -250,6 +250,18 @@ and identify the record by name plus `model,id` — do not invent a route.
   generic write tools — the one narrow exception is the dedicated draft-receipt tool above, which is
   not a widening of this policy — and `unlink` on the three graduated models still needs a
   `confirmation_token`.
+- **Company default taxes** — `res.company` is admitted to the generic write tools for exactly two
+  fields: **`account_sale_tax_id`** and **`account_purchase_tax_id`**. They decide which tax a future
+  invoice/bill line pre-fills with, never touch a posted entry, and execute under the caller's own
+  Odoo ACLs. Every other company field — `name`, `currency_id`, `vat`, journals, `bank_ids`, the rest
+  of `account_*` / `tax_*` — is refused by name, and a payload mixing an allowed tax field with a
+  denied one is refused whole (nothing is written for you). Lock-boundary fields
+  (`fiscalyear_lock_date`, `tax_lock_date`, `hard_lock_date`, any `*_lock_date`) are reachable but
+  **confirmation-gated**: they return `confirmation_required` + `confirmation_token` and never move a
+  lock in one call, whichever tool is used. `unlink` on a company needs a token too. Unlike every other
+  model, a `res.company` mutation **requires** a non-empty write `context` (audit-logged server-side,
+  never sent to Odoo, never an authorization bypass). `res.config.settings` and other `res.*` models
+  stay blocked, and this is not a `bookkeeping.plan_safe_write` path.
 - **Reversible expense lifecycle** — prefer the dedicated tools `billing.reset_expense` /
   `billing.submit_expense` / `billing.approve_expense`. They are the **only** lifecycle path on
   `/accounting/mcp`, which ships no generic write tools. On the full `/mcp` surface the same
@@ -365,10 +377,11 @@ Every write tool accepts an optional `context` string (≤ 500 chars): one sente
 agent-declared intent, e.g. `"user asked to move task 42 to Review"`. It is **audit-only** —
 logged server-side as a structured `write_context` line (visible in Workers Logs /
 `wrangler tail`), **never sent to Odoo**, and **never consulted by the write-safety gate**,
-which continues to classify purely by model + method + field structure. **Exception:**
-allowlisted reversible lifecycle via `call_model_method` **requires** non-empty `context`
-(still audit-only — never a keyword authz bypass). Do not put credentials or sensitive
-personal data in it.
+which continues to classify purely by model + method + field structure. **Exceptions** — where a
+non-empty `context` is **required**: allowlisted reversible lifecycle via `call_model_method`, and
+any `res.company` mutation on the generic write tools (still audit-only — never a keyword authz
+bypass; the gate refuses a denied company field whatever the context says). Do not put credentials
+or sensitive personal data in it.
 
 ### Agent feedback
 

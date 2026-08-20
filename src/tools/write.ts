@@ -48,7 +48,10 @@ const PM_WRITE_ROUTING_NOTE =
   "Inventory: only product.category, stock.location and product.template accept create/write " +
   "(a duplicate is refused — name+parent for categories/locations, name+company_id and default_code+company_id " +
   "for templates); other product.* / stock.* models (product.product, stock.picking, stock.move, stock.quant, …) " +
-  "are not writable here.";
+  "are not writable here. " +
+  "res.company accepts ONLY account_sale_tax_id / account_purchase_tax_id (default taxes) and requires a non-empty " +
+  "context; every other company field is refused by name, and lock-date fields (fiscalyear_lock_date, tax_lock_date, " +
+  "hard_lock_date, …) need a confirmation_token.";
 
 /**
  * Waiting (`04_waiting_normal`) is Odoo-derived from open Blocked By; agents discover only
@@ -97,6 +100,37 @@ function gateWrite(model: string, method: string, args: Record<string, unknown>)
     );
   }
   return null;
+}
+
+/**
+ * Models whose mutations are only reachable with a recorded reason. `res.company` is admitted for the
+ * two default-tax fields and confirmation-gated lock dates (see `classifyResCompany`), and a company's
+ * tax configuration is exactly the kind of change someone will later have to explain — so the audit
+ * `context` that is optional everywhere else is mandatory here. The MCP `context` is audit-only: it is
+ * logged via `logWriteContext`, never forwarded to Odoo, and never consulted by the write-safety gate.
+ */
+const WRITE_CONTEXT_REQUIRED_MODELS = new Set(["res.company"]);
+
+/** Refusal when a context-required model is mutated without one. Returns null when the call may proceed. */
+function requireWriteContext(model: string, method: string, context: string | undefined) {
+  const m = model.trim();
+  if (!WRITE_CONTEXT_REQUIRED_MODELS.has(m)) return null;
+  if (context && context.trim()) return null;
+  return mcpWriteBlockedError(
+    { model: m, method },
+    {
+      intent: "financial_mutation",
+      reason:
+        `Mutating ${m} through a generic write tool requires a non-empty write context (audit-only) ` +
+        "naming why the company configuration is changing.",
+      policy_rule: "write_context_required",
+      risk_class: "reversible_configuration",
+      refusing_layer: "connector_policy",
+      next_step:
+        'Retry with context: one short sentence of intent (e.g. "switch default purchase tax to the 20% reverse-charge tax").',
+      recoverable: true
+    }
+  );
 }
 
 /**
@@ -500,6 +534,8 @@ export function registerWriteTools(
     },
     async ({ model, values, context, confirmation_token }) => {
       logWriteContext("create_record", model, context);
+      const contextMissing = requireWriteContext(model, "create", context);
+      if (contextMissing) return contextMissing;
       const blocked = await guardMutation({
         model,
         method: "create",
@@ -653,6 +689,8 @@ export function registerWriteTools(
     },
     async ({ model, record_id, values, context, confirmation_token }) => {
       logWriteContext("update_record", model, context);
+      const contextMissing = requireWriteContext(model, "write", context);
+      if (contextMissing) return contextMissing;
       const blocked = await guardMutation({
         model,
         method: "write",
@@ -728,6 +766,8 @@ export function registerWriteTools(
     async ({ model, updates, context, confirmation_token }) => {
       logWriteContext("batch_update", model, context);
       if (!model || !model.trim()) return mcpError("model must be a non-empty string");
+      const contextMissing = requireWriteContext(model, "write", context);
+      if (contextMissing) return contextMissing;
 
       // Validate EVERY update before applying ANY of them. Gating inside the write loop would let a
       // refusal on update N land updates 1..N-1 first — a partial write caused by our own policy,
@@ -847,6 +887,8 @@ export function registerWriteTools(
     },
     async ({ model, record_id, context, confirmation_token }) => {
       logWriteContext("delete_record", model, context);
+      const contextMissing = requireWriteContext(model, "unlink", context);
+      if (contextMissing) return contextMissing;
       // PM unlink (project.task) stays single-shot; irreversible unlink needs confirmation.
       const blocked = gateWrite(model, "unlink", { ids: [record_id] });
       if (blocked) return blocked;
@@ -936,11 +978,20 @@ export function registerWriteTools(
         }
 
         if (isMutatingOdooMethod(method)) {
+          const contextMissing = requireWriteContext(model, method, context);
+          if (contextMissing) {
+            logWriteContext("call_model_method", model, context);
+            return contextMissing;
+          }
+
           const confirm = await handleIrreversibleConfirmation({
             model,
             method,
             ids: recordIds,
             kwargs: namedKwargs,
+            // The body, so a `write` whose vals move a lock boundary is escalated here too — the
+            // escape hatch must not be the one write path where lock dates skip confirmation.
+            args: body,
             confirmation_token: effectiveToken,
             getSecret
           });

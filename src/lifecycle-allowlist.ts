@@ -29,6 +29,9 @@ export type PolicyRule =
   | "lifecycle_guard_failed"
   | "lifecycle_move_type_incompatible"
   | "sensitive_model_method_denied"
+  // res.company mutations are audited: the generic write tools refuse them without a write context
+  // (see the res.company graduation in safety.ts / tools/write.ts).
+  | "write_context_required"
   // A create would add a second master-data record with the same name under the same parent —
   // see inventory-master-data.ts + the duplicate preflight in tools/write.ts.
   | "duplicate_master_data"

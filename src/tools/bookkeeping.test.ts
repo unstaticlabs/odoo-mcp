@@ -6,6 +6,11 @@ import { OdooQueue } from "../odoo-queue";
 import {
   DOCUMENTS_UNAVAILABLE_WARNING,
   DOCUMENT_SEARCH_FIELDS,
+  VISION_MIME_TYPES,
+  estimateBase64DecodedBytes,
+  normalizeMimetype,
+  resolveVisionMimetype,
+  sniffImageMimetype,
   SUSPENSE_ACCOUNT_CODES,
   buildSourceDocumentDomain,
   computeDeadline,
@@ -1149,6 +1154,76 @@ describe("bookkeeping.list_source_documents", () => {
   });
 });
 
+describe("attachment vision helpers", () => {
+  test("normalizeMimetype lowercases, drops parameters, and folds aliases", () => {
+    expect(normalizeMimetype("IMAGE/PNG")).toBe("image/png");
+    expect(normalizeMimetype("text/plain; charset=utf-8")).toBe("text/plain");
+    expect(normalizeMimetype("image/jpg")).toBe("image/jpeg");
+    expect(normalizeMimetype("image/pjpeg")).toBe("image/jpeg");
+    expect(normalizeMimetype("image/x-png")).toBe("image/png");
+    expect(normalizeMimetype(false)).toBeNull();
+    expect(normalizeMimetype("   ")).toBeNull();
+    expect(normalizeMimetype(undefined)).toBeNull();
+  });
+
+  function b64(bytes: number[]) {
+    const padded = [...bytes, ...new Array(Math.max(0, 24 - bytes.length)).fill(0x20)];
+    return btoa(String.fromCharCode(...padded));
+  }
+
+  test("sniffImageMimetype matches jpeg/png/gif/webp magic bytes", () => {
+    expect(sniffImageMimetype(b64([0xff, 0xd8, 0xff, 0xdb]))).toBe("image/jpeg");
+    expect(sniffImageMimetype(b64([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))).toBe("image/png");
+    expect(sniffImageMimetype(b64([0x47, 0x49, 0x46, 0x38, 0x39, 0x61]))).toBe("image/gif");
+    expect(
+      sniffImageMimetype(
+        b64([0x52, 0x49, 0x46, 0x46, 0x10, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50])
+      )
+    ).toBe("image/webp");
+  });
+
+  test("sniffImageMimetype returns null for non-images and invalid base64", () => {
+    expect(sniffImageMimetype(b64([0x25, 0x50, 0x44, 0x46]))).toBeNull(); // %PDF
+    expect(sniffImageMimetype("!!!not base64!!!")).toBeNull();
+    expect(sniffImageMimetype("")).toBeNull();
+  });
+
+  test("resolveVisionMimetype trusts declared image types and sniffs only generic ones", () => {
+    const jpeg = b64([0xff, 0xd8, 0xff, 0xe0]);
+    expect(resolveVisionMimetype("image/JPG", jpeg)).toBe("image/jpeg");
+    expect(resolveVisionMimetype("application/octet-stream", jpeg)).toBe("image/jpeg");
+    expect(resolveVisionMimetype(false, jpeg)).toBe("image/jpeg");
+    // A declared PDF is never sniffed into an image, even with image bytes.
+    expect(resolveVisionMimetype("application/pdf", jpeg)).toBeNull();
+    expect(resolveVisionMimetype("application/octet-stream", b64([0x25, 0x50, 0x44, 0x46]))).toBeNull();
+    expect(VISION_MIME_TYPES.has("image/webp")).toBe(true);
+  });
+
+  test("estimateBase64DecodedBytes accounts for padding and whitespace without decoding", () => {
+    expect(estimateBase64DecodedBytes("AAAA")).toBe(3);
+    expect(estimateBase64DecodedBytes("AAA=")).toBe(2);
+    expect(estimateBase64DecodedBytes("AA==")).toBe(1);
+    expect(estimateBase64DecodedBytes("AAAA\nAAAA")).toBe(6);
+    expect(estimateBase64DecodedBytes("")).toBe(0);
+  });
+});
+
+describe("attachment tool descriptions route agents to fetch_attachment", () => {
+  test("list/search source document descriptions cross-link the fetch tool", () => {
+    const agent = makeAgent();
+    expect(agent._registeredTools["bookkeeping.list_source_documents"].description).toContain("bookkeeping.fetch_attachment");
+    expect(agent._registeredTools["bookkeeping.search_source_documents"].description).toContain("bookkeeping.fetch_attachment");
+  });
+
+  test("fetch_attachment description advertises vision and rules out PDF rasterization", () => {
+    const agent = makeAgent();
+    const description = agent._registeredTools["bookkeeping.fetch_attachment"].description as string;
+    expect(description).toContain("image content part");
+    expect(description).toContain("rasterize");
+    expect(description).toContain("OCR");
+  });
+});
+
 describe("bookkeeping.fetch_attachment", () => {
   afterEach(() => {
     globalThis.fetch = originalFetch;
@@ -1195,6 +1270,9 @@ describe("bookkeeping.fetch_attachment", () => {
     expect(payload.url).toBe("http://example.com/f.pdf");
     expect(payload.base64).toBeUndefined();
     expect(payload.datas).toBeUndefined();
+    expect(result.content.length).toBe(1);
+    expect(payload.image_included).toBe(false);
+    expect(payload.image_omitted_reason).toBe("url_attachment");
     expect(fetchMock.mock.calls.length).toBe(1);
   });
 
@@ -1218,6 +1296,127 @@ describe("bookkeeping.fetch_attachment", () => {
     const payload = JSON.parse(result.content[0].text);
     expect(payload.base64).toBe("base64-content-here");
     expect(payload.name).toBe("small.pdf");
+    // A PDF is bounded base64 only: no image part, no rasterization, no OCR.
+    expect(result.content.length).toBe(1);
+    expect(payload.image_included).toBe(false);
+    expect(payload.image_omitted_reason).toBe("unsupported_mimetype");
+  });
+
+  /** Two-call fetch: metadata read, then the datas read. */
+  function attachmentFetchMock(meta: Record<string, unknown>, data: Record<string, unknown>) {
+    let callCount = 0;
+    return mock(async () => {
+      callCount++;
+      return jsonResponse([callCount === 1 ? meta : data]);
+    });
+  }
+
+  /** base64 of the given byte values followed by filler, long enough for the sniffer's 18-byte window. */
+  function base64OfBytes(bytes: number[]) {
+    const padded = [...bytes, ...new Array(Math.max(0, 24 - bytes.length)).fill(0x20)];
+    return btoa(String.fromCharCode(...padded));
+  }
+
+  const PNG_BASE64 = base64OfBytes([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const JPEG_BASE64 = base64OfBytes([0xff, 0xd8, 0xff, 0xe0]);
+
+  test("declared PNG under the cap: emits an image content part alongside the JSON text block", async () => {
+    const agent = makeAgent();
+    globalThis.fetch = attachmentFetchMock(
+      { name: "receipt.png", mimetype: "image/png", file_size: 100, type: "binary" },
+      { name: "receipt.png", mimetype: "image/png", file_size: 100, datas: PNG_BASE64 }
+    );
+
+    const handler = getToolHandler(agent, "bookkeeping.fetch_attachment");
+    const result = await handler({ attachment_id: 5, max_bytes: 10485760 });
+
+    expect(result.isError).toBeUndefined();
+    expect(result.content[0].type).toBe("text");
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.image_included).toBe(true);
+    expect(payload.image_mimetype).toBe("image/png");
+    expect(payload.base64).toBe(PNG_BASE64);
+    expect(result.content[1]).toEqual({ type: "image", data: PNG_BASE64, mimeType: "image/png" });
+  });
+
+  test("octet-stream JPEG is magic-byte sniffed into an image part", async () => {
+    const agent = makeAgent();
+    globalThis.fetch = attachmentFetchMock(
+      { name: "IMG_0042", mimetype: "application/octet-stream", file_size: 100, type: "binary" },
+      { name: "IMG_0042", mimetype: "application/octet-stream", file_size: 100, datas: JPEG_BASE64 }
+    );
+
+    const handler = getToolHandler(agent, "bookkeeping.fetch_attachment");
+    const result = await handler({ attachment_id: 6, max_bytes: 10485760 });
+
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.image_included).toBe(true);
+    expect(payload.image_mimetype).toBe("image/jpeg");
+    expect(result.content[1]).toEqual({ type: "image", data: JPEG_BASE64, mimeType: "image/jpeg" });
+  });
+
+  test("file_size:false with an oversize payload is still refused on the decoded estimate", async () => {
+    const agent = makeAgent();
+    globalThis.fetch = attachmentFetchMock(
+      { name: "mystery.bin", mimetype: false, file_size: false, type: "binary" },
+      { name: "mystery.bin", mimetype: false, file_size: false, datas: "A".repeat(4000) }
+    );
+
+    const handler = getToolHandler(agent, "bookkeeping.fetch_attachment");
+    const result = await handler({ attachment_id: 7, max_bytes: 1000 });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("1000");
+    expect(result.content.length).toBe(1);
+  });
+
+  test("wrapped base64: the image part is whitespace-stripped while structured base64 stays verbatim", async () => {
+    const agent = makeAgent();
+    const wrapped = `${PNG_BASE64.slice(0, 8)}\n${PNG_BASE64.slice(8)}`;
+    globalThis.fetch = attachmentFetchMock(
+      { name: "wrapped.png", mimetype: "image/png", file_size: 100, type: "binary" },
+      { name: "wrapped.png", mimetype: "image/png", file_size: 100, datas: wrapped }
+    );
+
+    const handler = getToolHandler(agent, "bookkeeping.fetch_attachment");
+    const result = await handler({ attachment_id: 8, max_bytes: 10485760 });
+
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.base64).toBe(wrapped);
+    expect(result.content[1].data).toBe(PNG_BASE64);
+  });
+
+  test("garbage base64 with a generic mimetype does not throw and emits no image part", async () => {
+    const agent = makeAgent();
+    globalThis.fetch = attachmentFetchMock(
+      { name: "broken.bin", mimetype: "application/octet-stream", file_size: 20, type: "binary" },
+      { name: "broken.bin", mimetype: "application/octet-stream", file_size: 20, datas: "!!!not base64!!!" }
+    );
+
+    const handler = getToolHandler(agent, "bookkeeping.fetch_attachment");
+    const result = await handler({ attachment_id: 9, max_bytes: 10485760 });
+
+    expect(result.isError).toBeUndefined();
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.image_included).toBe(false);
+    expect(payload.image_omitted_reason).toBe("unsupported_mimetype");
+    expect(result.content.length).toBe(1);
+  });
+
+  test("an attachment with no stored datas reports no_content and no base64", async () => {
+    const agent = makeAgent();
+    globalThis.fetch = attachmentFetchMock(
+      { name: "empty.png", mimetype: "image/png", file_size: 0, type: "binary" },
+      { name: "empty.png", mimetype: "image/png", file_size: 0, datas: false }
+    );
+
+    const handler = getToolHandler(agent, "bookkeeping.fetch_attachment");
+    const result = await handler({ attachment_id: 10, max_bytes: 10485760 });
+
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.image_included).toBe(false);
+    expect(payload.image_omitted_reason).toBe("no_content");
+    expect(payload.base64).toBeUndefined();
   });
 
   test("no record found returns a plain mcpError", async () => {

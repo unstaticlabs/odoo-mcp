@@ -97,9 +97,14 @@ same policy table ([`src/lifecycle-allowlist.ts`](../src/lifecycle-allowlist.ts)
   same mutation through under a different label;
 - **payment** post/register, **reconcile**, and non-PM **delete**;
 - **lock-sensitive** writes — both `account.lock_exception` CRUD and any write that sets a
-  lock-boundary field (`fiscalyear_lock_date`, `tax_lock_date`, `hard_lock_date`, …) on a reachable
-  model. Note these fields live on `res.company` in Odoo 18/19, which the connector still
-  default-denies, so that escalation is currently load-bearing only for `account.*`;
+  lock-boundary field (`fiscalyear_lock_date`, `tax_lock_date`, `hard_lock_date`, `*_lock_date`, …) on a
+  reachable model. These fields live on `res.company` in Odoo 18/19, and `res.company` is no longer
+  wholesale default-denied: it is admitted for exactly two default-tax fields
+  (`account_sale_tax_id`, `account_purchase_tax_id`, reversible configuration). Everything else on the
+  company stays blocked by name, and the lock-boundary escalation is therefore now load-bearing on
+  `res.company` too — a company lock-date write is `confirmation_required` / `lock_sensitive`, not a
+  generic model-level refusal. Every `res.company` mutation additionally requires a non-empty
+  write `context` (audit-only, never sent to Odoo);
 - **un-posting** — `button_draft` from state `posted`. Resetting a posted move to draft removes an
   accounting record that exists; it is the reverse of `action_post` and carries the same gate. From
   `cancel` there is no live entry to remove, so that direction executes in one call.
@@ -616,7 +621,8 @@ for a failure the caller could fix or retry.
 ### 4.6 `bookkeeping.fetch_attachment`
 
 Fetch an `ir.attachment`'s metadata and, unless it is a URL-type attachment or exceeds
-`max_bytes`, its base64-encoded content.
+`max_bytes`, its base64-encoded content — plus, for image attachments, an inline MCP image
+content part the model can actually read (see **Vision vs PDF** below).
 
 | Field | Type | Required | Default | Notes |
 |---|---|---|---|---|
@@ -635,7 +641,62 @@ Fetch an `ir.attachment`'s metadata and, unless it is a URL-type attachment or e
 { "name": "facture.pdf", "mimetype": "application/pdf", "file_size": 51234, "base64": "JVBERi0xLjQ…" }
 ```
 
-> A `type: "url"` attachment returns `{ name, mimetype, file_size, url }` with no `base64`.
+> A `type: "url"` attachment returns `{ name, mimetype, file_size, url }` with no `base64` and costs a
+> single Odoo call. Over-size attachments return an error envelope instead of content — the declared
+> `file_size` is checked before any byte is read (still one call), and the decoded size of `datas` is
+> re-checked afterwards for the rows where Odoo reports `file_size: false`.
+
+#### Vision vs PDF
+
+Every success also carries `image_included`. When the attachment is a JPEG, PNG, GIF, or WebP within
+`max_bytes`, the result adds an **MCP `image` content part** next to the JSON text block, so the model
+actually sees the receipt instead of a base64 wall. The JSON rendering stays at `content[0]`, so
+text-only consumers are unaffected.
+
+```json
+{
+  "name": "ticket-restaurant.jpg",
+  "mimetype": "image/jpeg",
+  "file_size": 184320,
+  "base64": "/9j/4AAQSkZJRg…",
+  "image_included": true,
+  "image_mimetype": "image/jpeg"
+}
+```
+
+Mail-sourced receipts often land in Odoo as `application/octet-stream` (or with no mimetype at all).
+Those are **magic-byte sniffed** — only the first 18 bytes are decoded — and still come back as an
+image when they really are one.
+
+A PDF gets bounded base64 and nothing else:
+
+```json
+{
+  "name": "facture.pdf",
+  "mimetype": "application/pdf",
+  "file_size": 51234,
+  "base64": "JVBERi0xLjQ…",
+  "image_included": false,
+  "image_omitted_reason": "unsupported_mimetype"
+}
+```
+
+The connector **never rasterizes or OCRs a PDF** — the same contract as `billing.attach_source_pdf`
+below, which slices pages without touching their content. `image_omitted_reason`
+is `url_attachment` for a `type: "url"` row, `no_content` when the attachment stores no bytes, and
+`unsupported_mimetype` for everything else (PDFs, XML, ZIP, …).
+
+#### Evidence workflow
+
+Metadata first, bytes last — the metadata tools never return `datas`:
+
+| Step | Tool | Yields |
+|---|---|---|
+| 1 | `expand_record`, `billing.audit_expenses`, §4.4 `bookkeeping.list_source_documents`, §4.5 `bookkeeping.search_source_documents` | attachment **ids** + metadata |
+| 2 | `bookkeeping.fetch_attachment` | bytes, plus an inline image for JPEG/PNG/GIF/WebP |
+
+The 10 MiB default exists because base64 inflates a payload ~1.37× against Worker memory; raise
+`max_bytes` deliberately, per call.
 
 #### Composite source PDFs → `billing.attach_source_pdf`
 
