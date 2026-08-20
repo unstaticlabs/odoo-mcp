@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, mock, test } from "bun:test";
 import { z } from "zod";
 import { OdooError } from "../odoo";
 import {
@@ -48,8 +48,11 @@ import {
   type FieldPresetName,
   mcpAggregationErrorFromException,
   mcpErrorFromException,
-  redactDetails
+  redactDetails,
+  searchRecords,
+  MAX_ACL_FIELD_RETRIES
 } from "./shared";
+import type { OdooQueue } from "../odoo-queue";
 
 describe("resolveFieldPreset", () => {
   test("known model with no fields resolves to its curated preset", () => {
@@ -934,7 +937,7 @@ describe("browse cursor", () => {
 const EXPECTED_PRESET_FIELDS: Record<FieldPresetName, Record<string, readonly string[]>> = {
   minimal: {
     "project.task": DEFAULT_TASK_FIELDS,
-    "project.project": ["id", "name", "partner_id", "user_id", "stage_id"],
+    "project.project": ["id", "name", "partner_id", "user_id"],
     "res.partner": ["id", "name", "email", "phone"],
     "res.users": ["id", "name", "login", "email"]
   },
@@ -1303,5 +1306,202 @@ describe("redactDetails", () => {
     expect(redacted).not.toContain("odoo_deadbeef");
     expect(redacted).toContain("Bearer [REDACTED]");
     expect(redacted).toContain("[REDACTED]");
+  });
+});
+
+/** Verbatim Odoo 19 text for a field gated behind a group the API user is not in. */
+function aclFieldError(field: string, model = "project.project"): OdooError {
+  const details =
+    `You do not have enough rights to access the field "${field}" on Project (${model}). ` +
+    "Operation: read. Groups: allowed for groups 'Use Stages on Project'.";
+  return new OdooError({
+    message: details,
+    code: "permission_denied",
+    httpStatus: 403,
+    model,
+    method: "search_read",
+    details
+  });
+}
+
+const testConn = { url: "http://example.com", db: "test-db", apiKey: "secret-key" };
+
+/** Queue whose enqueue mock is exposed so tests can assert call count and per-attempt args. */
+function stubQueue(responder: (args: Record<string, unknown>, call: number) => unknown) {
+  let call = 0;
+  const enqueue = mock(async (...a: unknown[]) => responder(a[3] as Record<string, unknown>, call++));
+  return {
+    queue: { enqueue, snapshot: () => ({ odoo_calls: 0 }), delta: () => ({ odoo_calls: 0 }) } as unknown as OdooQueue,
+    enqueue
+  };
+}
+
+describe("searchRecords — ACL drop-and-retry", () => {
+  test("drops the field Odoo refused, retries, and reports it as acl-denied", async () => {
+    const { queue, enqueue } = stubQueue((args) => {
+      if ((args.fields as string[]).includes("stage_id")) throw aclFieldError("stage_id");
+      return [{ id: 1, name: "Apollo" }];
+    });
+    const warnings: string[] = [];
+    const { rows, fieldsReport } = await searchRecords(
+      queue,
+      testConn,
+      "project.project",
+      [],
+      ["id", "name", "stage_id"],
+      10,
+      undefined,
+      undefined,
+      undefined,
+      warnings
+    );
+
+    expect(enqueue).toHaveBeenCalledTimes(2);
+    expect((enqueue.mock.calls[0][3] as { fields: string[] }).fields).toEqual(["id", "name", "stage_id"]);
+    expect((enqueue.mock.calls[1][3] as { fields: string[] }).fields).toEqual(["id", "name"]);
+    expect(rows).toEqual([{ id: 1, name: "Apollo" }]);
+    expect(fieldsReport.returned_fields).toEqual(["id", "name"]);
+    expect(fieldsReport.omitted_fields).toContainEqual({ field: "stage_id", reason: "acl-denied" });
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("stage_id");
+  });
+
+  test("warns even when the field came from a preset, not an explicit request", async () => {
+    const { queue } = stubQueue((args) => {
+      if ((args.fields as string[]).includes("stage_id")) throw aclFieldError("stage_id");
+      return [{ id: 1, name: "Apollo" }];
+    });
+    const warnings: string[] = [];
+    // tracking_minimal for project.project still carries stage_id — the preset path must degrade too.
+    const { fieldsReport } = await searchRecords(
+      queue,
+      testConn,
+      "project.project",
+      [],
+      [...MODEL_NAMED_FIELD_PRESETS["project.project"].tracking_minimal!],
+      10,
+      undefined,
+      undefined,
+      undefined,
+      warnings
+    );
+    expect(fieldsReport.omitted_fields).toContainEqual({ field: "stage_id", reason: "acl-denied" });
+    expect(warnings.some((w) => w.includes("stage_id") && w.includes("access rights"))).toBe(true);
+  });
+
+  test("never mutates the shared preset arrays it was handed", async () => {
+    const before = [...MODEL_FIELD_PRESETS["project.project"]];
+    const trackingBefore = [...MODEL_NAMED_FIELD_PRESETS["project.project"].tracking_minimal!];
+    const { queue } = stubQueue((args) => {
+      if ((args.fields as string[]).includes("user_id")) throw aclFieldError("user_id");
+      return [{ id: 1 }];
+    });
+    // fields=null → resolveFields returns the preset array itself; the retry must copy, not splice.
+    await searchRecords(queue, testConn, "project.project", [], null, 10);
+    expect(MODEL_FIELD_PRESETS["project.project"]).toEqual(before);
+    expect(MODEL_NAMED_FIELD_PRESETS["project.project"].tracking_minimal).toEqual(trackingBefore);
+  });
+
+  test("no retry when the unreadable field is id — the original error propagates", async () => {
+    const { queue, enqueue } = stubQueue(() => {
+      throw aclFieldError("id");
+    });
+    await expect(
+      searchRecords(queue, testConn, "project.project", [], ["id", "name"], 10)
+    ).rejects.toThrow(/enough rights/);
+    expect(enqueue).toHaveBeenCalledTimes(1);
+  });
+
+  test("no retry on an __all__ read — there is no field list to trim", async () => {
+    const { queue, enqueue } = stubQueue(() => {
+      throw aclFieldError("stage_id");
+    });
+    await expect(
+      searchRecords(queue, testConn, "project.project", [], [ALL_FIELDS_SENTINEL], 10)
+    ).rejects.toThrow(/enough rights/);
+    expect(enqueue).toHaveBeenCalledTimes(1);
+  });
+
+  test("no retry when Odoo names a field we never requested", async () => {
+    const { queue, enqueue } = stubQueue(() => {
+      throw aclFieldError("analytic_account_id");
+    });
+    await expect(
+      searchRecords(queue, testConn, "project.project", [], ["id", "name"], 10)
+    ).rejects.toThrow(/enough rights/);
+    expect(enqueue).toHaveBeenCalledTimes(1);
+  });
+
+  test("non-ACL failures are rethrown untouched", async () => {
+    const err = new OdooError({
+      message: "bad domain",
+      code: "invalid_request",
+      httpStatus: 400,
+      model: "project.project",
+      method: "search_read",
+      details: "Invalid field 'stage_id' in domain"
+    });
+    const { queue, enqueue } = stubQueue(() => {
+      throw err;
+    });
+    await expect(searchRecords(queue, testConn, "project.project", [], ["id", "stage_id"], 10)).rejects.toThrow(err);
+    expect(enqueue).toHaveBeenCalledTimes(1);
+  });
+
+  test("bounded — a queue that refuses a new field every time stops and rethrows", async () => {
+    const doomed = ["stage_id", "user_id", "partner_id", "name"];
+    const { queue, enqueue } = stubQueue((args) => {
+      const next = doomed.find((f) => (args.fields as string[]).includes(f));
+      throw aclFieldError(next ?? "id");
+    });
+    await expect(
+      searchRecords(queue, testConn, "project.project", [], ["id", ...doomed], 10)
+    ).rejects.toThrow(/enough rights/);
+    expect(enqueue).toHaveBeenCalledTimes(1 + MAX_ACL_FIELD_RETRIES);
+  });
+
+  test("a clean read still makes exactly one call and reports no omissions", async () => {
+    const { queue, enqueue } = stubQueue(() => [{ id: 1, name: "Apollo" }]);
+    const warnings: string[] = [];
+    const { fieldsReport } = await searchRecords(
+      queue,
+      testConn,
+      "project.project",
+      [],
+      ["id", "name"],
+      10,
+      undefined,
+      undefined,
+      undefined,
+      warnings
+    );
+    expect(enqueue).toHaveBeenCalledTimes(1);
+    expect(fieldsReport.omitted_fields).toEqual([]);
+    expect(warnings).toEqual([]);
+  });
+});
+
+describe("project.project presets exclude the ACL-gated stage_id", () => {
+  test("every minimal-preset registry agrees on id/name/partner_id/user_id", () => {
+    const expected = ["id", "name", "partner_id", "user_id"];
+    expect(MODEL_FIELD_PRESETS["project.project"]).toEqual(expected);
+    expect(FIELD_PRESET_MODEL_OVERRIDES.minimal["project.project"]).toEqual(expected);
+    expect(MODEL_NAMED_FIELD_PRESETS["project.project"].minimal).toEqual(expected);
+    expect(NAMED_MODEL_FIELD_PRESETS.minimal["project.project"]).toEqual(expected);
+    for (const preset of [
+      MODEL_FIELD_PRESETS["project.project"],
+      FIELD_PRESET_MODEL_OVERRIDES.minimal["project.project"],
+      NAMED_MODEL_FIELD_PRESETS.minimal["project.project"]
+    ]) {
+      expect(preset).not.toContain("stage_id");
+    }
+  });
+
+  test("tracking presets and every project.task preset keep stage_id (retry now covers them)", () => {
+    expect(NAMED_MODEL_FIELD_PRESETS.tracking_minimal["project.project"]).toContain("stage_id");
+    expect(MODEL_NAMED_FIELD_PRESETS["project.project"].tracking_minimal).toContain("stage_id");
+    expect(FIELD_PRESET_MODEL_OVERRIDES.tracking_minimal["project.project"]).toContain("stage_id");
+    expect(MODEL_FIELD_PRESETS["project.task"]).toEqual(DEFAULT_TASK_FIELDS);
+    expect(MODEL_FIELD_PRESETS["project.task"]).toContain("stage_id");
   });
 });

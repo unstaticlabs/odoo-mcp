@@ -117,6 +117,9 @@ export const DRAFT_EXPENSE_FIELDS = new Set([
   "total_amount",
   "tax_ids",
   "reference",
+  // Who paid: employee (own_account) vs company (company_account). Not a lifecycle field:
+  // it does not submit, approve, post, or pay. Draft-only, and reversible.
+  "payment_mode",
   "company_id",
   "employee_id"
 ]);
@@ -183,6 +186,21 @@ export function invalidReviewState(values: Record<string, unknown>): string | nu
   return typeof raw === "string" ? raw : JSON.stringify(raw ?? null);
 }
 
+/** Odoo's native `hr.expense.payment_mode` selection: employee-paid vs company-paid. */
+export const EXPENSE_PAYMENT_MODES = new Set(["own_account", "company_account"]);
+
+/**
+ * Return the offending value when `values.payment_mode` is present but not a supported selection key.
+ * Fails closed locally so the agent gets a clear, recoverable error instead of an Odoo traceback
+ * (or a write that silently no-ops). Exported for unit testing.
+ */
+export function invalidPaymentMode(values: Record<string, unknown>): string | null {
+  if (!("payment_mode" in values)) return null;
+  const raw = values.payment_mode;
+  if (typeof raw === "string" && EXPENSE_PAYMENT_MODES.has(raw)) return null;
+  return typeof raw === "string" ? raw : JSON.stringify(raw ?? null);
+}
+
 /** Nested create/update dict keys allowed inside `invoice_line_ids` commands. */
 export const DRAFT_VENDOR_BILL_LINE_FIELDS = new Set([
   "name",
@@ -195,12 +213,19 @@ export const DRAFT_VENDOR_BILL_LINE_FIELDS = new Set([
   "display_type"
 ]);
 
-/** Explicit lifecycle / payment keys that must never be written via billing tools. */
+/**
+ * Explicit lifecycle / payment keys that must never be written via billing tools.
+ * `payment_mode` is not listed: it is allowlisted on draft expenses (who paid; reversible).
+ * Vendor-bill headers stay closed because `payment_mode` is absent from DRAFT_VENDOR_BILL_FIELDS
+ * (`partitionAllowlistedValues` blocks via `!allowlist.has(key)` — the `/^payment_/` regex is
+ * not applied to header keys). Nested invoice lines stay blocked twice over via
+ * LIFECYCLE_OR_PAYMENT_FIELD and DRAFT_VENDOR_BILL_LINE_FIELDS. HARD_DENY_FIELDS is used
+ * only inside this file.
+ */
 const HARD_DENY_FIELDS = new Set([
   "state",
   "approval_state",
   "sheet_id",
-  "payment_mode",
   "account_move_id",
   "payment_state",
   "move_type",
@@ -1241,7 +1266,9 @@ export function registerBillingWriteTools(
       description:
         "Write: update preparatory fields on a draft hr.expense only. Allowlisted fields: " +
         `${draftExpenseFieldList}. Use total_amount for monetary corrections; total_amount_currency is ` +
-        "not writable (audit/read-only). Refuses non-draft records and lifecycle/payment fields. " +
+        "not writable (audit/read-only). payment_mode accepts own_account (employee paid) or " +
+        "company_account (company paid) — a draft-only correction of who paid; it does not submit, " +
+        "approve, post, or pay. Refuses non-draft records and lifecycle/payment fields. " +
         `${expenseReassignmentNote} ` +
         "Does not validate, post, or delete. For reset→edit→resubmit/reapprove hygiene use " +
         "call_model_method on allowlisted methods (action_reset / action_submit / action_approve) " +
@@ -1307,6 +1334,19 @@ export function registerBillingWriteTools(
                 `billing.update_draft_expense refuses non-allowlisted or lifecycle fields: ${blocked.join(", ")}. ` +
                 `Allowed: ${[...DRAFT_EXPENSE_FIELDS].join(", ")}.`,
               blocked_fields: blocked
+            }
+          );
+        }
+        const badPaymentMode = invalidPaymentMode(allowed);
+        if (badPaymentMode !== null) {
+          return billingBlocked(
+            { model },
+            {
+              error: "invalid_payment_mode",
+              reason:
+                `payment_mode=${badPaymentMode} is not a supported value. ` +
+                `Allowed: ${[...EXPENSE_PAYMENT_MODES].join(", ")} (employee-paid vs company-paid).`,
+              recoverable: true
             }
           );
         }

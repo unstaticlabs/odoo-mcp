@@ -73,7 +73,7 @@ The server never logs, stores, or echoes your key.
 | `bookkeeping.preview_returns` | read | `company` (positive int), `from`/`to` (string), `return_type_xmlids` (string[] min 1) — which `account.return` cards should exist; blank periodicity → `configuration_issues` |
 | `bookkeeping.plan_safe_write` | validate-only | `operation` (enum: `create_or_update_report_external_value`, `create_manual_tax_return`, `update_return_type_periodicity`, `create_lock_exception`), `company` (string), `values` (object) — dry-run write plan + HMAC confirmation token; never writes |
 | `billing.audit_expenses` | read | `state` / `product_id` / `analytic_account_id` (optional; analytic post-filters `analytic_distribution` keys), `date_from`/`date_to`, `company_id`, `limit` (1–100, default 50), `offset`, `order` — population audit with account/taxes/payment_mode/attachments, in-page duplicate candidates, and totals |
-| `billing.update_draft_expense` | write | `record_id` (positive int), `values` (allowlisted draft `hr.expense` prep fields: date/name/description/product/account/analytics/qty/price/**total_amount**/tax/reference/**company_id**/**employee_id**; `total_amount_currency` is not writable), `context` (optional) — draft-only; lifecycle via `billing.reset_expense` / `billing.submit_expense` / `billing.approve_expense`. `company_id` + `employee_id` are draft-**preparation** only (mis-routed legal entity): both required together, the target employee must belong to the target company, the caller must have access to it, and company-bound fields (product/account/taxes/analytic) that do not exist there are refused by name — never silently kept or cleared. Validated first, then one atomic write |
+| `billing.update_draft_expense` | write | `record_id` (positive int), `values` (allowlisted draft `hr.expense` prep fields: date/name/description/product/account/analytics/qty/price/**total_amount**/tax/reference/**payment_mode** (own_account | company_account — who paid; draft prep, not a lifecycle action)/**company_id**/**employee_id**; `total_amount_currency` is not writable), `context` (optional) — draft-only; lifecycle via `billing.reset_expense` / `billing.submit_expense` / `billing.approve_expense`. `company_id` + `employee_id` are draft-**preparation** only (mis-routed legal entity): both required together, the target employee must belong to the target company, the caller must have access to it, and company-bound fields (product/account/taxes/analytic) that do not exist there are refused by name — never silently kept or cleared. Validated first, then one atomic write |
 | `billing.reset_expense` | write | `record_ids` (1–50 positive ints), `context` (**required**) — `hr.expense` submitted/approved/refused → draft. All-or-nothing; validated against live state and `can_reset` first |
 | `billing.submit_expense` | write | `record_ids` (1–50 positive ints), `context` (**required**) — `hr.expense` draft → submitted |
 | `billing.approve_expense` | write | `record_ids` (1–50 positive ints), `context` (**required**) — `hr.expense` submitted → approved; refuses when Odoo's `can_approve` is false. Never posts or pays |
@@ -372,7 +372,7 @@ For `search_records`, `get_record`, `batch_read`, `projects.list_tasks`, and `pr
 
 - **`fields` omitted / `null`** → a **curated per-model preset** from `MODEL_FIELD_PRESETS` (no extra Odoo call):
   - `project.task` → `id`, `name`, `stage_id`, `project_id`
-  - `project.project` → `id`, `name`, `partner_id`, `user_id`, `stage_id`
+  - `project.project` → `id`, `name`, `partner_id`, `user_id` (`stage_id` is excluded: Odoo gates it behind the *Use Stages on Project* group, so requesting it by default would fail the read for users without it)
   - `res.partner` → `id`, `name`, `email`, `phone`
   - `res.users` → `id`, `name`, `login`, `email`
   - unknown models → `id`, `display_name`
@@ -385,8 +385,16 @@ Tool responses include structured field reporting alongside the records:
   [Record links](#record-links--surface-urls-not-bare-ids)). Server-added, not an Odoo field,
   so it never appears in `returned_fields` and never needs requesting
 - `returned_fields` — fields present in the Odoo rows
-- `omitted_fields` — `{ field, reason }` where `reason` is `absent-from-rows` or `unknown-field` (the latter only when a cached `fields_get` result is already available)
-- `warnings` — when an **explicitly requested** field is omitted
+- `omitted_fields` — `{ field, reason }` where `reason` is one of:
+  - `absent-from-rows` — requested, but Odoo returned no such key on the rows
+  - `unknown-field` — not a field of the model (only when a cached `fields_get` result is already available)
+  - `acl-denied` — the Odoo user cannot read the field; the connector dropped it, retried, and returned the remaining columns (always accompanied by a warning)
+- `warnings` — when an **explicitly requested** field is omitted, or on any `acl-denied` omission
+
+`search_records`, `projects.list_projects`, and `projects.list_tasks` **degrade rather than fail** on
+a per-field `AccessError`: the field Odoo named is dropped (up to two drops per call) and the read is
+retried, so an ACL-gated convenience field costs you a column and a warning, not the whole result.
+`id` is never dropped, and an `["__all__"]` read has no field list to trim, so both still error.
 
 Use `get_fields` when you need the full field schema; the default read path does **not** call `fields_get`.
 

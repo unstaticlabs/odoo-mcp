@@ -309,6 +309,11 @@ describe("refusal envelope always names layer + next_step", () => {
   });
 });
 
+/** Verbatim Odoo 19 text for a field gated behind a group the API user is not in. */
+const ACL_FIELD_ACCESS_ERROR =
+  'You do not have enough rights to access the field "stage_id" on Project (project.project). ' +
+  "Operation: read. Groups: allowed for groups 'Use Stages on Project'.";
+
 describe("extractRejectedFields — refusals name the field Odoo rejected", () => {
   test("extracts the field from Odoo's common schema/validation messages", () => {
     const cases: [string, string[]][] = [
@@ -332,6 +337,30 @@ describe("extractRejectedFields — refusals name the field Odoo rejected", () =
   test("prose is not mistaken for a field name (unquoted, unqualified words are ignored)", () => {
     expect(extractRejectedFields("Invalid field name in domain")).toEqual([]);
     expect(extractRejectedFields("Unknown field type requested")).toEqual([]);
+  });
+
+  test("extracts the field from a per-field AccessError so the read can drop it and retry", () => {
+    expect(extractRejectedFields(ACL_FIELD_ACCESS_ERROR)).toEqual(["stage_id"]);
+    expect(extractRejectedFields("You do not have enough rights to access the field 'user_id' on Project")).toEqual([
+      "user_id"
+    ]);
+  });
+
+  test("an AccessError that quotes no field names none (retry must not guess)", () => {
+    expect(extractRejectedFields("you do not have enough rights to access the field on project")).toEqual([]);
+    expect(extractRejectedFields("You are not allowed to access the field on this document.")).toEqual([]);
+  });
+
+  test("a per-field AccessError classifies as odoo_acl, not odoo_record_rule", () => {
+    const err = new OdooError({
+      message: ACL_FIELD_ACCESS_ERROR,
+      code: "permission_denied",
+      httpStatus: 403,
+      model: "project.project",
+      method: "search_read",
+      details: ACL_FIELD_ACCESS_ERROR
+    });
+    expect(classifyRefusingLayer(err)).toBe("odoo_acl");
   });
 
   test("mcpErrorFromException surfaces the field alongside layer and next_step", () => {

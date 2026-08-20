@@ -94,7 +94,12 @@ const PRIORITY_FIELD_NAMES = ["id", "name", "display_name", "state", "active"];
 export const SMART_FIELD_LIMIT = 15;
 export const ALL_FIELDS_SENTINEL = "__all__";
 
-export type OmissionReason = "absent-from-rows" | "unknown-field";
+/**
+ * Why a requested field is missing from the returned rows. `acl-denied` is the only reason not
+ * derived from the response body: Odoo refused the field outright and {@link searchRecords} dropped
+ * it and retried, so the caller gets rows plus an honest account of what was withheld.
+ */
+export type OmissionReason = "absent-from-rows" | "unknown-field" | "acl-denied";
 
 export interface FieldOmission {
   field: string;
@@ -286,7 +291,7 @@ export class AggregationError extends Error {
 
 const zFieldOmission = z.object({
   field: z.string(),
-  reason: z.enum(["absent-from-rows", "unknown-field"])
+  reason: z.enum(["absent-from-rows", "unknown-field", "acl-denied"])
 });
 
 const zFieldSource = z.enum(["explicit", "preset", "fallback"]);
@@ -692,6 +697,14 @@ export function plaintextToHtml(text: string): string {
   return escapeHtml(text).replace(/\r\n|\r|\n/g, "<br>");
 }
 
+/** Max ACL-driven field drops per searchRecords call — the queue is ~1 req/s, so keep it small. */
+export const MAX_ACL_FIELD_RETRIES = 2;
+
+/**
+ * Read-only tools must not fail closed because one optional convenience field is group-gated: the
+ * caller's API key IS the ACL, so a field the key cannot read is a fact to report, not an error.
+ * Drops the field(s) Odoo named, retries, and returns what was withheld so the caller can be told.
+ */
 export async function searchRecords(
   queue: OdooQueue,
   conn: OdooConnection,
@@ -718,13 +731,36 @@ export async function searchRecords(
     odooFields = resolution.fields;
   }
 
-  const rows = (await queue.enqueue(conn, model, "search_read", {
-    domain,
-    fields: odooFields,
-    limit: cappedLimit,
-    offset: offset ?? 0,
-    ...(order ? { order } : {})
-  })) as Record<string, unknown>[];
+  // `filter` copies, so the preset arrays these may alias are never mutated (see resolveFields).
+  let attemptFields = odooFields;
+  const aclDenied: string[] = [];
+  let rows: Record<string, unknown>[];
+
+  for (let attempt = 0; ; attempt++) {
+    try {
+      rows = (await queue.enqueue(conn, model, "search_read", {
+        domain,
+        fields: attemptFields,
+        limit: cappedLimit,
+        offset: offset ?? 0,
+        ...(order ? { order } : {})
+      })) as Record<string, unknown>[];
+      break;
+    } catch (err) {
+      // Not retryable: budget exhausted, an `__all__` read (no field list to trim), a non-ACL
+      // failure, an unreadable `id`, or a field we never asked for (which could never make progress).
+      const droppable =
+        attempt < MAX_ACL_FIELD_RETRIES &&
+        attemptFields.length > 0 &&
+        err instanceof OdooError &&
+        classifyRefusingLayer(err) === "odoo_acl"
+          ? extractRejectedFields(err.details).filter((f) => f !== "id" && attemptFields.includes(f))
+          : [];
+      if (droppable.length === 0) throw err;
+      attemptFields = attemptFields.filter((f) => !droppable.includes(f));
+      aclDenied.push(...droppable);
+    }
+  }
 
   let knownFields: Set<string> | undefined;
   if (cache) {
@@ -735,12 +771,23 @@ export async function searchRecords(
     }
   }
 
+  // Report against the fields actually sent, so an ACL-dropped field is not double-counted as
+  // "absent-from-rows". (For `__all__`, attemptFields is [] and the report is empty either way.)
   const resolved = {
-    fields: resolution.fields,
+    fields: attemptFields,
     explicit: resolution.source === "explicit"
   };
 
   const fieldsReport = computeFieldsReport(resolved, rows, warnings, model, { knownFields });
+
+  // Warn unconditionally, unlike computeFieldsReport's explicit-only warning: silently serving a
+  // preset-sourced list minus a column the caller never knew was dropped is the failure this guards.
+  for (const field of aclDenied) {
+    fieldsReport.omitted_fields.push({ field, reason: "acl-denied" });
+    warnings.push(
+      `${model}: field '${field}' omitted — the authenticated Odoo user cannot read it (access rights); retried without it`
+    );
+  }
 
   return { rows, fieldsMeta: null, fieldsReport };
 }
@@ -785,7 +832,10 @@ async function resolveFieldsViaOdoo(
   }
 }
 
-const MINIMAL_PROJECT_PROJECT_FIELDS = ["id", "name", "partner_id", "user_id", "stage_id"] as const;
+// `stage_id` is deliberately absent: Odoo gates it behind `project.group_project_stages` ("Use
+// Stages on Project"), so including it in the default read makes every project list fail closed for
+// a user without that group. Callers who want it must ask for it explicitly.
+const MINIMAL_PROJECT_PROJECT_FIELDS = ["id", "name", "partner_id", "user_id"] as const;
 const MINIMAL_RES_PARTNER_FIELDS = ["id", "name", "email", "phone"] as const;
 const MINIMAL_RES_USERS_FIELDS = ["id", "name", "login", "email"] as const;
 
