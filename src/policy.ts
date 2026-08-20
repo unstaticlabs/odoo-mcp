@@ -293,10 +293,16 @@ export function classifyRefusingLayer(err: unknown): RefusingLayer {
  * Field names Odoo's own error text points at, so a refusal envelope can name the rejected field
  * instead of leaving the agent to parse prose. Deliberately conservative — each pattern quotes or
  * delimits the field, and a message that names none yields none. Never invent a field name.
+ *
+ * Covers both schema refusals (invalid/unknown field) and per-field ACL refusals ("you do not have
+ * enough rights to access the field ..."), the latter so a read can drop the field and retry.
  */
 const REJECTED_FIELD_PATTERNS: readonly RegExp[] = [
   // Quoted: Invalid field 'parent_idd' on model 'product.category'
   /(?:invalid|unknown) (?:field|value for field) ['"`]([a-z_][a-z0-9_.]*)['"`]/gi,
+  // ACL: You do not have enough rights to access the field "stage_id" on Project (project.project)
+  // The quotes are mandatory — unquoted prose ("...to access the field on Project") names nothing.
+  /access the field ['"`]([a-z_][a-z0-9_.]*)['"`]/gi,
   // Model-qualified and unquoted: Invalid field product.category.parent_idd in leaf …
   // A dot is required so English prose ("invalid field name in domain") never reads as a field name.
   /(?:invalid|unknown) field ([a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*)+)/gi,
