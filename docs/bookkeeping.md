@@ -116,6 +116,9 @@ update, so a policy refusal can never cause a partial write.
    top-level confirmation path and **strips** it before the HMAC plan and before Odoo JSON-2; if
    top-level and kwargs tokens both exist and differ, the call is refused. Prefer the published
    top-level argument so schema-driven clients (ChatGPT) see the field on the tool schema.
+   If a client insists the schema has no `confirmation_token` field, reconnect or refresh the
+   connector — a stale tool cache from an older server version is the usual cause; bumping
+   `SERVER_VERSION` forces a refetch.
 
 Dedicated expense lifecycle tools (also the only lifecycle path on `/accounting/mcp`):
 

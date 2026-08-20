@@ -113,6 +113,15 @@ describe("known gap: lock-date fields live on a model the connector still defaul
   });
 });
 
+describe("reconcile is high-risk and requires confirmation (#2295)", () => {
+  test("account.move.line.reconcile and aliases classify as irreversible ledger", () => {
+    for (const method of ["reconcile", "action_reconcile", "js_assign_outstanding_line"] as const) {
+      expect(getHighRiskMethodRule("account.move.line", method)).toBeTruthy();
+      expect(classifyOperation("account.move.line", method).requires_confirmation).toBe(true);
+    }
+  });
+});
+
 describe("posting cannot be reached under an alias", () => {
   test("_post and button_validate are high-risk like action_post", () => {
     for (const [model, method] of [
