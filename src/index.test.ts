@@ -652,6 +652,29 @@ describe("endpoint tool surfaces", () => {
     expect(projects.has("bookkeeping.list_source_documents")).toBe(false);
   });
 
+  test("fetch_attachment ships on /mcp and /accounting/mcp but never on /projects/mcp", async () => {
+    const generic = await toolNames(McpAgent);
+    const accounting = await toolNames(AccountingAgent);
+    const projects = await toolNames(ProjectsAgent);
+
+    expect(generic.has("bookkeeping.fetch_attachment")).toBe(true);
+    expect(accounting.has("bookkeeping.fetch_attachment")).toBe(true);
+    expect(projects.has("bookkeeping.fetch_attachment")).toBe(false);
+  });
+
+  test("evidence-bearing read tools route agents to bookkeeping.fetch_attachment", async () => {
+    async function description(Ctor: any, name: string): Promise<string> {
+      const agent = new Ctor();
+      agent.odooQueue = makeQueue();
+      agent.props = { odooBaseUrl: "http://example.com", odooDb: "test-db", odooApiKey: "secret-key" };
+      await agent.init();
+      return (agent.server as any)._registeredTools[name].description as string;
+    }
+
+    expect(await description(McpAgent, "expand_record")).toContain("bookkeeping.fetch_attachment");
+    expect(await description(AccountingAgent, "billing.audit_expenses")).toContain("bookkeeping.fetch_attachment");
+  });
+
   test("link_source_document ships on /mcp and /accounting/mcp but never on /projects/mcp", async () => {
     const generic = await toolNames(McpAgent);
     const accounting = await toolNames(AccountingAgent);
