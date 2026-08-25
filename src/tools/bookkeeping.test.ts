@@ -12,10 +12,12 @@ import {
   resolveVisionMimetype,
   sniffImageMimetype,
   SUSPENSE_ACCOUNT_CODES,
+  buildOpenItemDomain,
   buildSourceDocumentDomain,
   computeDeadline,
   computeSeverity,
   diffExpectedReturns,
+  extractGroupCount,
   generatePeriods,
   isDocumentsUnavailableError,
   isSuspenseAccount,
@@ -23,7 +25,8 @@ import {
   normalizeSourceDocument,
   registerBookkeepingTools,
   registerReturnPreviewTools,
-  registerSourceDocumentTools, registerReportLineTools } from "./bookkeeping";
+  registerSourceDocumentTools, registerReportLineTools,
+  resolveOpenItemPredicate } from "./bookkeeping";
 import { validatedToolHandler } from "./structured-test-util";
 
 const originalFetch = globalThis.fetch;
@@ -50,6 +53,8 @@ interface CannedResponse {
   status: number;
   body: unknown;
 }
+
+type CannedResolver = CannedResponse | CannedResponse[] | ((body: any, callIndex: number) => CannedResponse);
 
 const BASE_RESPONSES: Record<string, CannedResponse> = {
   "res.company.fields_get": {
@@ -254,8 +259,9 @@ const BASE_RESPONSES: Record<string, CannedResponse> = {
   }
 };
 
-function buildFetchMock(overrides: Record<string, CannedResponse> = {}) {
-  const responses = { ...BASE_RESPONSES, ...overrides };
+function buildFetchMock(overrides: Record<string, CannedResolver> = {}) {
+  const responses: Record<string, CannedResolver> = { ...BASE_RESPONSES, ...overrides };
+  const callIndexByKey: Record<string, number> = {};
   const calls: { model: string; method: string; body: any }[] = [];
   const fetchMock = mock(async (url: string, init: any) => {
     const marker = "/json/2/";
@@ -268,9 +274,20 @@ function buildFetchMock(overrides: Record<string, CannedResponse> = {}) {
     calls.push({ model, method, body });
 
     const key = `${model}.${method}`;
-    const resp = responses[key];
-    if (!resp) {
+    const resolver = responses[key];
+    if (!resolver) {
       return new Response(JSON.stringify({ error: { message: `no canned response for ${key}` } }), { status: 404 });
+    }
+    const callIndex = callIndexByKey[key] ?? 0;
+    callIndexByKey[key] = callIndex + 1;
+
+    let resp: CannedResponse;
+    if (typeof resolver === "function") {
+      resp = resolver(body, callIndex);
+    } else if (Array.isArray(resolver)) {
+      resp = resolver[Math.min(callIndex, resolver.length - 1)]!;
+    } else {
+      resp = resolver;
     }
     return new Response(JSON.stringify(resp.status >= 400 ? resp.body : { result: resp.body }), {
       status: resp.status,
@@ -521,6 +538,60 @@ describe("bookkeeping.get_snapshot", () => {
     expect(returnTypeSearchRead?.body.fields).not.toContain("deadline_start_date");
     expect(returnTypeSearchRead?.body.fields).not.toContain("deadline_end_type");
   });
+
+  test("key_accounts scope discloses when open-lines search_read hits its limit", async () => {
+    const openLines = Array.from({ length: 50 }, (_, i) => ({
+      id: 600 + i,
+      account_id: [500, "Key Account"],
+      date: "2026-03-01",
+      name: `Line ${i}`,
+      amount_residual: 1,
+      move_id: [700, "MV1"],
+      partner_id: [800, "Partner"]
+    }));
+    const { fetchMock } = buildFetchMock({
+      "account.move.line.search_read": { status: 200, body: openLines }
+    });
+    globalThis.fetch = fetchMock;
+    const handler = buildHandler(makeQueue(), new TtlCache());
+
+    const result = await handler({
+      company: "Acme Corp",
+      date_from: "2026-01-01",
+      date_to: "2026-03-31",
+      scopes: ["key_accounts"],
+      key_account_codes: ["4000"]
+    });
+
+    expect(result.isError).toBeUndefined();
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.warnings.some((w: string) => /open lines.*limit of 50/.test(w))).toBe(true);
+  });
+
+  test("tax_report scope discloses when account.report search_read hits its limit", async () => {
+    const reports = Array.from({ length: 50 }, (_, i) => ({
+      id: 100 + i,
+      name: `Report ${i}`,
+      country_id: [10, "United States"],
+      root_report_id: false
+    }));
+    const { fetchMock } = buildFetchMock({
+      "account.report.search_read": { status: 200, body: reports }
+    });
+    globalThis.fetch = fetchMock;
+    const handler = buildHandler(makeQueue(), new TtlCache());
+
+    const result = await handler({
+      company: "Acme Corp",
+      date_from: "2026-01-01",
+      date_to: "2026-03-31",
+      scopes: ["tax_report"]
+    });
+
+    expect(result.isError).toBeUndefined();
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.warnings.some((w: string) => /account\.report search_read returned the limit of 50/.test(w))).toBe(true);
+  });
 });
 
 describe("computeSeverity / isSuspenseAccount", () => {
@@ -558,7 +629,7 @@ describe("bookkeeping.review_key_accounts", () => {
     globalThis.fetch = originalFetch;
   });
 
-  const SUSPENSE_ACCOUNT_OVERRIDE: Record<string, CannedResponse> = {
+  const SUSPENSE_ACCOUNT_OVERRIDE: Record<string, CannedResolver> = {
     "account.account.search_read": {
       status: 200,
       body: [{ id: 500, code: "471000", name: "Suspense", account_type: "asset_current", reconcile: true, company_id: [1, "Acme Corp"] }]
@@ -584,6 +655,12 @@ describe("bookkeeping.review_key_accounts", () => {
     }
   };
 
+  function isCountReadGroup(body: any): boolean {
+    // formatted_read_group uses `aggregates`; legacy read_group uses `fields`.
+    const specs = body?.aggregates ?? body?.fields;
+    return Array.isArray(specs) && specs.length === 1 && specs[0] === "__count";
+  }
+
   test("unknown code produces a warning while found accounts are still returned", async () => {
     const { fetchMock } = buildFetchMock(SUSPENSE_ACCOUNT_OVERRIDE);
     globalThis.fetch = fetchMock;
@@ -598,7 +675,10 @@ describe("bookkeeping.review_key_accounts", () => {
     const account = parsed.accounts[0];
     expect(account.code).toBe("471000");
     expect(account.balance).toBe(1000);
-    expect(account.open_item_count).toBe(1);
+    // Authoritative count from read_group __count (5), not the sample length (1).
+    expect(account.open_item_count).toBe(5);
+    expect(account.top_lines.length).toBe(1);
+    expect(account.top_lines_truncated).toBe(true);
     // Suspense + non-zero balance => attention.
     expect(account.severity).toBe("attention");
     // top_lines are normalized objects (many2one -> {id,name}) and include the residual.
@@ -620,6 +700,12 @@ describe("bookkeeping.review_key_accounts", () => {
     }));
     const { fetchMock } = buildFetchMock({
       ...SUSPENSE_ACCOUNT_OVERRIDE,
+      "account.move.line.read_group": (body: any) => {
+        if (isCountReadGroup(body)) {
+          return { status: 200, body: [{ account_id: [500, "Suspense"], __count: 12 }] };
+        }
+        return { status: 200, body: [{ account_id: [500, "Suspense"], balance: 1000, __count: 5 }] };
+      },
       "account.move.line.search_read": { status: 200, body: manyLines }
     });
     globalThis.fetch = fetchMock;
@@ -633,6 +719,7 @@ describe("bookkeeping.review_key_accounts", () => {
     expect(account.top_lines.length).toBeLessThanOrEqual(10);
     expect(account.top_lines.length).toBe(10);
     expect(account.open_item_count).toBe(12);
+    expect(account.top_lines_truncated).toBe(true);
     expect(account.top_lines.every((l: any) => l.account_id.id === 500)).toBe(true);
   });
 
@@ -653,7 +740,8 @@ describe("bookkeeping.review_key_accounts", () => {
       "account.move.line.read_group": {
         status: 500,
         body: { error: { message: "read_group failed: Access Denied" } }
-      }
+      },
+      "account.move.line.search_count": { status: 200, body: 1 }
     });
     globalThis.fetch = fetchMock;
     const handler = buildReviewHandler(makeQueue(), new TtlCache());
@@ -693,6 +781,7 @@ describe("bookkeeping.review_key_accounts", () => {
     expect(account.credit).toBe(0);
     expect(account.open_item_count).toBe(0);
     expect(account.severity).toBe("ok");
+    expect(account.top_lines_truncated).toBe(false);
   });
 
   test("issues a bounded number of live Odoo calls once fields_get is cached", async () => {
@@ -711,9 +800,9 @@ describe("bookkeeping.review_key_accounts", () => {
 
     expect(result.isError).toBeUndefined();
     const parsed = JSON.parse(result.content[0].text);
-    // res.company search_read + account.account search_read + move.line read_group + move.line search_read.
-    expect(parsed.metadata.odoo_calls).toBe(4);
-    expect(delta.odoo_calls).toBe(4);
+    // res.company + account.account + balances read_group + counts read_group + open-lines search_read.
+    expect(parsed.metadata.odoo_calls).toBe(5);
+    expect(delta.odoo_calls).toBe(5);
     // No fields_get on the warm call.
     expect(delta.calls.some((c) => c.method === "fields_get")).toBe(false);
     expect(calls.length).toBeGreaterThan(0);
@@ -728,7 +817,7 @@ describe("bookkeeping.review_key_accounts", () => {
     }
   });
 
-  const ODOO19_BALANCE_FIELDS: Record<string, CannedResponse> = {
+  const ODOO19_BALANCE_FIELDS: Record<string, CannedResolver> = {
     "account.move.line.fields_get": {
       status: 200,
       body: {
@@ -748,25 +837,30 @@ describe("bookkeeping.review_key_accounts", () => {
     }
   };
 
-  const ODOO19_READ_GROUP_MISSING: Record<string, CannedResponse> = {
+  const ODOO19_READ_GROUP_MISSING: Record<string, CannedResolver> = {
     "account.move.line.read_group": {
       status: 404,
       body: { error: { message: "The method 'account.move.line.read_group' does not exist" } }
     }
   };
 
-  const ODOO19_FORMATTED_BALANCE: Record<string, CannedResponse> = {
-    "account.move.line.formatted_read_group": {
-      status: 200,
-      body: [
-        {
-          account_id: [500, "Suspense"],
-          "balance:sum": 1000,
-          "debit:sum": 1200,
-          "credit:sum": 200,
-          __count: 5
-        }
-      ]
+  const ODOO19_FORMATTED_BALANCE: Record<string, CannedResolver> = {
+    "account.move.line.formatted_read_group": (body: any) => {
+      if (isCountReadGroup(body)) {
+        return { status: 200, body: [{ account_id: [500, "Suspense"], __count: 5 }] };
+      }
+      return {
+        status: 200,
+        body: [
+          {
+            account_id: [500, "Suspense"],
+            "balance:sum": 1000,
+            "debit:sum": 1200,
+            "credit:sum": 200,
+            __count: 5
+          }
+        ]
+      };
     }
   };
 
@@ -791,10 +885,11 @@ describe("bookkeeping.review_key_accounts", () => {
     expect(account.credit).toBe(200);
 
     const formattedCalls = calls.filter((c) => c.model === "account.move.line" && c.method === "formatted_read_group");
-    expect(formattedCalls.length).toBe(1);
-    expect(formattedCalls[0].body.aggregates).toEqual(["balance:sum", "debit:sum", "credit:sum"]);
-    expect(formattedCalls[0].body.fields).toBeUndefined();
-    expect(formattedCalls[0].body.lazy).toBeUndefined();
+    expect(formattedCalls.length).toBe(2);
+    const balanceCall = formattedCalls.find((c) => !isCountReadGroup(c.body));
+    expect(balanceCall?.body.aggregates).toEqual(["balance:sum", "debit:sum", "credit:sum"]);
+    expect(balanceCall?.body.fields).toBeUndefined();
+    expect(balanceCall?.body.lazy).toBeUndefined();
     expect(calls.some((c) => c.model === "account.move.line" && c.method === "read_group")).toBe(false);
   });
 
@@ -816,7 +911,7 @@ describe("bookkeeping.review_key_accounts", () => {
 
     const formattedCalls = calls.filter((c) => c.method === "formatted_read_group");
     const readGroupCalls = calls.filter((c) => c.method === "read_group");
-    expect(formattedCalls.length).toBe(1);
+    expect(formattedCalls.length).toBe(2); // balances + counts
     expect(readGroupCalls.length).toBe(0);
   });
 
@@ -827,7 +922,8 @@ describe("bookkeeping.review_key_accounts", () => {
       "account.move.line.formatted_read_group": {
         status: 404,
         body: { error: { message: "The method 'account.move.line.formatted_read_group' does not exist" } }
-      }
+      },
+      "account.move.line.search_count": { status: 200, body: 0 }
     });
     globalThis.fetch = fetchMock;
     const handler = buildReviewHandler(makeQueue(), new TtlCache());
@@ -843,6 +939,417 @@ describe("bookkeeping.review_key_accounts", () => {
     expect(account.credit).toBeNull();
     expect(account.severity).toBe("unknown");
   });
+
+  test("regression: sample of 1 does not under-count open_item_count of 25", async () => {
+    const { fetchMock } = buildFetchMock({
+      "account.account.search_read": {
+        status: 200,
+        body: [
+          { id: 500, code: "401000", name: "Payable A", account_type: "liability_payable", reconcile: true, company_id: [1, "Acme Corp"] },
+          { id: 501, code: "401001", name: "Payable B", account_type: "liability_payable", reconcile: true, company_id: [1, "Acme Corp"] }
+        ]
+      },
+      "account.move.line.read_group": (body: any) => {
+        if (isCountReadGroup(body)) {
+          return {
+            status: 200,
+            body: [
+              { account_id: [500, "Payable A"], __count: 25 },
+              { account_id: [501, "Payable B"], __count: 3 }
+            ]
+          };
+        }
+        return {
+          status: 200,
+          body: [
+            { account_id: [500, "Payable A"], balance: 100, __count: 25 },
+            { account_id: [501, "Payable B"], balance: 50, __count: 3 }
+          ]
+        };
+      },
+      "account.move.line.search_read": {
+        status: 200,
+        body: [
+          {
+            id: 600,
+            account_id: [500, "Payable A"],
+            date: "2026-03-01",
+            name: "Only sample line",
+            amount_residual: 10,
+            move_id: [700, "MV1"],
+            partner_id: [800, "Partner"],
+            journal_id: [10, "Misc"]
+          }
+        ]
+      }
+    });
+    globalThis.fetch = fetchMock;
+    const handler = buildReviewHandler(makeQueue(), new TtlCache());
+
+    const result = await handler({ company: "Acme Corp", date_to: "2026-03-31", account_codes: ["401000", "401001"] });
+
+    expect(result.isError).toBeUndefined();
+    const parsed = JSON.parse(result.content[0].text);
+    const byId = Object.fromEntries(parsed.accounts.map((a: any) => [a.id, a]));
+    expect(byId[500].open_item_count).toBe(25);
+    expect(byId[501].open_item_count).toBe(3);
+    expect(byId[500].top_lines.length).toBe(1);
+    expect(byId[500].top_lines_truncated).toBe(true);
+  });
+
+  test("global sample limit never appears as open_item_count", async () => {
+    const { fetchMock, calls } = buildFetchMock({
+      "account.account.search_read": {
+        status: 200,
+        body: [
+          { id: 500, code: "401000", name: "Payable A", account_type: "liability_payable", reconcile: true, company_id: [1, "Acme Corp"] },
+          { id: 501, code: "401001", name: "Payable B", account_type: "liability_payable", reconcile: true, company_id: [1, "Acme Corp"] }
+        ]
+      },
+      "account.move.line.read_group": (body: any) => {
+        if (isCountReadGroup(body)) {
+          return {
+            status: 200,
+            body: [
+              { account_id: [500, "Payable A"], __count: 25 },
+              { account_id: [501, "Payable B"], __count: 3 }
+            ]
+          };
+        }
+        return {
+          status: 200,
+          body: [
+            { account_id: [500, "Payable A"], balance: 100, __count: 25 },
+            { account_id: [501, "Payable B"], balance: 50, __count: 3 }
+          ]
+        };
+      },
+      "account.move.line.search_read": {
+        status: 200,
+        body: [
+          {
+            id: 600,
+            account_id: [500, "Payable A"],
+            date: "2026-03-01",
+            name: "Only sample line",
+            amount_residual: 10,
+            move_id: [700, "MV1"],
+            partner_id: [800, "Partner"],
+            journal_id: [10, "Misc"]
+          }
+        ]
+      }
+    });
+    globalThis.fetch = fetchMock;
+    const handler = buildReviewHandler(makeQueue(), new TtlCache());
+
+    const result = await handler({ company: "Acme Corp", date_to: "2026-03-31", account_codes: ["401000", "401001"] });
+    const parsed = JSON.parse(result.content[0].text);
+    const sampleCall = calls.find(
+      (c) => c.model === "account.move.line" && c.method === "search_read" && Array.isArray(c.body.domain?.[0]?.[2])
+    );
+    expect(sampleCall?.body.limit).toBeDefined();
+    const sampleLimit = sampleCall!.body.limit as number;
+    for (const account of parsed.accounts) {
+      expect(account.open_item_count).not.toBe(sampleLimit);
+      expect(account.open_item_count).not.toBe(1);
+    }
+    expect(parsed.accounts.find((a: any) => a.id === 500).open_item_count).toBe(25);
+  });
+
+  test("starvation backfill issues a per-account search_read for missing samples", async () => {
+    const { fetchMock, calls } = buildFetchMock({
+      "account.account.search_read": {
+        status: 200,
+        body: [
+          { id: 500, code: "401000", name: "Payable A", account_type: "liability_payable", reconcile: true, company_id: [1, "Acme Corp"] },
+          { id: 501, code: "401001", name: "Payable B", account_type: "liability_payable", reconcile: true, company_id: [1, "Acme Corp"] }
+        ]
+      },
+      "account.move.line.read_group": (body: any) => {
+        if (isCountReadGroup(body)) {
+          return {
+            status: 200,
+            body: [
+              { account_id: [500, "Payable A"], __count: 25 },
+              { account_id: [501, "Payable B"], __count: 3 }
+            ]
+          };
+        }
+        return {
+          status: 200,
+          body: [
+            { account_id: [500, "Payable A"], balance: 100, __count: 25 },
+            { account_id: [501, "Payable B"], balance: 50, __count: 3 }
+          ]
+        };
+      },
+      "account.move.line.search_read": (body: any) => {
+        const accountLeaf = body.domain?.find((d: any) => Array.isArray(d) && d[0] === "account_id");
+        if (accountLeaf?.[1] === "=" && accountLeaf?.[2] === 501) {
+          return {
+            status: 200,
+            body: [
+              {
+                id: 701,
+                account_id: [501, "Payable B"],
+                date: "2025-01-01",
+                name: "Backfilled older payable",
+                amount_residual: 30,
+                move_id: [801, "MV501"],
+                partner_id: [901, "Vendor"],
+                journal_id: [10, "Misc"]
+              }
+            ]
+          };
+        }
+        return {
+          status: 200,
+          body: [
+            {
+              id: 600,
+              account_id: [500, "Payable A"],
+              date: "2026-03-01",
+              name: "Newest wins without backfill",
+              amount_residual: 10,
+              move_id: [700, "MV1"],
+              partner_id: [800, "Partner"],
+              journal_id: [10, "Misc"]
+            }
+          ]
+        };
+      }
+    });
+    globalThis.fetch = fetchMock;
+    const handler = buildReviewHandler(makeQueue(), new TtlCache());
+
+    const result = await handler({ company: "Acme Corp", date_to: "2026-03-31", account_codes: ["401000", "401001"] });
+    const parsed = JSON.parse(result.content[0].text);
+    const acct501 = parsed.accounts.find((a: any) => a.id === 501);
+    expect(acct501.open_item_count).toBe(3);
+    expect(acct501.top_lines.length).toBe(1);
+    expect(acct501.top_lines[0].name).toBe("Backfilled older payable");
+
+    const backfill = calls.find(
+      (c) =>
+        c.model === "account.move.line" &&
+        c.method === "search_read" &&
+        c.body.domain?.some((d: any) => Array.isArray(d) && d[0] === "account_id" && d[1] === "=" && d[2] === 501)
+    );
+    expect(backfill).toBeDefined();
+    expect(backfill!.body.context).toEqual({ allowed_company_ids: [1], company_id: 1 });
+  });
+
+  test("buildOpenItemDomain / resolveOpenItemPredicate clause order and exclusivity", () => {
+    expect(resolveOpenItemPredicate({ amount_residual: { type: "monetary" }, reconciled: { type: "boolean" } } as any)).toBe(
+      "amount_residual"
+    );
+    expect(resolveOpenItemPredicate({ reconciled: { type: "boolean" } } as any)).toBe("reconciled");
+    expect(resolveOpenItemPredicate({} as any)).toBe("none");
+
+    const withResidual = buildOpenItemDomain({
+      accountIds: [500, 501],
+      dateTo: "2026-03-31",
+      companyId: 1,
+      predicate: "amount_residual"
+    });
+    expect(withResidual).toEqual([
+      ["account_id", "in", [500, 501]],
+      ["date", "<=", "2026-03-31"],
+      ["parent_state", "=", "posted"],
+      ["company_id", "=", 1],
+      ["amount_residual", "!=", 0]
+    ]);
+    expect(withResidual.some((c: any) => c[0] === "reconciled")).toBe(false);
+
+    const withReconciled = buildOpenItemDomain({
+      accountIds: 500,
+      dateTo: "2026-03-31",
+      companyId: 1,
+      predicate: "reconciled"
+    });
+    expect(withReconciled).toEqual([
+      ["account_id", "=", 500],
+      ["date", "<=", "2026-03-31"],
+      ["parent_state", "=", "posted"],
+      ["company_id", "=", 1],
+      ["reconciled", "=", false]
+    ]);
+
+    const none = buildOpenItemDomain({ accountIds: [500], dateTo: "2026-03-31", companyId: 1, predicate: "none" });
+    expect(none).toHaveLength(4);
+  });
+
+  test("diagnostics.open_item_domain deep-equals the counts call domain", async () => {
+    const { fetchMock, calls } = buildFetchMock(SUSPENSE_ACCOUNT_OVERRIDE);
+    globalThis.fetch = fetchMock;
+    const handler = buildReviewHandler(makeQueue(), new TtlCache());
+
+    const result = await handler({ company: "Acme Corp", date_to: "2026-03-31", account_codes: ["471000"] });
+    const parsed = JSON.parse(result.content[0].text);
+
+    const countCall = calls.find(
+      (c) => c.model === "account.move.line" && c.method === "read_group" && isCountReadGroup(c.body)
+    );
+    expect(countCall).toBeDefined();
+    expect(parsed.diagnostics.open_item_domain).toEqual(countCall!.body.domain);
+    expect(parsed.diagnostics.company_id).toBe(1);
+    expect(parsed.diagnostics.date_to).toBe("2026-03-31");
+    expect(parsed.diagnostics.account_ids).toEqual([500]);
+    expect(parsed.diagnostics.open_item_count_method).toBe("read_group");
+    expect(parsed.diagnostics.open_item_predicate).toBe("amount_residual");
+    expect(parsed.diagnostics.top_lines_sample_limit).toBe(10);
+    expect(parsed.accounts[0].open_item_domain).toEqual(
+      buildOpenItemDomain({ accountIds: 500, dateTo: "2026-03-31", companyId: 1, predicate: "amount_residual" })
+    );
+  });
+
+  test("severity uses the true open_item_count (not the sample size)", async () => {
+    expect(computeSeverity("445670", 0, 25)).toBe("info");
+    expect(computeSeverity("471000", 0, 25)).toBe("attention");
+
+    const { fetchMock } = buildFetchMock({
+      "account.account.search_read": {
+        status: 200,
+        body: [
+          { id: 500, code: "445670", name: "VAT credit", account_type: "asset_current", reconcile: true, company_id: [1, "Acme Corp"] },
+          { id: 501, code: "471000", name: "Suspense", account_type: "asset_current", reconcile: true, company_id: [1, "Acme Corp"] }
+        ]
+      },
+      "account.move.line.read_group": (body: any) => {
+        if (isCountReadGroup(body)) {
+          return {
+            status: 200,
+            body: [
+              { account_id: [500, "VAT credit"], __count: 25 },
+              { account_id: [501, "Suspense"], __count: 25 }
+            ]
+          };
+        }
+        return {
+          status: 200,
+          body: [
+            { account_id: [500, "VAT credit"], balance: 0, __count: 25 },
+            { account_id: [501, "Suspense"], balance: 0, __count: 25 }
+          ]
+        };
+      },
+      "account.move.line.search_read": { status: 200, body: [] }
+    });
+    globalThis.fetch = fetchMock;
+    const handler = buildReviewHandler(makeQueue(), new TtlCache());
+
+    const result = await handler({ company: "Acme Corp", date_to: "2026-03-31", account_codes: ["445670", "471000"] });
+    const parsed = JSON.parse(result.content[0].text);
+    const byCode = Object.fromEntries(parsed.accounts.map((a: any) => [a.code, a]));
+    expect(byCode["445670"].balance).toBe(0);
+    expect(byCode["445670"].open_item_count).toBe(25);
+    expect(byCode["445670"].severity).toBe("info");
+    expect(byCode["471000"].severity).toBe("attention");
+  });
+
+  test("count query failure falls back to search_count then null/unknown", async () => {
+    const { fetchMock, calls } = buildFetchMock({
+      ...SUSPENSE_ACCOUNT_OVERRIDE,
+      "account.move.line.read_group": (body: any) => {
+        if (isCountReadGroup(body)) {
+          return { status: 500, body: { error: { message: "count read_group failed" } } };
+        }
+        return { status: 200, body: [{ account_id: [500, "Suspense"], balance: 0, __count: 0 }] };
+      },
+      "account.move.line.search_count": { status: 200, body: 7 }
+    });
+    globalThis.fetch = fetchMock;
+    const handler = buildReviewHandler(makeQueue(), new TtlCache());
+
+    const okResult = await handler({ company: "Acme Corp", date_to: "2026-03-31", account_codes: ["471000"] });
+    const okParsed = JSON.parse(okResult.content[0].text);
+    expect(calls.some((c) => c.model === "account.move.line" && c.method === "search_count")).toBe(true);
+    expect(okParsed.diagnostics.open_item_count_method).toBe("search_count");
+    expect(okParsed.accounts[0].open_item_count).toBe(7);
+
+    const { fetchMock: failMock } = buildFetchMock({
+      ...SUSPENSE_ACCOUNT_OVERRIDE,
+      "account.move.line.read_group": (body: any) => {
+        if (isCountReadGroup(body)) {
+          return { status: 500, body: { error: { message: "count read_group failed" } } };
+        }
+        return { status: 200, body: [{ account_id: [500, "Suspense"], balance: 0, __count: 0 }] };
+      },
+      "account.move.line.formatted_read_group": {
+        status: 500,
+        body: { error: { message: "formatted count failed" } }
+      },
+      "account.move.line.search_count": {
+        status: 500,
+        body: { error: { message: "search_count failed" } }
+      }
+    });
+    globalThis.fetch = failMock;
+    const failResult = await handler({ company: "Acme Corp", date_to: "2026-03-31", account_codes: ["471000"] });
+    const failParsed = JSON.parse(failResult.content[0].text);
+    expect(failParsed.accounts[0].open_item_count).toBeNull();
+    expect(failParsed.accounts[0].severity).toBe("unknown");
+    expect(failParsed.accounts[0].severity).not.toBe("ok");
+    expect(failParsed.accounts[0].open_item_count).not.toBe(0);
+    expect(failParsed.warnings.some((w: string) => w.includes("account.move.line (open counts)"))).toBe(true);
+    expect(failParsed.diagnostics.open_item_count_method).toBe("unavailable");
+  });
+
+  test("Odoo 19 counts use formatted_read_group with __count and extractGroupCount keys", async () => {
+    expect(extractGroupCount({ __count: 9 }, "account_id")).toBe(9);
+    expect(extractGroupCount({ account_id_count: 4 }, "account_id")).toBe(4);
+    expect(extractGroupCount({ count: 2 }, "account_id")).toBe(2);
+    expect(extractGroupCount({ account_id: [1, "A"] }, "account_id")).toBeNull();
+
+    const { fetchMock, calls } = buildFetchMock({
+      ...SUSPENSE_ACCOUNT_OVERRIDE,
+      ...ODOO19_BALANCE_FIELDS,
+      ...ODOO19_READ_GROUP_MISSING,
+      ...ODOO19_FORMATTED_BALANCE
+    });
+    globalThis.fetch = fetchMock;
+    const handler = buildReviewHandler(makeQueue(), new TtlCache());
+
+    const result = await handler({ company: "Acme Corp", date_to: "2026-03-31", account_codes: ["471000"] });
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.accounts[0].open_item_count).toBe(5);
+    expect(parsed.diagnostics.open_item_count_method).toBe("read_group");
+
+    const countCall = calls.find(
+      (c) => c.model === "account.move.line" && c.method === "formatted_read_group" && isCountReadGroup(c.body)
+    );
+    expect(countCall).toBeDefined();
+    expect(countCall!.body.aggregates).toEqual(["__count"]);
+    expect(countCall!.body.lazy).toBeUndefined();
+    expect(countCall!.body.fields).toBeUndefined();
+    expect(countCall!.body.context).toEqual({ allowed_company_ids: [1], company_id: 1 });
+  });
+
+  test("account.account lookup at limit emits an explicit truncation warning", async () => {
+    const rows = Array.from({ length: 100 }, (_, i) => ({
+      id: 500 + i,
+      code: `4${String(i).padStart(5, "0")}`,
+      name: `Acct ${i}`,
+      account_type: "asset_current",
+      reconcile: true,
+      company_id: [1, "Acme Corp"]
+    }));
+    const { fetchMock } = buildFetchMock({
+      "account.account.search_read": { status: 200, body: rows },
+      "account.move.line.read_group": { status: 200, body: [] },
+      "account.move.line.search_read": { status: 200, body: [] }
+    });
+    globalThis.fetch = fetchMock;
+    const handler = buildReviewHandler(makeQueue(), new TtlCache());
+
+    const codes = rows.map((r) => r.code);
+    codes.push("999999"); // 101st requested code → also hits the requested-codes > 100 warning
+    const result = await handler({ company: "Acme Corp", date_to: "2026-03-31", account_codes: codes });
+    const parsed = JSON.parse(result.content[0].text);
+    expect(parsed.warnings.some((w: string) => /capped at 100/.test(w))).toBe(true);
+    expect(parsed.warnings.some((w: string) => /returned the limit of 100/.test(w))).toBe(true);
+  });
 });
 
 describe("key accounts multi-company context", () => {
@@ -855,7 +1362,7 @@ describe("key accounts multi-company context", () => {
   const OTHER_COMPANY_ID = 8;
   const EXPECTED_CONTEXT = { allowed_company_ids: [OTHER_COMPANY_ID], company_id: OTHER_COMPANY_ID };
 
-  const OTHER_COMPANY_OVERRIDE: Record<string, CannedResponse> = {
+  const OTHER_COMPANY_OVERRIDE: Record<string, CannedResolver> = {
     "res.company.search_read": {
       status: 200,
       body: [
@@ -896,6 +1403,15 @@ describe("key accounts multi-company context", () => {
           amount_residual: 120,
           move_id: [710, "MV10"],
           partner_id: [810, "Partner"]
+        },
+        {
+          id: 611,
+          account_id: [511, "Bank"],
+          date: "2026-08-01",
+          name: "Open Bank",
+          amount_residual: 50,
+          move_id: [711, "MV11"],
+          partner_id: [811, "Partner"]
         }
       ]
     }
@@ -938,12 +1454,25 @@ describe("key accounts multi-company context", () => {
         status: 404,
         body: { error: { message: "The method 'account.move.line.read_group' does not exist" } }
       },
-      "account.move.line.formatted_read_group": {
-        status: 200,
-        body: [
-          { account_id: [510, "VAT Suspense"], "balance:sum": -1200, __count: 4 },
-          { account_id: [511, "Bank"], "balance:sum": 8400, __count: 9 }
-        ]
+      "account.move.line.formatted_read_group": (body: any) => {
+        const specs = body?.aggregates ?? body?.fields;
+        const isCount = Array.isArray(specs) && specs.length === 1 && specs[0] === "__count";
+        if (isCount) {
+          return {
+            status: 200,
+            body: [
+              { account_id: [510, "VAT Suspense"], __count: 4 },
+              { account_id: [511, "Bank"], __count: 9 }
+            ]
+          };
+        }
+        return {
+          status: 200,
+          body: [
+            { account_id: [510, "VAT Suspense"], "balance:sum": -1200, __count: 4 },
+            { account_id: [511, "Bank"], "balance:sum": 8400, __count: 9 }
+          ]
+        };
       }
     });
     globalThis.fetch = fetchMock;
@@ -956,8 +1485,10 @@ describe("key accounts multi-company context", () => {
     expect(parsed.accounts.find((a: any) => a.code === "451000").balance).toBe(-1200);
 
     const formatted = calls.filter((c) => c.model === "account.move.line" && c.method === "formatted_read_group");
-    expect(formatted.length).toBe(1);
-    expect(formatted[0].body.context).toEqual(EXPECTED_CONTEXT);
+    expect(formatted.length).toBe(2);
+    for (const call of formatted) {
+      expect(call.body.context).toEqual(EXPECTED_CONTEXT);
+    }
     expectScopedContext(calls);
   });
 

@@ -385,6 +385,32 @@ per-account balance, open-item count, top open lines, and a **factual** severity
 query with no grouped rows still defaults missing accounts to `0` and runs `computeSeverity`
 (empty aggregate → `"ok"`). Do not treat `null` as zero.
 
+**Open item.** A posted (`parent_state = posted`) `account.move.line` on the requested
+account, with `date <= date_to`, `company_id = <id>`, that is still unreconciled. Exactly one
+unreconciled predicate is applied — never both:
+
+- prefer `amount_residual != 0` when that field exists in `fields_get`;
+- otherwise `reconciled = false`;
+- if neither field exists, open items are not fetched (`open_item_count: null`,
+  `severity: "unknown"`, warning).
+
+**Count vs sample.** `open_item_count` is the **total** matching lines from a count query
+(`read_group` / `__count`, with per-account `search_count` fallback) — never from
+`search_read` row length. `top_lines` is a **≤10 per-account sample** and is routinely
+shorter than the count; `top_lines_truncated` is true when the known count exceeds the
+sample. The sample limit never influences the count. When the count query is unavailable,
+`open_item_count` is `null` and `severity` is `"unknown"` — do **not** read that as zero.
+
+**Diagnostics.** The response includes a top-level `diagnostics` block with the exact
+domain used for counts (`open_item_domain`), the predicate kind, count method, company,
+`date_to`, account ids, and the global sample limit. Each account also carries its
+account-scoped `open_item_domain`. Mirror a count yourself:
+
+```json
+/* search_count on account.move.line with diagnostics.open_item_domain
+   (or the per-account open_item_domain) plus the multi-company RPC context */
+```
+
 | Field | Type | Required | Default |
 |---|---|---|---|
 | `company` | string | yes | — |
@@ -406,26 +432,54 @@ query with no grouped rows still defaults missing accounts to `0` and runs `comp
       "code": "471000", "name": "Compte d'attente", "id": 812,
       "balance": 1240.5, "debit": 1240.5, "credit": 0.0,
       "account_type": "asset_current", "reconcile": false,
-      "severity": "attention", "open_item_count": 3, "top_lines": [ /* … */ ]
+      "severity": "attention", "open_item_count": 25,
+      "top_lines_truncated": true,
+      "top_lines": [ /* ≤10 sample rows */ ],
+      "open_item_domain": [
+        ["account_id", "=", 812], ["date", "<=", "2026-09-30"],
+        ["parent_state", "=", "posted"], ["company_id", "=", 1],
+        ["amount_residual", "!=", 0]
+      ]
     }
   ],
   "warnings": [],
-  "metadata": { "odoo_calls": 4, "cache_hits": 2, "duration_seconds": 4.8 }
+  "diagnostics": {
+    "company_id": 1,
+    "date_to": "2026-09-30",
+    "open_item_predicate": "amount_residual",
+    "open_item_domain": [
+      ["account_id", "in", [812, 813]], ["date", "<=", "2026-09-30"],
+      ["parent_state", "=", "posted"], ["company_id", "=", 1],
+      ["amount_residual", "!=", 0]
+    ],
+    "open_item_count_method": "read_group",
+    "account_ids": [812, 813],
+    "top_lines_sample_limit": 20
+  },
+  "metadata": { "odoo_calls": 5, "cache_hits": 2, "duration_seconds": 4.8 }
 }
 ```
 
 > Severity is factual only: a suspense/clearing account carrying any balance or open item
-> is `attention`; a fully-empty account is `ok`; anything else is `info`; balances (or
-> open-lines needed for a clean `ok`) that could not be fetched yield `unknown`. The tool
-> never judges whether a line *should* be reconciled.
+> is `attention`; a fully-empty account is `ok`; anything else is `info`; balances or
+> open-item counts needed for a clean `ok` that could not be fetched yield `unknown`. The
+> tool never judges whether a line *should* be reconciled.
 
-**Odoo version compatibility (balance aggregation).** Move-line balances use
-`readGroupCompat` ([`src/aggregation.ts`](../src/aggregation.ts)): Odoo **19+** calls
-`formatted_read_group` (aggregates keyed as `field:agg`, no `lazy`/`fields` body keys);
-Odoo **≤18** falls back to legacy `read_group`. The resolved method is cached per database
-(same TTL as metadata). When both APIs fail, `balance` / `debit` / `credit` are `null` and
-`severity` is `"unknown"` — same semantics as a single-method failure above. A successful
-query with no grouped rows still defaults missing accounts to `0` and runs `computeSeverity`.
+**Odoo version compatibility (balance + open-item count aggregation).** Move-line balances
+and open-item counts both use `readGroupCompat`
+([`src/aggregation.ts`](../src/aggregation.ts)): Odoo **19+** calls `formatted_read_group`
+(aggregates keyed as `field:agg`, no `lazy`/`fields` body keys); Odoo **≤18** falls back to
+legacy `read_group`. The resolved method is cached per database (same TTL as metadata).
+Counts request `aggregates: ["__count"]` (legacy may surface as `account_id_count`). When
+the grouped count call fails, the tool falls back to per-account `search_count`. When both
+fail, `open_item_count` is `null` and `severity` is `"unknown"`. When both balance APIs
+fail, `balance` / `debit` / `credit` are `null` and `severity` is `"unknown"`. A successful
+balance query with no grouped rows still defaults missing accounts to `0` and runs
+`computeSeverity`.
+
+Warm-path call budget (fields_get cached): `res.company` + `account.account` + balances
+`read_group` + counts `read_group` + open-lines `search_read` = **5**, plus ≤10 sample
+backfill and ≤20 fallback-count calls in degraded paths.
 
 **Multi-company.** Every `account.account` and `account.move.line` lookup in this tool sends the
 Odoo RPC context `{"allowed_company_ids": [<company id>], "company_id": <company id>}` as a
