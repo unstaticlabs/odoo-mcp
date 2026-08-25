@@ -58,6 +58,9 @@ The server never logs, stores, or echoes your key.
 | `projects.list_chatter` | read | `task_ids` (positive int[], 1–25), `limit_per_task` (1–50, default 20), `order` (string, default `"date desc"`) — canonical multi-task PM chatter; one scoped `mail.message` query per task; caps at 8 Odoo calls |
 | `projects.create_task` | write | `name` (string), `project_id` (positive int), `description` / `stage_id` / `tag_ids` (optional), `values` (optional extra vals), `context` (optional) — Odoo 19 `vals_list` create + provenance `trace_token` |
 | `projects.attach_file` | write | `task_id` (positive int), `name` (string ≤ 255), `datas` (base64 file bytes), `mimetype` (optional, default `application/octet-stream`), `max_bytes` (default 10 MiB decoded), `context` (**required**) — creates one binary `ir.attachment` with `res_model=project.task` / `res_id=task_id`. Refuses unknown tasks, invalid base64, empty or oversize payloads, and any other `res_model`, before any create. Not generic `ir.attachment` CRUD |
+| `projects.create_activity` | write | `task_id` (positive int), `summary` (string), `note` (optional), `date_deadline` (optional `YYYY-MM-DD`), `user_id` (positive int), `activity_type_id` (positive int), `context` (optional) — creates one `mail.activity` with `res_model=project.task` / `res_id=task_id` set internally; the caller never names a model |
+| `projects.post_note` | write | `task_id` (positive int), `note` (string), `body_is_html` (bool, default `false`), `context` (optional) — one `message_post` on the `project.task` chatter; plain text is HTML-escaped for you |
+| `projects.update_task` | write | `task_id` (positive int) plus at least one of `name`, `description`, `date_deadline` (`null` clears), `stage_id`, `priority` (`"0"`/`"1"`), `context` (optional) — curated `project.task` `write`; no free-form `values` dict, and an empty update is refused before any Odoo call |
 | [`aggregate_records`](#aggregate_records--grouped-summaries) | read | `model` (string), `domain` (array), `groupby` (string[], Odoo `field:agg` syntax e.g. `invoice_date:month`), `aggregates` (string[], e.g. `amount_total:sum`, `__count`), `lazy` (bool, default true), `orderby` (string, optional), `limit` (1–100, default 100, fallback scan cap), `offset` (int ≥ 0, default 0) — native `read_group` with bounded connector fallback |
 | `create_record` | write | `model` (string), `values` (object), `context` (string ≤ 500, optional — see [Write context](#write-context-audit-only)) |
 | `update_record` | write | `model` (string), `record_id` (positive int), `values` (object; x2many use Odoo command tuples, e.g. `[[6,0,ids]]`, `[[4,id]]`, `[[3,id]]`), `context` (optional) |
@@ -200,11 +203,19 @@ and identify the record by name plus `model,id` — do not invent a route.
 
 ### Project-management writes vs bookkeeping vs billing
 
-- **PM task notes and history → the chatter.** Use `post_message` / `batch_post_message`
-  (or `projects.create_task` to lodge a new card). `update_record` / `batch_update` /
-  `call_model_method` are for changing the task's *own* fields (stage, assignee, dates,
-  tags) — not for recording what happened. Activities go via `create_record` /
-  `call_model_method` on `mail.activity` with `res_model` ∈ `{project.task, project.project}`.
+- **PM activities, notes and task-field edits → the `projects.*` write tools.** A chatter note
+  goes to `projects.post_note`, an assigned follow-up to `projects.create_activity`, a change to
+  the task's *own* fields (title, description, deadline, stage, priority) to
+  `projects.update_task`; lodge a new card with `projects.create_task`. Each one hardcodes its
+  Odoo model, method and field set — there is no caller-supplied `model` and no free-form `values`
+  dict — so the prose you pass is stored **verbatim**, and operational banking / B2C export /
+  VAT / payroll / deadline wording is project-management text, **not** an accounting mutation.
+- **Accounting work → `bookkeeping.plan_safe_write` only.** Tax close, reports, returns and
+  lock-date exceptions never route through the `projects.*` tools, whatever the task is called.
+- **Generic `create_record` / `post_message` / `update_record` / `batch_update` remain** for models
+  the `projects.*` surface does not cover — e.g. `project.project` itself, project tags/stages, or a
+  `mail.activity` on `res_model` = `project.project`. Do not reach for them for ordinary PM notes:
+  they carry a caller-supplied `model`, which is exactly what the fixed-intent tools remove.
 - **Files on a task → `projects.attach_file`.** Agent-generated evidence (audit workbooks,
   exports, reports) is attached with `projects.attach_file` (`task_id` + base64 `datas` +
   required `context`). Generic `create_record` on `ir.attachment` is **denied** — that

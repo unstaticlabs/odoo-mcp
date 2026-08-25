@@ -704,3 +704,263 @@ export function registerProjectsTools(
     }
   );
 }
+
+/**
+ * Fixed-intent PM writes: no caller-supplied model, so MCP hosts need not risk-classify the prose.
+ * Mirrors PM_WRITE_ROUTING_NOTE in src/tools/write.ts, but states the structural guarantee these
+ * three tools have and the generic write tools cannot: model, method and field set are hardcoded here.
+ */
+const PM_SAFE_WRITE_NOTE =
+  " This is a PM-safe project-management write: the Odoo model, method and field set are fixed by the tool, " +
+  "so operational prose (banking files, B2C exports, VAT/payroll deadlines) is stored verbatim and is NOT an " +
+  "accounting mutation. Accounting work — tax close, reports, returns, lock exceptions — goes to " +
+  "bookkeeping.plan_safe_write only; never route it here and never use generic create_record / post_message / " +
+  "update_record for project-management notes.";
+
+/**
+ * Fixed-intent project-management writes (`projects.create_activity` / `post_note` / `update_task`).
+ *
+ * Registered separately from `registerProjectsTools` because these need no cache: each tool targets one
+ * hardcoded (model, method) pair with a curated field set, so there is nothing to look up and nothing a
+ * caller can retarget. That is the whole safety argument — see PM_SAFE_WRITE_NOTE.
+ */
+export function registerProjectWriteTools(
+  server: McpServer,
+  getProps: () => Props | undefined,
+  queue: OdooQueue
+) {
+  server.registerTool(
+    "projects.create_activity",
+    {
+      title: "Create Task Activity",
+      description:
+        "Write: schedule one mail.activity (to-do / follow-up) on an existing project.task. " +
+        "`res_model` and `res_id` are set by the tool from `task_id` — the caller never names a model, so this " +
+        "cannot create an activity on an accounting or external-party record. " +
+        "Use it to assign follow-up work to a person with a deadline; for a plain chatter comment use " +
+        "projects.post_note, and to change the task's own fields use projects.update_task." +
+        PM_SAFE_WRITE_NOTE,
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+      inputSchema: {
+        task_id: z.number().int().positive().describe("project.task id the activity is attached to"),
+        summary: z.string().min(1).describe("Activity title, stored verbatim"),
+        note: z.string().optional().describe("Activity body, stored verbatim (plain text is HTML-escaped)"),
+        date_deadline: z.string().optional().describe("Due date, `YYYY-MM-DD`"),
+        user_id: z.number().int().positive().describe("res.users id of the assignee"),
+        activity_type_id: z.number().int().positive().describe("mail.activity.type id (To Do, Call, Meeting, …)"),
+        context: zWriteContext
+      },
+      outputSchema: {
+        id: z.number().int().describe("Database id of the created mail.activity"),
+        web_url: z
+          .string()
+          .optional()
+          .describe("Canonical clickable Odoo URL of the task carrying the activity — surface it as [task name](web_url)")
+      }
+    },
+    async ({ task_id, summary, note, date_deadline, user_id, activity_type_id, context }) => {
+      logWriteContext("projects.create_activity", "mail.activity", context);
+
+      // res_model / res_id come from task_id, never from the caller — the tool's core invariant.
+      const vals: Record<string, unknown> = {
+        res_model: "project.task",
+        res_id: task_id,
+        activity_type_id,
+        user_id,
+        summary,
+        // `note` is an Html field: escape (never scan) so the prose survives byte-identical.
+        ...(note != null ? { note: plaintextToHtml(note) } : {}),
+        ...(date_deadline != null ? { date_deadline } : {})
+      };
+
+      const blocked = assessWriteOperation({
+        model: "mail.activity",
+        method: "create",
+        args: { vals_list: [vals] }
+      });
+      if (!blocked.allowed) {
+        return mcpWriteBlockedError({ model: "mail.activity", method: "create" }, blocked);
+      }
+
+      // No preflightProjectTaskStateWrite here: that gate reads project.task vals (`state`), and this
+      // create never touches the task record.
+      try {
+        const conn = requireConnection(getProps());
+        const ids = (await queue.enqueue(conn, "mail.activity", "create", { vals_list: [vals] })) as number[];
+        const id = Array.isArray(ids) ? ids[0] : (ids as unknown as number);
+        if (!Number.isInteger(id) || id <= 0) {
+          return mcpError("Odoo create returned no activity id");
+        }
+        // Link the task, not the activity: an activity has no standalone record route.
+        const webUrl = buildRecordUrl(conn.url, "project.task", task_id, {});
+        return mcpStructured(
+          { id, ...(webUrl ? { web_url: webUrl } : {}) },
+          webUrl ? `${JSON.stringify(id)}\n\nOdoo task: ${webUrl}` : JSON.stringify(id, null, 2)
+        );
+      } catch (err) {
+        return mcpErrorFromException(err, { model: "mail.activity", method: "create" });
+      }
+    }
+  );
+
+  server.registerTool(
+    "projects.post_note",
+    {
+      title: "Post Task Note",
+      description:
+        "Write: post one chatter note (comment) on an existing project.task. The model and method are fixed — " +
+        "`project.task` / `message_post` — so the caller supplies only the task id and the text. " +
+        "This is the correct destination for follow-up notes, decisions, justifications and action history: " +
+        "chatter entries are append-only and timestamped, unlike the task's Description field, which a write " +
+        "overwrites without history (use projects.update_task only for durable task data)." +
+        PM_SAFE_WRITE_NOTE,
+      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+      inputSchema: {
+        task_id: z.number().int().positive().describe("project.task id to post the note on"),
+        note: z.string().min(1).describe("Note body, stored verbatim"),
+        body_is_html: z
+          .boolean()
+          .default(false)
+          .describe("True when `note` is already HTML; plain text is escaped for you"),
+        context: zWriteContext
+      },
+      outputSchema: {
+        result: z
+          .unknown()
+          .describe("Raw message_post return value (shape varies by Odoo version; typically the created mail.message id)"),
+        web_url: z
+          .string()
+          .optional()
+          .describe("Canonical clickable Odoo URL of the task — surface it as [task name](web_url)")
+      }
+    },
+    async ({ task_id, note, body_is_html, context }) => {
+      logWriteContext("projects.post_note", "project.task", context);
+
+      const body = body_is_html ? note : plaintextToHtml(note);
+
+      const blocked = assessWriteOperation({
+        model: "project.task",
+        method: "message_post",
+        args: { ids: [task_id], body }
+      });
+      if (!blocked.allowed) {
+        return mcpWriteBlockedError({ model: "project.task", method: "message_post" }, blocked);
+      }
+
+      try {
+        const conn = requireConnection(getProps());
+        const result = await queue.enqueue(conn, "project.task", "message_post", {
+          ids: [task_id],
+          body,
+          // Body is HTML either way (caller-supplied, or escaped above) — declare it so Odoo
+          // does not double-escape. Same contract as post_message in write.ts.
+          body_is_html: true,
+          message_type: "comment"
+        });
+        const webUrl = buildRecordUrl(conn.url, "project.task", task_id, {});
+        return mcpStructured(
+          { result, ...(webUrl ? { web_url: webUrl } : {}) },
+          webUrl ? `${JSON.stringify(result)}\n\nOdoo task: ${webUrl}` : JSON.stringify(result, null, 2)
+        );
+      } catch (err) {
+        return mcpErrorFromException(err, {
+          model: "project.task",
+          method: "message_post",
+          record_ids: [task_id]
+        });
+      }
+    }
+  );
+
+  server.registerTool(
+    "projects.update_task",
+    {
+      title: "Update Project Task",
+      description:
+        "Write: update a curated set of fields on one existing project.task — name, description, date_deadline, " +
+        "stage_id, priority. No `model` and no free-form `values` dict: anything outside that set is simply not " +
+        "expressible, and an update supplying none of them is refused before any Odoo call. " +
+        "`description` REPLACES the previous text and is not versioned — for follow-up notes and history use " +
+        "projects.post_note; for assigned follow-up work use projects.create_activity. " +
+        "To defer/park a task set `stage_id` to the board's On Hold column; Waiting " +
+        "(`state=04_waiting_normal`) is Odoo-derived from open Blocked By and is not writable here at all." +
+        PM_SAFE_WRITE_NOTE,
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+      inputSchema: {
+        task_id: z.number().int().positive().describe("project.task id to update"),
+        name: z.string().min(1).optional().describe("New task title, stored verbatim"),
+        description: z
+          .string()
+          .optional()
+          .describe("New description (HTML or plain text), stored verbatim — REPLACES the current value"),
+        date_deadline: z
+          .string()
+          .nullable()
+          .optional()
+          .describe("Deadline `YYYY-MM-DD`; pass null to clear it"),
+        stage_id: z.number().int().positive().optional().describe("project.task.type stage id"),
+        priority: z.enum(["0", "1"]).optional().describe("Odoo selection: \"0\" normal, \"1\" starred"),
+        context: zWriteContext
+      },
+      outputSchema: {
+        ok: z.boolean().describe("True when the write succeeded"),
+        web_url: z
+          .string()
+          .optional()
+          .describe("Canonical clickable Odoo URL of the updated task — surface it as [task name](web_url)")
+      }
+    },
+    async ({ task_id, name, description, date_deadline, stage_id, priority, context }) => {
+      logWriteContext("projects.update_task", "project.task", context);
+
+      // Only keys the caller actually sent: `date_deadline: null` clears, an absent key is untouched.
+      const vals: Record<string, unknown> = {
+        ...(name !== undefined ? { name } : {}),
+        ...(description !== undefined ? { description } : {}),
+        ...(date_deadline !== undefined ? { date_deadline } : {}),
+        ...(stage_id !== undefined ? { stage_id } : {}),
+        ...(priority !== undefined ? { priority } : {})
+      };
+      if (Object.keys(vals).length === 0) {
+        return mcpError(
+          "projects.update_task requires at least one of name, description, date_deadline, stage_id, priority"
+        );
+      }
+
+      const blocked = assessWriteOperation({
+        model: "project.task",
+        method: "write",
+        args: { ids: [task_id], vals }
+      });
+      if (!blocked.allowed) {
+        return mcpWriteBlockedError({ model: "project.task", method: "write" }, blocked);
+      }
+
+      // A no-op today (`state` is outside the curated field set, so this costs zero Odoo calls), kept
+      // for parity with projects.create_task so growing the field set cannot bypass the state gate.
+      const statePreflight = await preflightProjectTaskStateWrite({
+        method: "write",
+        ids: [task_id],
+        args: { ids: [task_id], vals },
+        queue,
+        getProps
+      });
+      if (!statePreflight.ok) return statePreflight.response;
+
+      try {
+        const conn = requireConnection(getProps());
+        await queue.enqueue(conn, "project.task", "write", { ids: [task_id], vals });
+        // `vals` carries only the written fields, so a task whose project_id was not touched
+        // degrades to the all-tasks route rather than a wrong project breadcrumb.
+        const webUrl = buildRecordUrl(conn.url, "project.task", task_id, vals);
+        return mcpStructured(
+          { ok: true, ...(webUrl ? { web_url: webUrl } : {}) },
+          webUrl ? `${JSON.stringify(true)}\n\nOdoo task: ${webUrl}` : JSON.stringify(true, null, 2)
+        );
+      } catch (err) {
+        return mcpErrorFromException(err, { model: "project.task", method: "write", record_ids: [task_id] });
+      }
+    }
+  );
+}
