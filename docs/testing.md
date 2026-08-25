@@ -31,6 +31,15 @@ three headers above. Then **List Tools** — confirm `projects.list_projects`, `
 appear, not solely `feedback.submit`. Try `projects.list_tasks` with
 `domain: [["project_id","=",4]]`, or `projects.create_task` with `name` + `project_id: 4`.
 
+For the Documents-only surface, use `http://localhost:8787/documents/mcp` with
+the same per-user headers. **List Tools** must return exactly the nine
+`documents.*` tools. Exercise `documents.search` in hybrid mode, then use one
+authorized result with `documents.get`, a small `documents.get_content` page,
+`documents.find_similar`, `documents.get_versions`, and `documents.get_links`.
+Verify excerpts are bounded, versions contain no checksum, and every returned
+document/link has an Odoo URL. Repeat with a restricted Odoo key: Odoo—not the
+Worker—must reduce or deny the result set.
+
 ### b) Claude Code
 
 ```bash

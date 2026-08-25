@@ -14,6 +14,7 @@ import {
   registerSafeWritePlannerTools,
   registerSourceDocumentTools
 } from "./tools/bookkeeping";
+import { registerDocumentsTools } from "./tools/documents";
 import { registerProjectsTools, registerProjectWriteTools } from "./tools/projects";
 import { registerReadTools } from "./tools/read";
 import { registerResourceTemplates } from "./tools/resources";
@@ -23,6 +24,7 @@ export interface Env {
   McpAgent: DurableObjectNamespace<McpAgent>;
   AccountingAgent: DurableObjectNamespace<AccountingAgent>;
   ProjectsAgent: DurableObjectNamespace<ProjectsAgent>;
+  DocumentsAgent: DurableObjectNamespace<DocumentsAgent>;
   /** Token/grant storage for the ChatGPT OAuth shim (workers-oauth-provider). */
   OAUTH_KV: KVNamespace;
   /** Injected by OAuthProvider into handlers it invokes; absent on the raw header path. */
@@ -61,6 +63,7 @@ export class McpAgent extends OdooAgentBase {
     const getProps = () => this.props;
     registerProjectsTools(this.server, getProps, this.odooQueue, this.cache);
     registerProjectWriteTools(this.server, getProps, this.odooQueue);
+    registerDocumentsTools(this.server, getProps, this.odooQueue);
     registerReadTools(this.server, getProps, this.odooQueue, this.cache);
     registerResourceTemplates(this.server, getProps, this.odooQueue);
     registerWriteTools(this.server, getProps, this.odooQueue, () => this.env.CONFIRMATION_SECRET);
@@ -110,5 +113,15 @@ export class ProjectsAgent extends OdooAgentBase {
     registerProjectsTools(this.server, getProps, this.odooQueue, this.cache);
     registerProjectWriteTools(this.server, getProps, this.odooQueue);
     registerFeedbackTools(this.server, getProps, this.odooQueue, this.cache);
+  }
+}
+
+/** Documents-only surface at /documents/mcp — explicit read-only facade methods only. */
+export class DocumentsAgent extends OdooAgentBase {
+  server = new McpServer({ name: "odoo-mcp-documents", version: SERVER_VERSION });
+
+  async init() {
+    const getProps = () => this.props;
+    registerDocumentsTools(this.server, getProps, this.odooQueue);
   }
 }

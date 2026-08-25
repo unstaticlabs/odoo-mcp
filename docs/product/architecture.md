@@ -116,9 +116,9 @@ The limiter's job is spacing and single-flight, not fairness across users; if tw
 users share one Odoo instance they share its ~1 req/s budget, which matches
 Odoo's own per-instance limit.
 
-## Endpoints: one Worker, three tool surfaces
+## Endpoints: one Worker, four tool surfaces
 
-The Worker serves three sibling MCP endpoints, each backed by its own
+The Worker serves four sibling MCP endpoints, each backed by its own
 `McpAgent` subclass (and Durable Object binding) registering a subset of the
 shared tool modules:
 
@@ -127,6 +127,8 @@ shared tool modules:
 - **`/accounting/mcp`** — `AccountingAgent`: bookkeeping + billing + safe-write
   planner + feedback. No raw CRUD.
 - **`/projects/mcp`** — `ProjectsAgent`: projects + feedback. No raw CRUD.
+- **`/documents/mcp`** — `DocumentsAgent`: only explicit read-only
+  `usl.document.mcp_*` facade calls. No raw CRUD and no Paperless credential.
 
 The domain endpoints exist for clients with small tool budgets (ChatGPT):
 fewer tools means a tighter decision space and less context spent on
@@ -159,6 +161,10 @@ Tools are grouped by **domain module**, registered on the `McpAgent`:
   one binary `ir.attachment` scoped to an existing `project.task` — the only sanctioned path
   for attachment bytes, since generic `ir.attachment` CRUD stays PM-denied). Further writes
   (`update_task`, `move_task`) follow the same pattern.
+- **`documents.*`** — permission-scoped search, bounded OCR paging, similarity,
+  version/catalog/link reads. The Worker calls Odoo only; Odoo derives the
+  authorized root/candidate set and Paperless performs local retrieval behind
+  that boundary. Guessed and inaccessible document IDs share one denial.
 - **`booking.*`** — later. Read bookings first, then create.
 - **`billing.*`** — later. Read invoices first, then create invoice / link
   records.

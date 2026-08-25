@@ -1,11 +1,11 @@
 import OAuthProvider from "@cloudflare/workers-oauth-provider";
-import { AccountingAgent, McpAgent, ProjectsAgent, type Env, type Props } from "./server";
+import { AccountingAgent, DocumentsAgent, McpAgent, ProjectsAgent, type Env, type Props } from "./server";
 import { oauthDefaultHandler } from "./oauth";
 
 // Entry-module exports are restricted to handlers and Durable Object classes:
 // the Workers runtime rejects anything else ("Incorrect type for map entry").
 // Test-support re-exports live in ./test-exports instead.
-export { McpAgent, AccountingAgent, ProjectsAgent };
+export { McpAgent, AccountingAgent, ProjectsAgent, DocumentsAgent };
 
 const ACCESS_TOKEN_TTL_SECONDS = 60 * 60; // 1 hour
 // The provider sets a grant's expiry once at authorization and never extends it
@@ -25,7 +25,8 @@ const CLIENT_REGISTRATION_TTL_SECONDS = 2 * 365 * 24 * 60 * 60; // 2 years
 const MCP_ENDPOINTS = [
   { path: "/mcp", serve: () => McpAgent.serve("/mcp", { binding: "McpAgent" }) },
   { path: "/accounting/mcp", serve: () => AccountingAgent.serve("/accounting/mcp", { binding: "AccountingAgent" }) },
-  { path: "/projects/mcp", serve: () => ProjectsAgent.serve("/projects/mcp", { binding: "ProjectsAgent" }) }
+  { path: "/projects/mcp", serve: () => ProjectsAgent.serve("/projects/mcp", { binding: "ProjectsAgent" }) },
+  { path: "/documents/mcp", serve: () => DocumentsAgent.serve("/documents/mcp", { binding: "DocumentsAgent" }) }
 ] as const;
 
 function matchMcpEndpoint(pathname: string): (typeof MCP_ENDPOINTS)[number] | undefined {

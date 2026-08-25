@@ -47,7 +47,8 @@ const {
   matchUnsupportedAggregate,
   McpAgent,
   AccountingAgent,
-  ProjectsAgent
+  ProjectsAgent,
+  DocumentsAgent
 } = await import("./test-exports");
 
 const originalFetch = globalThis.fetch;
@@ -546,7 +547,7 @@ describe("default fetch handler", () => {
     expect(json.props.odooApiKey).toBe("my-secret-token-abc123");
   });
 
-  test.each(["/accounting/mcp", "/projects/mcp"])(
+  test.each(["/accounting/mcp", "/projects/mcp", "/documents/mcp"])(
     "header path routes %s with correctly threaded props",
     async (path: string) => {
       const res = await handler.fetch(makeRequest(validHeaders, path), {} as any, {} as any);
@@ -558,7 +559,7 @@ describe("default fetch handler", () => {
     }
   );
 
-  test.each(["/mcp", "/accounting/mcp", "/projects/mcp"])("GET %s returns 405 (no push stream)", async (path: string) => {
+  test.each(["/mcp", "/accounting/mcp", "/projects/mcp", "/documents/mcp"])("GET %s returns 405 (no push stream)", async (path: string) => {
     const res = await handler.fetch(new Request(`http://worker.example.com${path}`, { method: "GET" }), {} as any, {} as any);
     expect(res.status).toBe(405);
     expect(res.headers.get("Allow")).toBe("POST, DELETE");
@@ -614,6 +615,42 @@ describe("endpoint tool surfaces", () => {
     expect(names.has("create_record")).toBe(false);
     expect(names.has("inventory.create_draft_vendor_receipt")).toBe(false);
     expect(names.has("billing.copy_or_relink_source_attachment")).toBe(false);
+    expect(names.has("documents.search")).toBe(false);
+  });
+
+  test("documents endpoint registers only the explicit read-only Documents facade", async () => {
+    const names = await toolNames(DocumentsAgent);
+
+    expect(names).toEqual(
+      new Set([
+        "documents.search",
+        "documents.get",
+        "documents.get_content",
+        "documents.find_similar",
+        "documents.get_versions",
+        "documents.list_tags",
+        "documents.list_correspondents",
+        "documents.list_types",
+        "documents.get_links"
+      ])
+    );
+    expect(names.has("search_records")).toBe(false);
+    expect(names.has("call_model_method")).toBe(false);
+    expect(names.has("bookkeeping.get_snapshot")).toBe(false);
+    expect(names.has("projects.list_tasks")).toBe(false);
+  });
+
+  test("Documents tools ship on /mcp and /documents/mcp only", async () => {
+    const generic = await toolNames(McpAgent);
+    const documents = await toolNames(DocumentsAgent);
+    const accounting = await toolNames(AccountingAgent);
+    const projects = await toolNames(ProjectsAgent);
+
+    for (const name of documents) {
+      expect(generic.has(name), `${name} on /mcp`).toBe(true);
+      expect(accounting.has(name), `${name} on /accounting/mcp`).toBe(false);
+      expect(projects.has(name), `${name} on /projects/mcp`).toBe(false);
+    }
   });
 
   test("the ODOO2298 evidence tools ship on /mcp and /accounting/mcp but never on /projects/mcp", async () => {
@@ -704,8 +741,9 @@ describe("endpoint tool surfaces", () => {
     const generic = await toolNames(McpAgent);
     const accounting = await toolNames(AccountingAgent);
     const projects = await toolNames(ProjectsAgent);
+    const documents = await toolNames(DocumentsAgent);
 
-    for (const name of [...accounting, ...projects]) {
+    for (const name of [...accounting, ...projects, ...documents]) {
       expect(generic.has(name)).toBe(true);
     }
   });
