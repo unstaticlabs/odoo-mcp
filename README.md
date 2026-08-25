@@ -96,6 +96,10 @@ The server never logs, stores, or echoes your key.
 | `bookkeeping.link_source_document` | write | `document_id` (positive int), `target_model` (enum `account.move`\|`project.task`), `target_id` (positive int), `context` (**required**) — links an existing Documents file to a business record via `res_model`/`res_id`; never copies bytes or creates `ir.attachment`; hard-fails when the Documents app is absent |
 | `feedback.submit` | write | `title` (5–120 chars), `message` (20–4000 chars; concrete details, no secrets), `category` (`bug` \| `documentation_gap` \| `missing_feature` \| `dx_friction`), `tool_name` (string, optional) — files an `[agent-feedback]` card in the maintainers' tracker; see [Agent feedback](#agent-feedback) |
 
+The Documents authorization boundary, content-minimization rule, qualified
+release evidence, capacity assumptions, and Worker-only rollback procedure are
+documented in [docs/product/documents.md](docs/product/documents.md).
+
 **`aggregate_records` validation.** Before calling Odoo `read_group`, the server validates `groupby` and
 `aggregates` against cached `fields_get` metadata:
 
