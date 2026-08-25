@@ -3,7 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { TtlCache } from "../cache";
 import { OdooError } from "../odoo";
 import type { OdooQueue } from "../odoo-queue";
-import { registerProjectsTools } from "./projects";
+import { registerProjectsTools, registerProjectWriteTools } from "./projects";
 import { validatedToolHandler } from "./structured-test-util";
 
 const props = {
@@ -683,5 +683,375 @@ describe("projects.attach_file", () => {
     expect(result.isError).toBeUndefined();
     expect(result.structuredContent).not.toHaveProperty("confirmation_token");
     expect(result.structuredContent).not.toHaveProperty("confirmation_required");
+  });
+});
+
+/**
+ * Fixed-intent PM writes (projects.create_activity / post_note / update_task).
+ *
+ * Deliberately no import of the bookkeeping module anywhere in this file: these tools must reach
+ * Odoo directly, and the "no bookkeeping.* code path" claim is only credible if the module is
+ * never linked in. Every assertion below therefore checks the enqueued (model, method, args).
+ */
+function buildProjectWriteServer(queue: OdooQueue) {
+  const server = new McpServer({ name: "test", version: "0.0.0" });
+  registerProjectWriteTools(server, () => props, queue);
+  const handler = (name: string) => validatedToolHandler(server, name) as (args: unknown) => Promise<ToolResult>;
+  return { server, handler };
+}
+
+type WriteCall = { model: string; method: string; args: Record<string, unknown> };
+
+/** Queue that records every enqueued call and answers create/message_post/write plausibly. */
+function recordingQueue(calls: WriteCall[], responder?: (call: WriteCall) => unknown): OdooQueue {
+  return dispatchQueue((model, method, args) => {
+    const call = { model, method, args };
+    calls.push(call);
+    if (responder) return responder(call);
+    if (method === "create") return [901];
+    if (method === "message_post") return 4242;
+    return true;
+  });
+}
+
+/** Verbatim fixture prose from safety.pm.test.ts — the finance-keyword regression corpus. */
+const PROSE_DESCRIPTION =
+  "Follow up with Valentin on banking file reconciliation and the B2C export deadline before month-end close.";
+const PROSE_NOTE = "Confirm B2C bank export cutoff and payroll handoff timeline with Valentin.";
+const PROSE_NAME = "VAT deadline — banking export prep";
+
+describe("projects.* write registration", () => {
+  test("registers exactly the three fixed-intent PM write tools", () => {
+    const bare = new McpServer({ name: "test", version: "0.0.0" });
+    const baseNames = Object.keys((bare as unknown as { _registeredTools: Record<string, unknown> })._registeredTools);
+    const { server } = buildProjectWriteServer(dispatchQueue(() => []));
+    const names = Object.keys((server as unknown as { _registeredTools: Record<string, unknown> })._registeredTools);
+
+    expect(new Set(names.filter((n) => !baseNames.includes(n)))).toEqual(
+      new Set(["projects.create_activity", "projects.post_note", "projects.update_task"])
+    );
+  });
+
+  test("each write tool carries the PM-safe metadata invariants", () => {
+    const { server } = buildProjectWriteServer(dispatchQueue(() => []));
+    const tools = (server as unknown as {
+      _registeredTools: Record<
+        string,
+        {
+          title: string;
+          description: string;
+          outputSchema?: unknown;
+          inputSchema?: Record<string, unknown>;
+          annotations: { readOnlyHint: boolean; openWorldHint: boolean };
+        }
+      >;
+    })._registeredTools;
+
+    for (const name of ["projects.create_activity", "projects.post_note", "projects.update_task"]) {
+      const tool = tools[name];
+      expect(tool, `missing ${name}`).toBeDefined();
+      expect(tool.annotations.readOnlyHint, name).toBe(false);
+      expect(tool.annotations.openWorldHint, name).toBe(false);
+      expect(tool.title, name).toBeTruthy();
+      expect(tool.outputSchema, name).toBeDefined();
+      expect(tool.description.startsWith("Write:"), name).toBe(true);
+      expect(tool.description, name).toContain("bookkeeping.plan_safe_write");
+      // No caller-supplied model: that is the structural safety property of these tools.
+      expect(Object.keys(tool.inputSchema ?? {}), name).not.toContain("model");
+    }
+  });
+});
+
+describe("projects.create_activity", () => {
+  test("creates one mail.activity with res_model/res_id set by the tool", async () => {
+    const calls: WriteCall[] = [];
+    const { handler } = buildProjectWriteServer(recordingQueue(calls, () => [77]));
+
+    const result = await handler("projects.create_activity")({
+      task_id: 42,
+      summary: "CEO follow-up",
+      note: "Ring Valentin",
+      date_deadline: "2026-07-15",
+      user_id: 7,
+      activity_type_id: 4
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(result.structuredContent).toEqual({ id: 77, web_url: "http://example.com/odoo/all-tasks/42" });
+    expect(calls).toEqual([
+      {
+        model: "mail.activity",
+        method: "create",
+        args: {
+          vals_list: [
+            {
+              res_model: "project.task",
+              res_id: 42,
+              activity_type_id: 4,
+              user_id: 7,
+              summary: "CEO follow-up",
+              note: "Ring Valentin",
+              date_deadline: "2026-07-15"
+            }
+          ]
+        }
+      }
+    ]);
+    // The caller never supplied res_model; the tool did.
+    const vals = (calls[0].args.vals_list as Record<string, unknown>[])[0];
+    expect(vals.res_model).toBe("project.task");
+  });
+
+  test("omits note and date_deadline when the caller does not supply them", async () => {
+    const calls: WriteCall[] = [];
+    const { handler } = buildProjectWriteServer(recordingQueue(calls, () => [78]));
+
+    await handler("projects.create_activity")({ task_id: 42, summary: "Ping", user_id: 7, activity_type_id: 4 });
+
+    const vals = (calls[0].args.vals_list as Record<string, unknown>[])[0];
+    expect(Object.keys(vals).sort()).toEqual(["activity_type_id", "res_id", "res_model", "summary", "user_id"]);
+  });
+
+  test("a create returning no usable id is an error, not a fake success", async () => {
+    const { handler } = buildProjectWriteServer(dispatchQueue(() => []));
+
+    const result = await handler("projects.create_activity")({
+      task_id: 42,
+      summary: "Ping",
+      user_id: 7,
+      activity_type_id: 4
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("no activity id");
+  });
+
+  test("an Odoo failure returns a structured error envelope without the API key", async () => {
+    const queue = dispatchQueue(() => {
+      throw new OdooError({
+        code: "permission_denied",
+        message: "Access Denied",
+        httpStatus: 403,
+        model: "mail.activity",
+        method: "create",
+        details: "Access Denied"
+      });
+    });
+    const { handler } = buildProjectWriteServer(queue);
+
+    const result = await handler("projects.create_activity")({
+      task_id: 42,
+      summary: "Ping",
+      user_id: 7,
+      activity_type_id: 4
+    });
+
+    expect(result.isError).toBe(true);
+    const body = JSON.parse(result.content[0].text);
+    expect(body.model).toBe("mail.activity");
+    expect(body.method).toBe("create");
+    expect(result.content.map((c) => c.text).join("\n")).not.toContain(props.odooApiKey);
+  });
+});
+
+describe("projects.post_note", () => {
+  test("posts plain text as escaped HTML on project.task chatter", async () => {
+    const calls: WriteCall[] = [];
+    const { handler } = buildProjectWriteServer(recordingQueue(calls));
+
+    const result = await handler("projects.post_note")({ task_id: 42, note: "Line 1\nR&D <ok>" });
+
+    expect(result.isError).toBeUndefined();
+    expect(result.structuredContent).toEqual({ result: 4242, web_url: "http://example.com/odoo/all-tasks/42" });
+    expect(calls).toEqual([
+      {
+        model: "project.task",
+        method: "message_post",
+        args: {
+          ids: [42],
+          body: "Line 1<br>R&amp;D &lt;ok&gt;",
+          body_is_html: true,
+          message_type: "comment"
+        }
+      }
+    ]);
+  });
+
+  test("body_is_html passes the body through unescaped, still declaring body_is_html on the wire", async () => {
+    const calls: WriteCall[] = [];
+    const { handler } = buildProjectWriteServer(recordingQueue(calls));
+
+    await handler("projects.post_note")({ task_id: 42, note: "<p>Already <b>HTML</b></p>", body_is_html: true });
+
+    expect(calls[0].args.body).toBe("<p>Already <b>HTML</b></p>");
+    expect(calls[0].args.body_is_html).toBe(true);
+  });
+
+  test("an Odoo failure returns a structured error envelope naming the task", async () => {
+    const queue = dispatchQueue(() => {
+      throw new OdooError({
+        code: "permission_denied",
+        message: "Access Denied",
+        httpStatus: 403,
+        model: "project.task",
+        method: "message_post",
+        details: "Access Denied"
+      });
+    });
+    const { handler } = buildProjectWriteServer(queue);
+
+    const result = await handler("projects.post_note")({ task_id: 42, note: "hi" });
+
+    expect(result.isError).toBe(true);
+    const body = JSON.parse(result.content[0].text);
+    expect(body.model).toBe("project.task");
+    expect(body.method).toBe("message_post");
+    expect(body.record_ids).toEqual([42]);
+  });
+});
+
+describe("projects.update_task", () => {
+  test("writes only the curated fields the caller supplied", async () => {
+    const calls: WriteCall[] = [];
+    const { handler } = buildProjectWriteServer(recordingQueue(calls));
+
+    const result = await handler("projects.update_task")({
+      task_id: 42,
+      name: "Renamed",
+      description: "New body",
+      date_deadline: "2026-09-30",
+      stage_id: 5,
+      priority: "1"
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(result.structuredContent).toEqual({ ok: true, web_url: "http://example.com/odoo/all-tasks/42" });
+    expect(calls).toEqual([
+      {
+        model: "project.task",
+        method: "write",
+        args: {
+          ids: [42],
+          vals: {
+            name: "Renamed",
+            description: "New body",
+            date_deadline: "2026-09-30",
+            stage_id: 5,
+            priority: "1"
+          }
+        }
+      }
+    ]);
+  });
+
+  test("only supplied keys reach vals", async () => {
+    const calls: WriteCall[] = [];
+    const { handler } = buildProjectWriteServer(recordingQueue(calls));
+
+    await handler("projects.update_task")({ task_id: 42, stage_id: 5 });
+
+    expect(calls[0].args.vals).toEqual({ stage_id: 5 });
+  });
+
+  test("an explicit null date_deadline is forwarded as null (clears the deadline)", async () => {
+    const calls: WriteCall[] = [];
+    const { handler } = buildProjectWriteServer(recordingQueue(calls));
+
+    await handler("projects.update_task")({ task_id: 42, date_deadline: null });
+
+    expect(calls[0].args.vals).toEqual({ date_deadline: null });
+  });
+
+  test("an empty update is refused before any Odoo call", async () => {
+    const calls: WriteCall[] = [];
+    const { handler } = buildProjectWriteServer(recordingQueue(calls));
+
+    const result = await handler("projects.update_task")({ task_id: 42 });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain(
+      "projects.update_task requires at least one of name, description, date_deadline, stage_id, priority"
+    );
+    expect(calls).toEqual([]);
+  });
+
+  test("an Odoo failure returns a structured error envelope naming the task", async () => {
+    const queue = dispatchQueue(() => {
+      throw new OdooError({
+        code: "permission_denied",
+        message: "Access Denied",
+        httpStatus: 403,
+        model: "project.task",
+        method: "write",
+        details: "Access Denied"
+      });
+    });
+    const { handler } = buildProjectWriteServer(queue);
+
+    const result = await handler("projects.update_task")({ task_id: 42, name: "X" });
+
+    expect(result.isError).toBe(true);
+    const body = JSON.parse(result.content[0].text);
+    expect(body.model).toBe("project.task");
+    expect(body.method).toBe("write");
+    expect(body.record_ids).toEqual([42]);
+  });
+});
+
+describe("projects.* PM writes — finance-keyword prose is stored verbatim", () => {
+  test("all three tools accept banking / B2C / VAT / payroll / deadline prose and hit only PM models", async () => {
+    const calls: WriteCall[] = [];
+    const { handler } = buildProjectWriteServer(recordingQueue(calls, (call) => (call.method === "create" ? [77] : 1)));
+
+    const activity = await handler("projects.create_activity")({
+      task_id: 42,
+      summary: PROSE_NAME,
+      note: PROSE_NOTE,
+      user_id: 7,
+      activity_type_id: 4
+    });
+    const note = await handler("projects.post_note")({ task_id: 42, note: PROSE_DESCRIPTION });
+    const update = await handler("projects.update_task")({
+      task_id: 42,
+      name: PROSE_NAME,
+      description: PROSE_DESCRIPTION
+    });
+
+    for (const result of [activity, note, update]) {
+      expect(result.isError).toBeUndefined();
+    }
+
+    // Prose survives byte-identical, modulo plaintextToHtml escaping (none of this text needs escaping).
+    const activityVals = (calls[0].args.vals_list as Record<string, unknown>[])[0];
+    expect(activityVals.summary).toBe(PROSE_NAME);
+    expect(activityVals.note).toBe(PROSE_NOTE);
+    expect(calls[1].args.body).toBe(PROSE_DESCRIPTION);
+    expect(calls[2].args.vals).toEqual({ name: PROSE_NAME, description: PROSE_DESCRIPTION });
+
+    // No bookkeeping code path: every Odoo call landed on a PM model.
+    expect(calls.map((c) => `${c.model}.${c.method}`)).toEqual([
+      "mail.activity.create",
+      "project.task.message_post",
+      "project.task.write"
+    ]);
+    for (const call of calls) {
+      expect(["project.task", "mail.activity"]).toContain(call.model);
+    }
+  });
+
+  test("the same prose in a note is escaped, not rewritten or stripped", async () => {
+    const calls: WriteCall[] = [];
+    const { handler } = buildProjectWriteServer(recordingQueue(calls, () => [77]));
+
+    await handler("projects.create_activity")({
+      task_id: 42,
+      summary: "Month-end close",
+      note: `${PROSE_NOTE}\nVAT & B2C <cutoff>`,
+      user_id: 7,
+      activity_type_id: 4
+    });
+
+    const vals = (calls[0].args.vals_list as Record<string, unknown>[])[0];
+    expect(vals.note).toBe(`${PROSE_NOTE}<br>VAT &amp; B2C &lt;cutoff&gt;`);
   });
 });

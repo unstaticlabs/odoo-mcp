@@ -14,7 +14,7 @@ import {
   registerSafeWritePlannerTools,
   registerSourceDocumentTools
 } from "./tools/bookkeeping";
-import { registerProjectsTools } from "./tools/projects";
+import { registerProjectsTools, registerProjectWriteTools } from "./tools/projects";
 import { registerReadTools } from "./tools/read";
 import { registerResourceTemplates } from "./tools/resources";
 import { registerWriteTools } from "./tools/write";
@@ -40,7 +40,7 @@ export interface Props extends Record<string, unknown> {
 
 // Bump this on every future tool-surface change: it's the cache-busting key clients use to
 // refetch the tool list (also stamped into feedback.submit cards to identify the surface seen).
-export const SERVER_VERSION = "0.19.0";
+export const SERVER_VERSION = "0.20.0";
 
 /**
  * Shared plumbing for every endpoint-specific agent. Subclasses differ only in
@@ -60,6 +60,7 @@ export class McpAgent extends OdooAgentBase {
   async init() {
     const getProps = () => this.props;
     registerProjectsTools(this.server, getProps, this.odooQueue, this.cache);
+    registerProjectWriteTools(this.server, getProps, this.odooQueue);
     registerReadTools(this.server, getProps, this.odooQueue, this.cache);
     registerResourceTemplates(this.server, getProps, this.odooQueue);
     registerWriteTools(this.server, getProps, this.odooQueue, () => this.env.CONFIRMATION_SECRET);
@@ -107,6 +108,7 @@ export class ProjectsAgent extends OdooAgentBase {
   async init() {
     const getProps = () => this.props;
     registerProjectsTools(this.server, getProps, this.odooQueue, this.cache);
+    registerProjectWriteTools(this.server, getProps, this.odooQueue);
     registerFeedbackTools(this.server, getProps, this.odooQueue, this.cache);
   }
 }

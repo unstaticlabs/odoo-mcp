@@ -605,6 +605,9 @@ describe("endpoint tool surfaces", () => {
     expect(names.has("projects.list_tasks")).toBe(true);
     expect(names.has("projects.create_task")).toBe(true);
     expect(names.has("projects.attach_file")).toBe(true);
+    expect(names.has("projects.create_activity")).toBe(true);
+    expect(names.has("projects.post_note")).toBe(true);
+    expect(names.has("projects.update_task")).toBe(true);
     expect(names.has("feedback.submit")).toBe(true);
     expect(names.has("bookkeeping.get_snapshot")).toBe(false);
     expect(names.has("search_records")).toBe(false);
@@ -633,6 +636,18 @@ describe("endpoint tool surfaces", () => {
     expect(generic.has("projects.attach_file")).toBe(true);
     expect(projects.has("projects.attach_file")).toBe(true);
     expect(accounting.has("projects.attach_file")).toBe(false);
+  });
+
+  test("the projects.* PM write tools ship on /mcp and /projects/mcp but never on /accounting/mcp", async () => {
+    const generic = await toolNames(McpAgent);
+    const projects = await toolNames(ProjectsAgent);
+    const accounting = await toolNames(AccountingAgent);
+
+    for (const name of ["projects.create_activity", "projects.post_note", "projects.update_task"]) {
+      expect(generic.has(name), `${name} on /mcp`).toBe(true);
+      expect(projects.has(name), `${name} on /projects/mcp`).toBe(true);
+      expect(accounting.has(name), `${name} on /accounting/mcp`).toBe(false);
+    }
   });
 
   test("search_source_documents ships on /mcp and /accounting/mcp but never on /projects/mcp", async () => {
@@ -2870,6 +2885,9 @@ describe("tool metadata (title/annotations)", () => {
       "inventory.create_draft_vendor_receipt",
       "projects.create_task",
       "projects.attach_file",
+      "projects.create_activity",
+      "projects.post_note",
+      "projects.update_task",
       "feedback.submit"
     ];
     for (const name of writeToolNames) {
@@ -2885,7 +2903,10 @@ describe("tool metadata (title/annotations)", () => {
       "projects.get_task",
       "projects.list_stages",
       "projects.create_task",
-      "projects.attach_file"
+      "projects.attach_file",
+      "projects.create_activity",
+      "projects.post_note",
+      "projects.update_task"
     ]) {
       expect(agent.server._registeredTools[name], `missing ${name}`).toBeDefined();
     }
