@@ -1267,6 +1267,10 @@ describe("bookkeeping.review_key_accounts", () => {
     expect(calls.some((c) => c.model === "account.move.line" && c.method === "search_count")).toBe(true);
     expect(okParsed.diagnostics.open_item_count_method).toBe("search_count");
     expect(okParsed.accounts[0].open_item_count).toBe(7);
+    // The fallback replays the published account-scoped domain verbatim and keeps the company context.
+    const countCall = calls.find((c) => c.model === "account.move.line" && c.method === "search_count");
+    expect(countCall!.body.domain).toEqual(okParsed.accounts[0].open_item_domain);
+    expect(countCall!.body.context).toEqual({ allowed_company_ids: [1], company_id: 1 });
 
     const { fetchMock: failMock } = buildFetchMock({
       ...SUSPENSE_ACCOUNT_OVERRIDE,

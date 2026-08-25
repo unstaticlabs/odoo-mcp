@@ -407,9 +407,20 @@ domain used for counts (`open_item_domain`), the predicate kind, count method, c
 account-scoped `open_item_domain`. Mirror a count yourself:
 
 ```json
-/* search_count on account.move.line with diagnostics.open_item_domain
-   (or the per-account open_item_domain) plus the multi-company RPC context */
+{
+  "model": "account.move.line",
+  "method": "search_count",
+  "domain": [
+    ["account_id", "=", 812], ["date", "<=", "2026-09-30"],
+    ["parent_state", "=", "posted"], ["company_id", "=", 1],
+    ["amount_residual", "!=", 0]
+  ],
+  "context": { "allowed_company_ids": [1], "company_id": 1 }
+}
 ```
+
+Paste the account's `open_item_domain` (or `diagnostics.open_item_domain` for the
+cross-account total) as `domain` — the result equals `open_item_count`.
 
 | Field | Type | Required | Default |
 |---|---|---|---|
