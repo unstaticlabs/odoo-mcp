@@ -189,6 +189,50 @@ export function computeSeverity(code: string, balance: number, openItemCount: nu
   return "info";
 }
 
+export type OpenItemPredicateKind = "amount_residual" | "reconciled" | "none";
+
+/** Exported for unit testing. Which unreconciled predicate this Odoo exposes. amount_residual wins;
+ *  reconciled=false is the fallback; never both. */
+export function resolveOpenItemPredicate(fieldsMeta: FieldsMeta): OpenItemPredicateKind {
+  if ("amount_residual" in fieldsMeta) return "amount_residual";
+  if ("reconciled" in fieldsMeta) return "reconciled";
+  return "none";
+}
+
+/** Exported for unit testing. THE effective open-item domain — used for the count, the sample and
+ *  the diagnostics block, so all three can never drift apart. */
+export function buildOpenItemDomain(args: {
+  accountIds: number[] | number;
+  dateTo: string;
+  companyId: number;
+  predicate: OpenItemPredicateKind;
+}): unknown[] {
+  const { accountIds, dateTo, companyId, predicate } = args;
+  const domain: unknown[] = [
+    Array.isArray(accountIds) ? ["account_id", "in", accountIds] : ["account_id", "=", accountIds],
+    ["date", "<=", dateTo],
+    ["parent_state", "=", "posted"],
+    ["company_id", "=", companyId]
+  ];
+  if (predicate === "amount_residual") domain.push(["amount_residual", "!=", 0]);
+  else if (predicate === "reconciled") domain.push(["reconciled", "=", false]);
+  return domain;
+}
+
+/** Exported for unit testing. read_group/formatted_read_group count key differs by Odoo version. */
+export function extractGroupCount(row: Record<string, unknown>, groupbyField: string): number | null {
+  for (const key of ["__count", `${groupbyField}_count`, "count"]) {
+    const v = row[key];
+    if (typeof v === "number" && Number.isFinite(v)) return v;
+  }
+  return null;
+}
+
+const OPEN_SAMPLE_MAX = 200;
+const OPEN_SAMPLE_BACKFILL_MAX_ACCOUNTS = 10;
+const OPEN_COUNT_FALLBACK_MAX_ACCOUNTS = 20;
+const ACCOUNT_LOOKUP_LIMIT = 100;
+
 function warnOn(model: string, err: unknown): string {
   if (err instanceof OdooError) return `${model} unavailable: ${err.details}`;
   return `${model} unavailable: ${err instanceof Error ? err.message : String(err)}`;
@@ -228,6 +272,9 @@ async function buildTaxReportScope(
       fields,
       limit: 50
     })) as Record<string, unknown>[];
+    if (rows.length === 50) {
+      warnings.push("account.report search_read returned the limit of 50 rows; additional matching reports may exist.");
+    }
     reports = withModel("account.report", normalizeRecords(rows, fieldsMeta));
     reportIds = rows.map((row) => row.id as number);
   } catch (err) {
@@ -245,6 +292,9 @@ async function buildTaxReportScope(
         fields,
         limit: 500
       })) as Record<string, unknown>[];
+      if (rows.length === 500) {
+        warnings.push("account.report.line search_read returned the limit of 500 rows; additional matching lines may exist.");
+      }
       lines = withModel("account.report.line", normalizeRecords(rows, fieldsMeta));
       lineIds = rows.map((row) => row.id as number);
     } catch (err) {
@@ -263,6 +313,11 @@ async function buildTaxReportScope(
         fields,
         limit: 1000
       })) as Record<string, unknown>[];
+      if (rows.length === 1000) {
+        warnings.push(
+          "account.report.expression search_read returned the limit of 1000 rows; additional matching expressions may exist."
+        );
+      }
       expressions = withModel("account.report.expression", normalizeRecords(rows, fieldsMeta));
       expressionIds = rows.map((row) => row.id as number);
     } catch (err) {
@@ -300,6 +355,11 @@ async function buildExternalValuesScope(
       fields,
       limit: 1000
     })) as Record<string, unknown>[];
+    if (rows.length === 1000) {
+      warnings.push(
+        "account.report.external.value search_read returned the limit of 1000 rows; additional matching values may exist."
+      );
+    }
     const values = normalizeRecords(rows, fieldsMeta).map((row) => ({
       ...row,
       in_period: isInPeriod(row.date, dateFrom, dateTo)
@@ -398,6 +458,9 @@ async function buildKeyAccountsScope(
       limit: 100,
       ...companyContextArgs(companyId)
     })) as Record<string, unknown>[];
+    if (rows.length === 100) {
+      warnings.push("account.account search_read returned the limit of 100 rows; additional matching accounts may exist.");
+    }
     accountIds = rows.map((row) => row.id as number);
   } catch (err) {
     warnings.push(warnOn("account.account", err));
@@ -454,6 +517,11 @@ async function buildKeyAccountsScope(
       limit: 50,
       ...companyContextArgs(companyId)
     })) as Record<string, unknown>[];
+    if (rows.length === 50) {
+      warnings.push(
+        "account.move.line (open lines) search_read returned the limit of 50 rows; additional open lines may exist."
+      );
+    }
     topOpenLines = groupByAccountId(normalizeRecords(rows, moveLineFieldsMeta));
   } catch (err) {
     warnings.push(warnOn("account.move.line (open lines)", err));
@@ -478,22 +546,39 @@ interface KeyAccountReview {
   credit: number | null;
   account_type: unknown;
   reconcile: unknown;
-  /** `"unknown"` when balances (or open-lines, when that would otherwise invent a clean `"ok"`) could not be fetched. */
+  /** `"unknown"` when balances (or open-item counts, when that would otherwise invent a clean `"ok"`) could not be fetched. */
   severity: "attention" | "ok" | "info" | "unknown";
-  open_item_count: number;
+  /** Total matching open lines from a count query — never the sample size. Null when the count is unavailable. */
+  open_item_count: number | null;
   top_lines: Record<string, unknown>[];
+  /** True when `open_item_count` is known and exceeds the returned `top_lines` sample. */
+  top_lines_truncated: boolean;
+  /** Account-scoped open-item domain — replay with search_count to reproduce `open_item_count`. */
+  open_item_domain: unknown[];
+}
+
+interface KeyAccountsReviewDiagnostics {
+  company_id: number;
+  date_to: string;
+  open_item_predicate: OpenItemPredicateKind;
+  open_item_domain: unknown[];
+  open_item_count_method: "read_group" | "search_count" | "unavailable";
+  account_ids: number[];
+  top_lines_sample_limit: number;
 }
 
 interface KeyAccountsReviewResult {
   accounts: KeyAccountReview[];
   warnings: string[];
+  diagnostics: KeyAccountsReviewDiagnostics;
 }
 
 /**
  * Sibling of buildKeyAccountsScope reshaped into the review output: one object per
- * requested account with balance, open-item count, top open lines, and a factual severity.
- * Keeps live Odoo calls to ~3 (account lookup + balances read_group + open-lines search_read)
- * on top of cache-backed fields_get.
+ * requested account with balance, authoritative open-item count, top open lines, and a
+ * factual severity. Warm-path live Odoo calls: company + account lookup + balances
+ * read_group + counts read_group + open-lines search_read (plus ≤10 backfill /
+ * ≤20 fallback-count calls in degraded paths).
  */
 async function buildKeyAccountsReview(
   cache: TtlCache,
@@ -513,6 +598,12 @@ async function buildKeyAccountsReview(
   else if (companyField === "company_ids") domain.push([companyField, "in", [companyId]]);
   else warnings.push("account.account: no company_id/company_ids field found; results not filtered by company.");
 
+  if (accountCodes.length > ACCOUNT_LOOKUP_LIMIT) {
+    warnings.push(
+      `account.account lookup requested ${accountCodes.length} codes but is capped at ${ACCOUNT_LOOKUP_LIMIT}; results may be incomplete.`
+    );
+  }
+
   const accountFields = pickExistingFields(
     [...ACCOUNT_ACCOUNT_REVIEW_FIELD_CANDIDATES, ...(companyField ? [companyField] : [])],
     accountFieldsMeta
@@ -520,19 +611,44 @@ async function buildKeyAccountsReview(
   const accountRows = (await queue.enqueue(conn, "account.account", "search_read", {
     domain,
     fields: accountFields,
-    limit: 100,
+    limit: ACCOUNT_LOOKUP_LIMIT,
     ...companyContextArgs(companyId)
   })) as Record<string, unknown>[];
+
+  if (accountRows.length === ACCOUNT_LOOKUP_LIMIT) {
+    warnings.push(
+      `account.account search_read returned the limit of ${ACCOUNT_LOOKUP_LIMIT} rows; additional matching accounts may exist.`
+    );
+  }
 
   const foundCodes = new Set(accountRows.map((row) => row.code as string));
   for (const code of accountCodes) {
     if (!foundCodes.has(code)) warnings.push(`No account.account record found for code: ${code}`);
   }
 
-  if (accountRows.length === 0) return { accounts: [], warnings };
+  const emptyDiagnostics = (accountIds: number[], predicate: OpenItemPredicateKind, sampleLimit: number): KeyAccountsReviewDiagnostics => ({
+    company_id: companyId,
+    date_to: dateTo,
+    open_item_predicate: predicate,
+    open_item_domain: buildOpenItemDomain({ accountIds, dateTo, companyId, predicate }),
+    open_item_count_method: "unavailable",
+    account_ids: accountIds,
+    top_lines_sample_limit: sampleLimit
+  });
+
+  if (accountRows.length === 0) {
+    return {
+      accounts: [],
+      warnings,
+      diagnostics: emptyDiagnostics([], resolveOpenItemPredicate({}), 0)
+    };
+  }
 
   const accountIds = accountRows.map((row) => row.id as number);
   const moveLineFieldsMeta = await getFieldsCached(cache, queue, conn, "account.move.line");
+  const predicate = resolveOpenItemPredicate(moveLineFieldsMeta);
+  const sharedOpenDomain = buildOpenItemDomain({ accountIds, dateTo, companyId, predicate });
+  const sampleLimit = Math.min(10 * accountIds.length, OPEN_SAMPLE_MAX);
 
   // Call 2: balances grouped by account (balance:sum when present, else debit/credit fallback).
   // Distinguishes query failure from a true empty aggregate so we never invent 0 + "ok".
@@ -570,31 +686,86 @@ async function buildKeyAccountsReview(
     warnings.push(warnOn("account.move.line (balances)", err));
   }
 
-  // Call 3: unreconciled open lines. Prefer amount_residual != 0; fall back to reconciled = false.
+  // Call 3: authoritative open-item counts (grouped read_group / __count; search_count fallback).
+  const countByAccount: Record<string, number | null> = {};
+  let countMethod: KeyAccountsReviewDiagnostics["open_item_count_method"] = "unavailable";
+  let openCountsQueryFailed = false;
+
+  if (predicate === "none") {
+    warnings.push("account.move.line: no amount_residual/reconciled field found; open lines not fetched.");
+    for (const id of accountIds) countByAccount[String(id)] = null;
+  } else {
+    let usedGroupedCounts = false;
+    try {
+      const countRows = await readGroupCompat(queue, conn, cache, "account.move.line", {
+        domain: sharedOpenDomain,
+        groupby: ["account_id"],
+        aggregates: ["__count"],
+        lazy: true,
+        context: companyRpcContext(companyId)
+      });
+      let unrecognizable = false;
+      const extracted: Record<string, number> = {};
+      for (const row of countRows) {
+        const count = extractGroupCount(row, "account_id");
+        if (count === null) {
+          unrecognizable = true;
+          break;
+        }
+        const acc = row.account_id;
+        if (!Array.isArray(acc) || typeof acc[0] !== "number") continue;
+        extracted[String(acc[0])] = count;
+      }
+      if (countRows.length >= 1 && unrecognizable) {
+        throw new Error("open-item read_group rows missing a recognizable count key");
+      }
+      countMethod = "read_group";
+      for (const id of accountIds) countByAccount[String(id)] = extracted[String(id)] ?? 0;
+    } catch (groupErr) {
+      countMethod = "search_count";
+      const toQuery = accountIds.slice(0, OPEN_COUNT_FALLBACK_MAX_ACCOUNTS);
+      if (accountIds.length > OPEN_COUNT_FALLBACK_MAX_ACCOUNTS) {
+        warnings.push(
+          `open-item search_count fallback capped at ${OPEN_COUNT_FALLBACK_MAX_ACCOUNTS} accounts; ${
+            accountIds.length - OPEN_COUNT_FALLBACK_MAX_ACCOUNTS
+          } skipped`
+        );
+      }
+      for (const id of accountIds) countByAccount[String(id)] = null;
+      let fallbackErr: unknown = null;
+      for (const id of toQuery) {
+        try {
+          const n = (await queue.enqueue(conn, "account.move.line", "search_count", {
+            domain: buildOpenItemDomain({ accountIds: id, dateTo, companyId, predicate }),
+            ...companyContextArgs(companyId)
+          })) as number;
+          countByAccount[String(id)] = n;
+        } catch (err) {
+          fallbackErr = err;
+          openCountsQueryFailed = true;
+        }
+      }
+      if (openCountsQueryFailed) {
+        warnings.push(warnOn("account.move.line (open counts)", fallbackErr ?? groupErr));
+      }
+      if (toQuery.every((id) => countByAccount[String(id)] == null)) {
+        countMethod = "unavailable";
+      }
+    }
+  }
+
+  // Call 4: bounded open-line sample (never feeds open_item_count). Deterministic account_id order
+  // plus per-account backfill avoids cross-account starvation under the global sample cap.
   let openLinesQueryFailed = false;
   let openByAccount: Record<string, unknown[]> = {};
-  const openPredicate: unknown | null =
-    "amount_residual" in moveLineFieldsMeta
-      ? ["amount_residual", "!=", 0]
-      : "reconciled" in moveLineFieldsMeta
-        ? ["reconciled", "=", false]
-        : null;
-  if (!openPredicate) {
-    warnings.push("account.move.line: no amount_residual/reconciled field found; open lines not fetched.");
-  } else {
+  if (predicate !== "none") {
     try {
       const openFields = pickExistingFields(MOVE_LINE_REVIEW_FIELD_CANDIDATES, moveLineFieldsMeta);
       const openRows = (await queue.enqueue(conn, "account.move.line", "search_read", {
-        domain: [
-          ["account_id", "in", accountIds],
-          ["date", "<=", dateTo],
-          ["parent_state", "=", "posted"],
-          ["company_id", "=", companyId],
-          openPredicate
-        ],
+        domain: sharedOpenDomain,
         fields: openFields,
-        order: "date desc",
-        limit: 60,
+        order: "account_id, date desc",
+        limit: sampleLimit,
         ...companyContextArgs(companyId)
       })) as Record<string, unknown>[];
       openByAccount = groupByAccountId(normalizeRecords(openRows, moveLineFieldsMeta));
@@ -602,13 +773,46 @@ async function buildKeyAccountsReview(
       openLinesQueryFailed = true;
       warnings.push(warnOn("account.move.line (open lines)", err));
     }
+
+    const starvedIds = accountIds.filter((id) => {
+      const count = countByAccount[String(id)];
+      const sampled = openByAccount[String(id)] ?? [];
+      return sampled.length === 0 && (count === null || count > 0);
+    });
+    const toBackfill = starvedIds.slice(0, OPEN_SAMPLE_BACKFILL_MAX_ACCOUNTS);
+    if (starvedIds.length > OPEN_SAMPLE_BACKFILL_MAX_ACCOUNTS) {
+      warnings.push(
+        `open-line sample backfill capped at ${OPEN_SAMPLE_BACKFILL_MAX_ACCOUNTS} accounts; ${
+          starvedIds.length - OPEN_SAMPLE_BACKFILL_MAX_ACCOUNTS
+        } skipped`
+      );
+    }
+    if (toBackfill.length > 0) {
+      const openFields = pickExistingFields(MOVE_LINE_REVIEW_FIELD_CANDIDATES, moveLineFieldsMeta);
+      for (const id of toBackfill) {
+        try {
+          const rows = (await queue.enqueue(conn, "account.move.line", "search_read", {
+            domain: buildOpenItemDomain({ accountIds: id, dateTo, companyId, predicate }),
+            fields: openFields,
+            order: "date desc",
+            limit: 10,
+            ...companyContextArgs(companyId)
+          })) as Record<string, unknown>[];
+          openByAccount[String(id)] = normalizeRecords(rows, moveLineFieldsMeta);
+        } catch (err) {
+          if (!openLinesQueryFailed) warnings.push(warnOn("account.move.line (open lines backfill)", err));
+        }
+      }
+    }
   }
 
   const accounts: KeyAccountReview[] = accountRows.map((row) => {
     const id = row.id as number;
     const code = row.code as string;
-    const openLines = (openByAccount[String(id)] ?? []) as Record<string, unknown>[];
-    const openItemCount = openLines.length;
+    const openLines = ((openByAccount[String(id)] ?? []) as Record<string, unknown>[]).slice(0, 10);
+    const openItemCount = countByAccount[String(id)] ?? null;
+    const accountDomain = buildOpenItemDomain({ accountIds: id, dateTo, companyId, predicate });
+    const topLinesTruncated = openItemCount != null && openItemCount > openLines.length;
 
     if (balancesQueryFailed) {
       return {
@@ -622,14 +826,21 @@ async function buildKeyAccountsReview(
         reconcile: row.reconcile ?? null,
         severity: "unknown" as const,
         open_item_count: openItemCount,
-        top_lines: openLines.slice(0, 10)
+        top_lines: openLines,
+        top_lines_truncated: topLinesTruncated,
+        open_item_domain: accountDomain
       };
     }
 
     const bal = balanceByAccount[String(id)] ?? { balance: 0, debit: 0, credit: 0 };
-    // When open-lines failed, do not invent open_item_count=0 into a clean "ok".
-    let severity: KeyAccountReview["severity"] = computeSeverity(code, bal.balance, openItemCount);
-    if (openLinesQueryFailed && severity === "ok") severity = "unknown";
+    let severity: KeyAccountReview["severity"];
+    if (openItemCount == null) {
+      severity = "unknown";
+    } else {
+      severity = computeSeverity(code, bal.balance, openItemCount);
+      // When the open-lines sample failed, do not invent a clean "ok" from counts alone.
+      if (openLinesQueryFailed && severity === "ok") severity = "unknown";
+    }
 
     return {
       code,
@@ -642,11 +853,25 @@ async function buildKeyAccountsReview(
       reconcile: row.reconcile ?? null,
       severity,
       open_item_count: openItemCount,
-      top_lines: openLines.slice(0, 10)
+      top_lines: openLines,
+      top_lines_truncated: topLinesTruncated,
+      open_item_domain: accountDomain
     };
   });
 
-  return { accounts, warnings };
+  return {
+    accounts,
+    warnings,
+    diagnostics: {
+      company_id: companyId,
+      date_to: dateTo,
+      open_item_predicate: predicate,
+      open_item_domain: sharedOpenDomain,
+      open_item_count_method: countMethod,
+      account_ids: accountIds,
+      top_lines_sample_limit: sampleLimit
+    }
+  };
 }
 
 /** Call-cost metadata shared by the bookkeeping tool envelopes (cache_misses only where reported). */
@@ -817,9 +1042,12 @@ export function registerBookkeepingTools(server: McpServer, getProps: () => Prop
       description:
         "Read-only: review key balance-sheet accounts (e.g. suspense 471000, internal transfers 580000, " +
         "compte courant d'associe 455100, VAT credit 445670) and flag closure blockers. Returns per-account " +
-        "balance, open-item count, top open lines, and a FACTUAL severity heuristic. When the balances " +
-        "read_group fails, balance/debit/credit are null and severity is 'unknown' (never invent 0 + 'ok'). " +
-        "A successful empty aggregate still yields 0 balances and computeSeverity. Unknown codes -> warnings.",
+        "balance, open_item_count (authoritative total from a count query — never the sample size), " +
+        "top_lines (≤10 open-line sample per account), top_lines_truncated, and a FACTUAL severity heuristic. " +
+        "When the balances read_group fails, balance/debit/credit are null and severity is 'unknown' " +
+        "(never invent 0 + 'ok'). When the open-item count is unavailable, open_item_count is null and " +
+        "severity is 'unknown'. A successful empty aggregate still yields 0 balances and computeSeverity. " +
+        "diagnostics.open_item_domain mirrors the exact count domain. Unknown codes -> warnings.",
       annotations: { readOnlyHint: true, openWorldHint: false },
       inputSchema: {
         company: z.string(),
@@ -845,14 +1073,46 @@ export function registerBookkeepingTools(server: McpServer, getProps: () => Prop
                 .enum(["attention", "ok", "info", "unknown"])
                 .describe(
                   "Factual heuristic: 'attention' = suspense account carrying a balance/open items (closure blocker); " +
-                    "'unknown' = balances (or open-lines needed for a clean 'ok') could not be fetched"
+                    "'unknown' = balances or open-item counts needed for a clean 'ok' could not be fetched"
                 ),
-              open_item_count: z.number().int(),
-              top_lines: zOdooRecords.describe("Up to 10 most recent open account.move.line rows")
+              open_item_count: z
+                .number()
+                .int()
+                .nullable()
+                .describe("Authoritative total of matching open lines; null when the count query failed"),
+              top_lines: zOdooRecords.describe("Up to 10 most recent open account.move.line rows (sample)"),
+              top_lines_truncated: z
+                .boolean()
+                .describe("True when open_item_count is known and exceeds top_lines.length"),
+              open_item_domain: z
+                .array(z.unknown())
+                .describe("Account-scoped open-item domain — replay with search_count to reproduce open_item_count")
             })
           )
           .describe("One entry per found account code"),
         warnings: zWarnings,
+        diagnostics: z
+          .object({
+            company_id: z.number().int(),
+            date_to: z.string(),
+            open_item_predicate: z
+              .enum(["amount_residual", "reconciled", "none"])
+              .describe(
+                "Exactly one unreconciled predicate is applied: amount_residual != 0 preferred, reconciled = false fallback"
+              ),
+            open_item_domain: z
+              .array(z.unknown())
+              .describe(
+                "The exact account.move.line domain used for open-item counts — replay it verbatim with search_count to reproduce the numbers"
+              ),
+            open_item_count_method: z.enum(["read_group", "search_count", "unavailable"]),
+            account_ids: z.array(z.number().int()),
+            top_lines_sample_limit: z
+              .number()
+              .int()
+              .describe("Global cap on the top_lines sample; it never affects open_item_count")
+          })
+          .describe("Everything needed to mirror this tool's open-item query with a direct Odoo call"),
         metadata: zCallMetadata
       }
     },
@@ -870,7 +1130,14 @@ export function registerBookkeepingTools(server: McpServer, getProps: () => Prop
         if (!companyRows || companyRows.length === 0) return mcpError(`Company not found: ${company}`);
         const companyId = companyRows[0].id as number;
 
-        const { accounts, warnings } = await buildKeyAccountsReview(cache, queue, conn, companyId, account_codes, date_to);
+        const { accounts, warnings, diagnostics } = await buildKeyAccountsReview(
+          cache,
+          queue,
+          conn,
+          companyId,
+          account_codes,
+          date_to
+        );
 
         const { odoo_calls } = queue.delta(before);
         const metadata = {
@@ -879,7 +1146,7 @@ export function registerBookkeepingTools(server: McpServer, getProps: () => Prop
           duration_seconds: (Date.now() - startedAt) / 1000
         };
 
-        return mcpStructured({ accounts, warnings, metadata });
+        return mcpStructured({ accounts, warnings, diagnostics, metadata });
       } catch (err) {
         return mcpErrorFromException(err, { model: "res.company", method: "search_read" });
       }
