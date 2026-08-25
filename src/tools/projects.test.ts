@@ -1,8 +1,9 @@
-import { describe, expect, mock, test } from "bun:test";
+import { afterEach, describe, expect, mock, test } from "bun:test";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { TtlCache } from "../cache";
 import { OdooError } from "../odoo";
 import type { OdooQueue } from "../odoo-queue";
+import { FINANCE_KEYWORD_PM_TEXT } from "../write-safety.fixtures";
 import { registerProjectsTools, registerProjectWriteTools } from "./projects";
 import { validatedToolHandler } from "./structured-test-util";
 
@@ -691,16 +692,37 @@ describe("projects.attach_file", () => {
  *
  * Deliberately no import of the bookkeeping module anywhere in this file: these tools must reach
  * Odoo directly, and the "no bookkeeping.* code path" claim is only credible if the module is
- * never linked in. Every assertion below therefore checks the enqueued (model, method, args).
+ * never linked in. Isolation is proved by recorded (model, method, args) triples + registry checks.
  */
+type WriteCall = { model: string; method: string; args: Record<string, unknown> };
+
+const PM_MODELS = new Set(["project.task", "mail.activity"]);
+const PM_METHODS = new Set(["create", "write", "message_post"]);
+/** Substrings that would indicate an accounting/bookkeeping code path. */
+const FORBIDDEN_MODEL_PREFIXES = ["account.", "hr.payslip", "res.partner.bank", "res.company"];
+
+/** Every call any write-suite queue sees this test file over, asserted in afterEach. */
+const allWriteCalls: WriteCall[] = [];
+
 function buildProjectWriteServer(queue: OdooQueue) {
   const server = new McpServer({ name: "test", version: "0.0.0" });
-  registerProjectWriteTools(server, () => props, queue);
+  // Central recorder: every enqueue lands here regardless of the per-test responder.
+  const wrapped = {
+    enqueue: async (...a: unknown[]) => {
+      allWriteCalls.push({
+        model: a[1] as string,
+        method: a[2] as string,
+        args: a[3] as Record<string, unknown>
+      });
+      return (queue.enqueue as (...args: unknown[]) => Promise<unknown>)(...a);
+    },
+    snapshot: () => queue.snapshot(),
+    delta: (s: number) => queue.delta(s)
+  } as unknown as OdooQueue;
+  registerProjectWriteTools(server, () => props, wrapped);
   const handler = (name: string) => validatedToolHandler(server, name) as (args: unknown) => Promise<ToolResult>;
   return { server, handler };
 }
-
-type WriteCall = { model: string; method: string; args: Record<string, unknown> };
 
 /** Queue that records every enqueued call and answers create/message_post/write plausibly. */
 function recordingQueue(calls: WriteCall[], responder?: (call: WriteCall) => unknown): OdooQueue {
@@ -714,11 +736,18 @@ function recordingQueue(calls: WriteCall[], responder?: (call: WriteCall) => unk
   });
 }
 
-/** Verbatim fixture prose from safety.pm.test.ts — the finance-keyword regression corpus. */
-const PROSE_DESCRIPTION =
-  "Follow up with Valentin on banking file reconciliation and the B2C export deadline before month-end close.";
-const PROSE_NOTE = "Confirm B2C bank export cutoff and payroll handoff timeline with Valentin.";
-const PROSE_NAME = "VAT deadline — banking export prep";
+afterEach(() => {
+  for (const call of allWriteCalls) {
+    expect(PM_MODELS.has(call.model), `non-PM model reached Odoo: ${call.model}`).toBe(true);
+    expect(PM_METHODS.has(call.method), `unexpected method: ${call.method}`).toBe(true);
+    for (const prefix of FORBIDDEN_MODEL_PREFIXES) {
+      expect(call.model.startsWith(prefix), `${call.model} looks like an accounting model`).toBe(false);
+    }
+    expect(call.method).not.toBe("plan_safe_write");
+    expect(JSON.stringify(call.args)).not.toContain("plan_safe_write");
+  }
+  allWriteCalls.length = 0;
+});
 
 describe("projects.* write registration", () => {
   test("registers exactly the three fixed-intent PM write tools", () => {
@@ -730,6 +759,20 @@ describe("projects.* write registration", () => {
     expect(new Set(names.filter((n) => !baseNames.includes(n)))).toEqual(
       new Set(["projects.create_activity", "projects.post_note", "projects.update_task"])
     );
+  });
+
+  test("newly registered names are projects.* only — never bookkeeping.*", () => {
+    const bare = new McpServer({ name: "test", version: "0.0.0" });
+    const baseNames = Object.keys((bare as unknown as { _registeredTools: Record<string, unknown> })._registeredTools);
+    const { server } = buildProjectWriteServer(dispatchQueue(() => []));
+    const newlyRegistered = Object.keys(
+      (server as unknown as { _registeredTools: Record<string, unknown> })._registeredTools
+    ).filter((n) => !baseNames.includes(n));
+
+    for (const name of newlyRegistered) {
+      expect(name.startsWith("bookkeeping."), name).toBe(false);
+      expect(name.startsWith("projects."), name).toBe(true);
+    }
   });
 
   test("each write tool carries the PM-safe metadata invariants", () => {
@@ -756,8 +799,11 @@ describe("projects.* write registration", () => {
       expect(tool.outputSchema, name).toBeDefined();
       expect(tool.description.startsWith("Write:"), name).toBe(true);
       expect(tool.description, name).toContain("bookkeeping.plan_safe_write");
-      // No caller-supplied model: that is the structural safety property of these tools.
-      expect(Object.keys(tool.inputSchema ?? {}), name).not.toContain("model");
+      // No caller-supplied model / free-form values: structural safety of these tools.
+      const keys = Object.keys(tool.inputSchema ?? {});
+      for (const forbidden of ["model", "values", "res_model", "method"]) {
+        expect(keys, name).not.toContain(forbidden);
+      }
     }
   });
 });
@@ -800,6 +846,40 @@ describe("projects.create_activity", () => {
     // The caller never supplied res_model; the tool did.
     const vals = (calls[0].args.vals_list as Record<string, unknown>[])[0];
     expect(vals.res_model).toBe("project.task");
+  });
+
+  test("finance-keyword prose with date_deadline fills the full vals_list shape", async () => {
+    const calls: WriteCall[] = [];
+    const { handler } = buildProjectWriteServer(recordingQueue(calls, () => [77]));
+
+    await handler("projects.create_activity")({
+      task_id: 42,
+      summary: FINANCE_KEYWORD_PM_TEXT.activitySummary,
+      note: FINANCE_KEYWORD_PM_TEXT.activityNote,
+      date_deadline: "2026-07-15",
+      user_id: 7,
+      activity_type_id: 4
+    });
+
+    expect(calls).toEqual([
+      {
+        model: "mail.activity",
+        method: "create",
+        args: {
+          vals_list: [
+            {
+              res_model: "project.task",
+              res_id: 42,
+              activity_type_id: 4,
+              user_id: 7,
+              summary: FINANCE_KEYWORD_PM_TEXT.activitySummary,
+              note: FINANCE_KEYWORD_PM_TEXT.activityNote,
+              date_deadline: "2026-07-15"
+            }
+          ]
+        }
+      }
+    ]);
   });
 
   test("omits note and date_deadline when the caller does not supply them", async () => {
@@ -887,6 +967,27 @@ describe("projects.post_note", () => {
     expect(calls[0].args.body_is_html).toBe(true);
   });
 
+  test("finance-keyword HTML note passes through with body_is_html", async () => {
+    const calls: WriteCall[] = [];
+    const { handler } = buildProjectWriteServer(recordingQueue(calls));
+    const html = `<p>${FINANCE_KEYWORD_PM_TEXT.chatterBody}</p>`;
+
+    await handler("projects.post_note")({ task_id: 42, note: html, body_is_html: true });
+
+    expect(calls).toEqual([
+      {
+        model: "project.task",
+        method: "message_post",
+        args: {
+          ids: [42],
+          body: html,
+          body_is_html: true,
+          message_type: "comment"
+        }
+      }
+    ]);
+  });
+
   test("an Odoo failure returns a structured error envelope naming the task", async () => {
     const queue = dispatchQueue(() => {
       throw new OdooError({
@@ -969,10 +1070,11 @@ describe("projects.update_task", () => {
     const result = await handler("projects.update_task")({ task_id: 42 });
 
     expect(result.isError).toBe(true);
-    expect(result.content[0].text).toContain(
+    expect(result.content[0].text).toBe(
       "projects.update_task requires at least one of name, description, date_deadline, stage_id, priority"
     );
     expect(calls).toEqual([]);
+    expect(allWriteCalls).toEqual([]);
   });
 
   test("an Odoo failure returns a structured error envelope naming the task", async () => {
@@ -998,45 +1100,96 @@ describe("projects.update_task", () => {
   });
 });
 
+describe("projects.* write context is audit-only", () => {
+  const CONTEXT = "USL Admin cleanup — banking/B2C follow-up";
+
+  test("create_activity: context never reaches the Odoo wire", async () => {
+    const without: WriteCall[] = [];
+    const withCtx: WriteCall[] = [];
+    const { handler: h1 } = buildProjectWriteServer(recordingQueue(without, () => [77]));
+    const { handler: h2 } = buildProjectWriteServer(recordingQueue(withCtx, () => [77]));
+    const args = { task_id: 42, summary: "Ping", user_id: 7, activity_type_id: 4 };
+
+    await h1("projects.create_activity")(args);
+    await h2("projects.create_activity")({ ...args, context: CONTEXT });
+
+    expect(withCtx[0].args).toEqual(without[0].args);
+    expect(JSON.stringify(withCtx[0].args)).not.toContain("context");
+  });
+
+  test("post_note: context never reaches the Odoo wire", async () => {
+    const without: WriteCall[] = [];
+    const withCtx: WriteCall[] = [];
+    const { handler: h1 } = buildProjectWriteServer(recordingQueue(without));
+    const { handler: h2 } = buildProjectWriteServer(recordingQueue(withCtx));
+    const args = { task_id: 42, note: "hi" };
+
+    await h1("projects.post_note")(args);
+    await h2("projects.post_note")({ ...args, context: CONTEXT });
+
+    expect(withCtx[0].args).toEqual(without[0].args);
+    expect(JSON.stringify(withCtx[0].args)).not.toContain("context");
+  });
+
+  test("update_task: context never reaches the Odoo wire", async () => {
+    const without: WriteCall[] = [];
+    const withCtx: WriteCall[] = [];
+    const { handler: h1 } = buildProjectWriteServer(recordingQueue(without));
+    const { handler: h2 } = buildProjectWriteServer(recordingQueue(withCtx));
+    const args = { task_id: 42, name: "Renamed" };
+
+    await h1("projects.update_task")(args);
+    await h2("projects.update_task")({ ...args, context: CONTEXT });
+
+    expect(withCtx[0].args).toEqual(without[0].args);
+    expect(JSON.stringify(withCtx[0].args)).not.toContain("context");
+  });
+});
+
 describe("projects.* PM writes — finance-keyword prose is stored verbatim", () => {
-  test("all three tools accept banking / B2C / VAT / payroll / deadline prose and hit only PM models", async () => {
+  test("all three tools accept banking / B2C / VAT / payroll / deadline prose", async () => {
     const calls: WriteCall[] = [];
     const { handler } = buildProjectWriteServer(recordingQueue(calls, (call) => (call.method === "create" ? [77] : 1)));
 
     const activity = await handler("projects.create_activity")({
       task_id: 42,
-      summary: PROSE_NAME,
-      note: PROSE_NOTE,
+      summary: FINANCE_KEYWORD_PM_TEXT.activitySummary,
+      note: FINANCE_KEYWORD_PM_TEXT.activityNote,
       user_id: 7,
       activity_type_id: 4
     });
-    const note = await handler("projects.post_note")({ task_id: 42, note: PROSE_DESCRIPTION });
+    const payrollActivity = await handler("projects.create_activity")({
+      task_id: 42,
+      summary: FINANCE_KEYWORD_PM_TEXT.activitySummary,
+      note: FINANCE_KEYWORD_PM_TEXT.payrollNote,
+      user_id: 7,
+      activity_type_id: 4
+    });
+    const note = await handler("projects.post_note")({
+      task_id: 42,
+      note: FINANCE_KEYWORD_PM_TEXT.chatterBody
+    });
     const update = await handler("projects.update_task")({
       task_id: 42,
-      name: PROSE_NAME,
-      description: PROSE_DESCRIPTION
+      name: FINANCE_KEYWORD_PM_TEXT.taskName,
+      description: FINANCE_KEYWORD_PM_TEXT.taskDescription
     });
 
-    for (const result of [activity, note, update]) {
+    for (const result of [activity, payrollActivity, note, update]) {
       expect(result.isError).toBeUndefined();
     }
 
     // Prose survives byte-identical, modulo plaintextToHtml escaping (none of this text needs escaping).
     const activityVals = (calls[0].args.vals_list as Record<string, unknown>[])[0];
-    expect(activityVals.summary).toBe(PROSE_NAME);
-    expect(activityVals.note).toBe(PROSE_NOTE);
-    expect(calls[1].args.body).toBe(PROSE_DESCRIPTION);
-    expect(calls[2].args.vals).toEqual({ name: PROSE_NAME, description: PROSE_DESCRIPTION });
-
-    // No bookkeeping code path: every Odoo call landed on a PM model.
-    expect(calls.map((c) => `${c.model}.${c.method}`)).toEqual([
-      "mail.activity.create",
-      "project.task.message_post",
-      "project.task.write"
-    ]);
-    for (const call of calls) {
-      expect(["project.task", "mail.activity"]).toContain(call.model);
-    }
+    expect(activityVals.summary).toBe(FINANCE_KEYWORD_PM_TEXT.activitySummary);
+    expect(activityVals.note).toBe(FINANCE_KEYWORD_PM_TEXT.activityNote);
+    const payrollVals = (calls[1].args.vals_list as Record<string, unknown>[])[0];
+    expect(payrollVals.note).toBe(FINANCE_KEYWORD_PM_TEXT.payrollNote);
+    expect(calls[2].args.body).toBe(FINANCE_KEYWORD_PM_TEXT.chatterBody);
+    expect(calls[3].args.vals).toEqual({
+      name: FINANCE_KEYWORD_PM_TEXT.taskName,
+      description: FINANCE_KEYWORD_PM_TEXT.taskDescription
+    });
   });
 
   test("the same prose in a note is escaped, not rewritten or stripped", async () => {
@@ -1046,12 +1199,12 @@ describe("projects.* PM writes — finance-keyword prose is stored verbatim", ()
     await handler("projects.create_activity")({
       task_id: 42,
       summary: "Month-end close",
-      note: `${PROSE_NOTE}\nVAT & B2C <cutoff>`,
+      note: `${FINANCE_KEYWORD_PM_TEXT.activityNote}\nVAT & B2C <cutoff>`,
       user_id: 7,
       activity_type_id: 4
     });
 
     const vals = (calls[0].args.vals_list as Record<string, unknown>[])[0];
-    expect(vals.note).toBe(`${PROSE_NOTE}<br>VAT &amp; B2C &lt;cutoff&gt;`);
+    expect(vals.note).toBe(`${FINANCE_KEYWORD_PM_TEXT.activityNote}<br>VAT &amp; B2C &lt;cutoff&gt;`);
   });
 });

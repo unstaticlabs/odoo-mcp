@@ -5,5 +5,9 @@ export const FINANCE_KEYWORD_PM_TEXT = {
   chatterBody:
     "USL Admin: coordinate B2C bank export with Valentin before the operational deadline.",
   activityNote: "Confirm B2C bank export cutoff and VAT return prep with Valentin.",
-  activitySummary: "CEO follow-up"
+  activitySummary: "CEO follow-up",
+  /** Finance-keyword task *title* — the update_task `name` path in the USL Admin repro. */
+  taskName: "VAT deadline — banking export prep",
+  /** Carries the payroll keyword, which no other fixture string does. */
+  payrollNote: "Confirm B2C bank export cutoff and payroll handoff timeline with Valentin."
 } as const;
