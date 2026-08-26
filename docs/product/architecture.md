@@ -161,7 +161,8 @@ Tools are grouped by **domain module**, registered on the `McpAgent`:
   one binary `ir.attachment` scoped to an existing `project.task` — the only sanctioned path
   for attachment bytes, since generic `ir.attachment` CRUD stays PM-denied). Further writes
   (`update_task`, `move_task`) follow the same pattern.
-- **`documents.*`** — permission-scoped search, bounded OCR paging, similarity,
+- **`documents.*`** — permission-scoped exact/hybrid/semantic search, governed
+  saved-view listing and scoping, bounded OCR paging, similarity, and
   version/catalog/link reads. The Worker calls Odoo only; Odoo derives the
   authorized root/candidate set and Paperless performs local retrieval behind
   that boundary. Guessed and inaccessible document IDs share one denial.
