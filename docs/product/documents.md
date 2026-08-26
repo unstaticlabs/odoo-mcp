@@ -21,18 +21,18 @@ retrieval.
 
 ## Qualified foundation
 
-- source commit: `eaaabbc834c34787799fe99b281f2fa075c18dec`;
-- `SERVER_VERSION`: `0.20.0`;
+- source commit: `6cfe40b6ea42a0a34819c0c6fb74d5f455deca67`;
+- `SERVER_VERSION`: `0.21.0`;
 - compiled Wrangler `index.js` SHA-256:
-  `a34daa7fa42866307a25a522c2df67f6b201a5a4d3ff3ef1f98035431bf3f8c9`;
+  `d3cae37a1b9c3616e900c2e29b1f39e4cde65c3f0e523a561c25780d569c09f3`;
 - Durable Object migration: `v3`, adding `DocumentsAgent`;
 - endpoint composition: exactly nine `documents.*` tools on
   `/documents/mcp`, the same nine on `/mcp`, none on the other focused
   endpoints.
 
-The complete gate passed TypeScript typecheck, 1,172 tests across 29 files
-with 4,523 assertions, and Wrangler deploy dry-run. Two consecutive dry runs
-produced the same compiled Worker digest and non-secret release identity.
+The complete gate passed TypeScript typecheck, 1,206 tests across 29 files
+with 4,914 assertions, and Wrangler deploy dry-run. Two consecutive dry runs
+produced the same compiled Worker digest.
 Local readiness reached both MCP endpoints and received the expected
 authenticated HTTP 401 from an unauthenticated POST.
 
