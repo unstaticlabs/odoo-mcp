@@ -631,6 +631,7 @@ describe("endpoint tool surfaces", () => {
         "documents.list_tags",
         "documents.list_correspondents",
         "documents.list_types",
+        "documents.list_saved_views",
         "documents.get_links"
       ])
     );

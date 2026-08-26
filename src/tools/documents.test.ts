@@ -32,7 +32,7 @@ function buildServer(responder: (method: string, args: Record<string, unknown>) 
 }
 
 describe("documents.* registration", () => {
-  test("registers only the nine explicit read-only facade tools", () => {
+  test("registers only the ten explicit read-only facade tools", () => {
     const { server } = buildServer(() => ({}));
     const tools = (server as unknown as { _registeredTools: Record<string, any> })._registeredTools;
     expect(Object.keys(tools).sort()).toEqual(
@@ -43,6 +43,7 @@ describe("documents.* registration", () => {
         "documents.get_links",
         "documents.get_versions",
         "documents.list_correspondents",
+        "documents.list_saved_views",
         "documents.list_tags",
         "documents.list_types",
         "documents.search"
@@ -77,7 +78,10 @@ describe("documents.search", () => {
         limit: 10,
         has_more: false,
         truncated: false,
-        warnings: []
+        warnings: [],
+        mode: "hybrid",
+        query: "contract renewal",
+        saved_view: false
       };
     });
 
@@ -126,6 +130,203 @@ describe("documents.search", () => {
 
     expect(result.isError).toBe(true);
     expect(calls).toEqual([]);
+  });
+
+  test("requires either a query or an accessible saved view", async () => {
+    const { calls, handler } = buildServer(() => {
+      throw new Error("must not run");
+    });
+
+    const result = await handler("documents.search")({});
+
+    expect(result.isError).toBe(true);
+    expect(calls).toEqual([]);
+  });
+
+  test("browses a saved view without forcing lexical or semantic text", async () => {
+    const savedView = {
+      id: 12,
+      key: "view:12",
+      name: "My reviewed evidence",
+      scope: "personal",
+      system_rule: "saved",
+      archive_native: false,
+      needs_attention: false,
+      filters: { review_state: "reviewed" },
+      tags: [],
+      correspondents: [],
+      document_types: [],
+      quick_filters: []
+    };
+    const { calls, handler } = buildServer(() => ({
+      results: [],
+      count: 0,
+      offset: 0,
+      limit: 10,
+      has_more: false,
+      truncated: false,
+      warnings: [],
+      mode: "browse",
+      query: "",
+      saved_view: savedView
+    }));
+
+    const result = await handler("documents.search")({ filters: { saved_view_id: 12 } });
+
+    expect(result.isError).toBeUndefined();
+    expect(calls[0]).toEqual({
+      model: "usl.document",
+      method: "mcp_search",
+      args: {
+        query: "",
+        mode: "hybrid",
+        limit: 10,
+        offset: 0,
+        saved_view_id: 12,
+        background_mode: "include"
+      }
+    });
+    expect(result.structuredContent?.saved_view).toEqual(savedView);
+  });
+
+  test("forwards the complete saved-view semantic filter scope", async () => {
+    const { calls, handler } = buildServer(() => ({
+      results: [],
+      count: 0,
+      offset: 0,
+      limit: 5,
+      has_more: false,
+      truncated: false,
+      warnings: [],
+      mode: "semantic",
+      query: "renewal meaning",
+      saved_view: false
+    }));
+
+    const result = await handler("documents.search")({
+      query: "renewal meaning",
+      mode: "semantic",
+      limit: 5,
+      filters: {
+        saved_view_id: 17,
+        company_id: 3,
+        added_from: "2026-01-01",
+        source: "paperless",
+        confidentiality: "accounting",
+        review_state: "reviewed",
+        linked_state: "linked"
+      }
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(calls[0].args).toEqual({
+      query: "renewal meaning",
+      mode: "semantic",
+      limit: 5,
+      offset: 0,
+      saved_view_id: 17,
+      company_id: 3,
+      added_from: "2026-01-01",
+      source: "paperless",
+      confidentiality: "accounting",
+      review_state: "reviewed",
+      linked_state: "linked",
+      background_mode: "include"
+    });
+  });
+});
+
+describe("documents.list_saved_views", () => {
+  test("calls only the governed Odoo saved-view facade", async () => {
+    const savedView = {
+      id: 21,
+      key: "accounting",
+      name: "Accounting evidence",
+      scope: "shared",
+      system_rule: "accounting",
+      archive_native: false,
+      needs_attention: false,
+      filters: {},
+      tags: [],
+      correspondents: [],
+      document_types: [],
+      quick_filters: []
+    };
+    const { calls, handler } = buildServer(() => ({
+      results: [savedView],
+      offset: 0,
+      limit: 25,
+      has_more: false
+    }));
+
+    const result = await handler("documents.list_saved_views")({
+      query: "Accounting",
+      scope: "shared",
+      limit: 25,
+      offset: 0
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(calls).toEqual([
+      {
+        model: "usl.document",
+        method: "mcp_list_saved_views",
+        args: { query: "Accounting", scope: "shared", limit: 25, offset: 0 }
+      }
+    ]);
+    expect((result.structuredContent?.results as unknown[])[0]).toEqual(savedView);
+  });
+});
+
+describe("documents.find_similar", () => {
+  test("forwards saved-view and structured candidate filters", async () => {
+    const savedView = {
+      id: 31,
+      key: "view:31",
+      name: "Reviewed accounting",
+      scope: "personal",
+      system_rule: "saved",
+      archive_native: false,
+      needs_attention: false,
+      filters: { review_state: "reviewed" },
+      tags: [],
+      correspondents: [],
+      document_types: [],
+      quick_filters: []
+    };
+    const { calls, handler } = buildServer(() => ({
+      source_document_id: 7,
+      results: [],
+      count: 0,
+      warnings: [],
+      saved_view: savedView
+    }));
+
+    const result = await handler("documents.find_similar")({
+      document_id: 7,
+      filters: {
+        saved_view_id: 31,
+        confidentiality: "accounting",
+        linked_model: "project.project",
+        linked_id: 14
+      }
+    });
+
+    expect(result.isError).toBeUndefined();
+    expect(calls[0]).toEqual({
+      model: "usl.document",
+      method: "mcp_find_similar",
+      args: {
+        document_id: 7,
+        limit: 10,
+        saved_view_id: 31,
+        confidentiality: "accounting",
+        linked_model: "project.project",
+        linked_id: 14,
+        background_mode: "include"
+      }
+    });
+    expect(result.structuredContent?.saved_view).toEqual(savedView);
   });
 });
 

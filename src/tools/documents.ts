@@ -20,17 +20,49 @@ const DOCUMENT_LINK_NOTE =
 
 const zSearchMode = z.enum(["hybrid", "exact", "semantic"]);
 const zBackgroundMode = z.enum(["include", "exclude", "only"]);
+const zSavedViewScope = z.enum(["all", "shared", "personal"]);
 const zDocumentFilters = z.object({
+  saved_view_id: z.number().int().positive().optional(),
   company_id: z.number().int().positive().optional(),
   tag_ids: z.array(z.number().int().positive()).max(100).optional(),
   correspondent_id: z.number().int().positive().optional(),
   document_type_id: z.number().int().positive().optional(),
   date_from: z.string().optional(),
   date_to: z.string().optional(),
+  added_from: z.string().optional(),
+  added_to: z.string().optional(),
+  source: z.enum(["odoo_upload", "odoo_attachment", "odoo_generated", "paperless"]).optional(),
+  confidentiality: z.enum(["internal", "accounting", "hr", "private"]).optional(),
+  review_state: z.enum(["needs_attention", "classified", "reviewed"]).optional(),
+  linked_state: z.enum(["linked", "unlinked"]).optional(),
+  linked_model: z.string().trim().min(1).max(100).optional(),
+  linked_id: z.number().int().positive().optional(),
   background_mode: zBackgroundMode.default("include")
 });
 const zDocument = z.record(z.string(), z.unknown());
 const zWarnings = z.array(z.record(z.string(), z.unknown()));
+const zCatalogValue = z.object({ id: z.number().int().positive(), name: z.string() });
+const zSavedView = z.object({
+  id: z.number().int().positive(),
+  key: z.string(),
+  name: z.string(),
+  scope: z.enum(["shared", "personal"]),
+  system_rule: z.string(),
+  archive_native: z.boolean(),
+  needs_attention: z.boolean(),
+  filters: z.record(z.string(), z.unknown()),
+  tags: z.array(zCatalogValue),
+  correspondents: z.array(zCatalogValue),
+  document_types: z.array(zCatalogValue),
+  quick_filters: z.array(
+    z.object({
+      id: z.number().int().positive(),
+      key: z.string(),
+      name: z.string(),
+      kind: z.string()
+    })
+  )
+});
 const zSearchOutput = {
   results: z.array(zDocument),
   count: z.number().int().nonnegative(),
@@ -38,7 +70,10 @@ const zSearchOutput = {
   limit: z.number().int().positive(),
   has_more: z.boolean(),
   truncated: z.boolean(),
-  warnings: zWarnings
+  warnings: zWarnings,
+  mode: z.enum(["browse", "hybrid", "exact", "semantic"]),
+  query: z.string(),
+  saved_view: z.union([zSavedView, z.literal(false)])
 };
 const READ_ONLY_ANNOTATIONS = {
   readOnlyHint: true,
@@ -119,11 +154,11 @@ export function registerDocumentsTools(server: McpServer, getProps: () => Props 
     {
       title: "Search Documents",
       description:
-        "Read-only: permission-scoped Odoo and Paperless lexical/semantic retrieval. Hybrid mode degrades to exact search with a structured warning when the local embedding service is unavailable. OCR excerpts are bounded and only returned after Odoo archive-binary authorization." +
+        "Read-only: permission-scoped Odoo and Paperless retrieval. `hybrid` returns exact lexical results first and appends local BGE-M3 semantic matches; `exact` never embeds; `semantic` is meaning-only and never generative. Set `filters.saved_view_id` to search inside an accessible saved view. An empty query browses that view, or replays its stored query when present. Hybrid mode degrades to exact search with a structured warning when embeddings are unavailable. OCR excerpts are bounded and only returned after Odoo archive-binary authorization." +
         DOCUMENT_LINK_NOTE,
       annotations: READ_ONLY_ANNOTATIONS,
       inputSchema: {
-        query: z.string().trim().min(1).max(2048),
+        query: z.string().trim().max(2048).default(""),
         mode: zSearchMode.default("hybrid"),
         limit: z.number().int().min(1).max(25).default(10),
         offset: z.number().int().min(0).max(49).default(0),
@@ -133,13 +168,23 @@ export function registerDocumentsTools(server: McpServer, getProps: () => Props 
     },
     async ({ query, mode, limit, offset, filters }) => {
       try {
-        if (offset + limit > 50) throw new Error("offset + limit must not exceed 50");
+        const normalizedQuery = query ?? "";
+        const normalizedMode = mode ?? "hybrid";
+        const normalizedLimit = limit ?? 10;
+        const normalizedOffset = offset ?? 0;
+        const normalizedFilters = {
+          ...(filters ?? {}),
+          background_mode: filters?.background_mode ?? "include"
+        };
+        if (normalizedOffset + normalizedLimit > 50) throw new Error("offset + limit must not exceed 50");
+        if (!normalizedQuery && !normalizedFilters.saved_view_id)
+          throw new Error("query or filters.saved_view_id is required");
         const { conn, payload } = await callDocumentsFacade(queue, getProps, "mcp_search", {
-          query,
-          mode,
-          limit,
-          offset,
-          ...(filters ?? {})
+          query: normalizedQuery,
+          mode: normalizedMode,
+          limit: normalizedLimit,
+          offset: normalizedOffset,
+          ...normalizedFilters
         });
         const result = decorateSearch(conn.url, payload);
         return mcpStructured(result, legacyText(result));
@@ -210,7 +255,7 @@ export function registerDocumentsTools(server: McpServer, getProps: () => Props 
     {
       title: "Find Similar Documents",
       description:
-        "Read-only: find BGE-M3-nearest governed documents using an authorized source document. The source OCR stays inside Paperless; Odoo supplies the mandatory candidate scope and rechecks every returned root." +
+        "Read-only: find BGE-M3-nearest governed documents using an authorized source document. Optional filters, including `saved_view_id`, constrain candidates before vector retrieval. The source OCR stays inside Paperless; Odoo supplies the mandatory candidate scope and rechecks every returned root." +
         DOCUMENT_LINK_NOTE,
       annotations: READ_ONLY_ANNOTATIONS,
       inputSchema: {
@@ -222,15 +267,20 @@ export function registerDocumentsTools(server: McpServer, getProps: () => Props 
         source_document_id: z.number().int().positive(),
         results: z.array(zDocument),
         count: z.number().int().nonnegative(),
-        warnings: zWarnings
+        warnings: zWarnings,
+        saved_view: z.union([zSavedView, z.literal(false)])
       }
     },
     async ({ document_id, limit, filters }) => {
       try {
+        const normalizedFilters = {
+          ...(filters ?? {}),
+          background_mode: filters?.background_mode ?? "include"
+        };
         const { conn, payload } = await callDocumentsFacade(queue, getProps, "mcp_find_similar", {
           document_id,
-          limit,
-          ...(filters ?? {})
+          limit: limit ?? 10,
+          ...normalizedFilters
         });
         const result = decorateSearch(conn.url, payload);
         return mcpStructured(result, legacyText(result));
@@ -304,6 +354,41 @@ export function registerDocumentsTools(server: McpServer, getProps: () => Props 
     "correspondent"
   );
   registerCatalogTool("documents.list_types", "List Document Types", "mcp_list_types", "document-type");
+
+  server.registerTool(
+    "documents.list_saved_views",
+    {
+      title: "List Document Saved Views",
+      description:
+        "Read-only: list only shared and caller-owned Odoo Documents saved views available to the connected user. Returned IDs can be passed as `filters.saved_view_id` to `documents.search` or `documents.find_similar`; private views owned by another user are indistinguishable from missing views.",
+      annotations: READ_ONLY_ANNOTATIONS,
+      inputSchema: {
+        query: z.string().trim().max(200).default(""),
+        scope: zSavedViewScope.default("all"),
+        limit: z.number().int().min(1).max(100).default(100),
+        offset: z.number().int().min(0).max(1000).default(0)
+      },
+      outputSchema: {
+        results: z.array(zSavedView),
+        offset: z.number().int().nonnegative(),
+        limit: z.number().int().positive(),
+        has_more: z.boolean()
+      }
+    },
+    async ({ query, scope, limit, offset }) => {
+      try {
+        const { payload } = await callDocumentsFacade(queue, getProps, "mcp_list_saved_views", {
+          query: query ?? "",
+          scope: scope ?? "all",
+          limit: limit ?? 100,
+          offset: offset ?? 0
+        });
+        return mcpStructured(payload, legacyText(payload));
+      } catch (err) {
+        return mcpErrorFromException(err, { model: DOCUMENT_MODEL, method: "mcp_list_saved_views" });
+      }
+    }
+  );
 
   server.registerTool(
     "documents.get_links",
