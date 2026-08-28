@@ -5,6 +5,7 @@ import { OdooError } from "../odoo";
 import type { OdooQueue } from "../odoo-queue";
 import { FINANCE_KEYWORD_PM_TEXT } from "../write-safety.fixtures";
 import { registerProjectsTools, registerProjectWriteTools } from "./projects";
+import { plaintextToHtml } from "./shared";
 import { validatedToolHandler } from "./structured-test-util";
 
 const props = {
@@ -15,6 +16,8 @@ const props = {
 };
 
 type ToolResult = { isError?: boolean; content: { text: string }[]; structuredContent?: Record<string, unknown> };
+
+type ZodLike = { safeParse: (v: unknown) => { success: boolean }; parse: (v: unknown) => unknown };
 
 function dispatchQueue(responder: (model: string, method: string, args: Record<string, unknown>) => unknown): OdooQueue {
   const enqueue = mock(async (...a: unknown[]) => responder(a[1] as string, a[2] as string, a[3] as Record<string, unknown>));
@@ -78,6 +81,18 @@ describe("projects.* registration", () => {
     expect(attach.annotations.openWorldHint).toBe(false);
     expect(String(attach.description).startsWith("Write:")).toBe(true);
   });
+
+  test("projects.create_task inputSchema exposes description_is_html defaulting to false", () => {
+    const { server } = buildProjectsServer(dispatchQueue(() => []));
+    const tool = (
+      server as unknown as {
+        _registeredTools: Record<string, { inputSchema: { shape: Record<string, unknown>; parse: (v: unknown) => Record<string, unknown> } }>;
+      }
+    )._registeredTools["projects.create_task"];
+
+    expect(tool.inputSchema.shape.description_is_html).toBeDefined();
+    expect(tool.inputSchema.parse({ name: "x", project_id: 1 }).description_is_html).toBe(false);
+  });
 });
 
 describe("projects.create_task", () => {
@@ -119,6 +134,54 @@ describe("projects.create_task", () => {
     expect(calls[1].args.ids).toEqual([501]);
     expect(String(calls[1].args.body)).toContain("[agent-source]");
     expect(String(result.content[0].text)).toContain(String(result.structuredContent?.trace_token));
+  });
+
+  const RUNBOOK = "-e AWS_ACCESS_KEY_ID=<R2_ACCESS_KEY_ID> \\\n-e RESTIC_PASSWORD=<your password> \\";
+
+  test("escapes angle-bracket placeholders and newlines in plain-text description", async () => {
+    const calls: { args: Record<string, unknown> }[] = [];
+    const queue = dispatchQueue((_model, method, args) => {
+      if (method === "create") {
+        calls.push({ args });
+        return [502];
+      }
+      return 1;
+    });
+    const { handler } = buildProjectsServer(queue);
+
+    await handler("projects.create_task")({
+      name: "Runbook task",
+      project_id: 4,
+      description: RUNBOOK
+    });
+
+    const vals = (calls[0].args.vals_list as Record<string, unknown>[])[0];
+    expect(vals.description).toBe(plaintextToHtml(RUNBOOK));
+    expect(String(vals.description)).toContain("R2_ACCESS_KEY_ID");
+  });
+
+  test("description_is_html: true passes description through unchanged", async () => {
+    const calls: { args: Record<string, unknown> }[] = [];
+    const queue = dispatchQueue((_model, method, args) => {
+      if (method === "create") {
+        calls.push({ args });
+        return [503];
+      }
+      return 1;
+    });
+    const { handler } = buildProjectsServer(queue);
+    const html = "<p>real markup</p>";
+
+    await handler("projects.create_task")({
+      name: "HTML task",
+      project_id: 4,
+      description: html,
+      description_is_html: true
+    });
+
+    const vals = (calls[0].args.vals_list as Record<string, unknown>[])[0];
+    expect(vals.description).toBe(html);
+    expect(String(vals.description)).not.toContain("&lt;");
   });
 
   test("named fields win over values overrides for name/project_id", async () => {
@@ -806,6 +869,18 @@ describe("projects.* write registration", () => {
       }
     }
   });
+
+  test("projects.update_task inputSchema exposes description_is_html defaulting to false", () => {
+    const { server } = buildProjectWriteServer(dispatchQueue(() => []));
+    const tool = (
+      server as unknown as {
+        _registeredTools: Record<string, { inputSchema: { shape: Record<string, unknown>; parse: (v: unknown) => Record<string, unknown> } }>;
+      }
+    )._registeredTools["projects.update_task"];
+
+    expect(tool.inputSchema.shape.description_is_html).toBeDefined();
+    expect(tool.inputSchema.parse({ task_id: 42, name: "x" }).description_is_html).toBe(false);
+  });
 });
 
 describe("projects.create_activity", () => {
@@ -1012,6 +1087,8 @@ describe("projects.post_note", () => {
 });
 
 describe("projects.update_task", () => {
+  const RUNBOOK = "-e AWS_ACCESS_KEY_ID=<R2_ACCESS_KEY_ID> \\\n-e RESTIC_PASSWORD=<your password> \\";
+
   test("writes only the curated fields the caller supplied", async () => {
     const calls: WriteCall[] = [];
     const { handler } = buildProjectWriteServer(recordingQueue(calls));
@@ -1054,6 +1131,29 @@ describe("projects.update_task", () => {
     expect(calls[0].args.vals).toEqual({ stage_id: 5 });
   });
 
+  test("escapes angle-bracket placeholders and newlines in plain-text description", async () => {
+    const calls: WriteCall[] = [];
+    const { handler } = buildProjectWriteServer(recordingQueue(calls));
+
+    await handler("projects.update_task")({ task_id: 42, description: RUNBOOK });
+
+    const vals = calls[0].args.vals as Record<string, unknown>;
+    expect(vals.description).toBe(plaintextToHtml(RUNBOOK));
+    expect(String(vals.description)).toContain("R2_ACCESS_KEY_ID");
+  });
+
+  test("description_is_html: true passes description through unchanged", async () => {
+    const calls: WriteCall[] = [];
+    const { handler } = buildProjectWriteServer(recordingQueue(calls));
+    const html = "<p>real markup</p>";
+
+    await handler("projects.update_task")({ task_id: 42, description: html, description_is_html: true });
+
+    const vals = calls[0].args.vals as Record<string, unknown>;
+    expect(vals.description).toBe(html);
+    expect(String(vals.description)).not.toContain("&lt;");
+  });
+
   test("an explicit null date_deadline is forwarded as null (clears the deadline)", async () => {
     const calls: WriteCall[] = [];
     const { handler } = buildProjectWriteServer(recordingQueue(calls));
@@ -1075,6 +1175,19 @@ describe("projects.update_task", () => {
     );
     expect(calls).toEqual([]);
     expect(allWriteCalls).toEqual([]);
+  });
+
+  test("description_is_html alone is not a field write and is refused", async () => {
+    const calls: WriteCall[] = [];
+    const { handler } = buildProjectWriteServer(recordingQueue(calls));
+
+    const result = await handler("projects.update_task")({ task_id: 42, description_is_html: false });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toBe(
+      "projects.update_task requires at least one of name, description, date_deadline, stage_id, priority"
+    );
+    expect(calls).toEqual([]);
   });
 
   test("an Odoo failure returns a structured error envelope naming the task", async () => {
