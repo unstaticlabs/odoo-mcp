@@ -457,7 +457,10 @@ export function registerProjectsTools(
         values: z
           .record(z.string(), z.any())
           .optional()
-          .describe("Extra project.task field values merged into the create vals (overrides named fields on key clash)"),
+          .describe(
+            "Extra project.task field values merged into the create vals (overrides named fields on key clash). " +
+              "If you set values.description it bypasses description_is_html and is passed raw into the Html field."
+          ),
         context: zWriteContext
       },
       outputSchema: {
@@ -839,7 +842,7 @@ export function registerProjectWriteTools(
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
       inputSchema: {
         task_id: z.number().int().positive().describe("project.task id to post the note on"),
-        note: z.string().min(1).describe("Note body, stored verbatim"),
+        note: z.string().min(1).describe("Note body (plain text is HTML-escaped unless body_is_html)"),
         body_is_html: z
           .boolean()
           .default(false)

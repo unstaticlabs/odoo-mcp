@@ -208,7 +208,8 @@ and identify the record by name plus `model,id` — do not invent a route.
   the task's *own* fields (title, description, deadline, stage, priority) to
   `projects.update_task`; lodge a new card with `projects.create_task`. Each one hardcodes its
   Odoo model, method and field set — there is no caller-supplied `model` and no free-form `values`
-  dict — so the prose you pass is stored **verbatim**, and operational banking / B2C export /
+  dict — so the fixed-intent guarantee is about model/method/field set, not byte-identical Html-field
+  storage (plain-text `description` and chatter bodies are HTML-escaped for you). Operational banking /
   VAT / payroll / deadline wording is project-management text, **not** an accounting mutation.
 - **Accounting work → `bookkeeping.plan_safe_write` only.** Tax close, reports, returns and
   lock-date exceptions never route through the `projects.*` tools, whatever the task is called.
