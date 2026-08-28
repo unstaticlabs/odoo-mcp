@@ -207,6 +207,30 @@ describe("projects.create_task", () => {
     expect(vals.priority).toBe("1");
   });
 
+  test("values.description overrides the named field and is passed raw", async () => {
+    const calls: { args: Record<string, unknown> }[] = [];
+    const queue = dispatchQueue((_model, method, args) => {
+      if (method === "create") {
+        calls.push({ args });
+        return [8];
+      }
+      return 1;
+    });
+    const { handler } = buildProjectsServer(queue);
+    const rawHtml = "<p>caller-supplied html</p>";
+
+    await handler("projects.create_task")({
+      name: "Escape hatch",
+      project_id: 4,
+      description: "-e KEY=<PLACEHOLDER>",
+      values: { description: rawHtml }
+    });
+
+    const vals = (calls[0].args.vals_list as Record<string, unknown>[])[0];
+    expect(vals.description).toBe(rawHtml);
+    expect(String(vals.description)).not.toContain("&lt;PLACEHOLDER&gt;");
+  });
+
   test("message_post failure still returns id with provenance_warning", async () => {
     const queue = dispatchQueue((_model, method) => {
       if (method === "create") return [88];
