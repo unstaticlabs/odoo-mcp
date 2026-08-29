@@ -31,7 +31,7 @@ flowchart TB
         header["BYO-key header path<br/>credentials on every request,<br/>nothing stored"]
         oauth["OAuth token path<br/>bearer token resolves to<br/>encrypted grant in KV"]
         props["Same Props object<br/>odooBaseUrl + odooDb + odooApiKey"]
-        agent["Endpoint agents (Durable Objects)<br/>/mcp — full surface<br/>/accounting/mcp — bookkeeping + billing<br/>/projects/mcp — projects"]
+        agent["Endpoint agents (Durable Objects)<br/>/mcp — full surface<br/>/accounting/mcp — bookkeeping + billing<br/>/projects/mcp — projects<br/>/documents/mcp — governed retrieval"]
     end
 
     odoo["User's Odoo instance<br/>called as that user —<br/>Odoo permissions are the entire authz layer"]
@@ -48,8 +48,8 @@ Routing is per request: any `X-Odoo-*` header selects the BYO-key path; no
 headers means OAuth (see `src/index.ts`). Both paths build the identical `Props`
 shape, so the endpoint agents and every tool cannot tell them apart.
 
-The Worker serves three sibling MCP endpoints — `/mcp` (full tool surface),
-`/accounting/mcp`, and `/projects/mcp` (focused domain surfaces for clients with
+The Worker serves four sibling MCP endpoints — `/mcp` (full tool surface),
+`/accounting/mcp`, `/projects/mcp`, and `/documents/mcp` (focused domain surfaces for clients with
 small tool budgets) — behind the **same** OAuth front door: one `/authorize`,
 one `/register`, one KV vault. Auth is identical everywhere; only the registered
 toolset differs. Tokens are not scoped to an endpoint (any grant works on any
@@ -57,6 +57,12 @@ path), which is fine because every path resolves to the same user-supplied Odoo
 credentials and Odoo remains the authorization layer. The one per-endpoint cost:
 ChatGPT treats each path as a separate connector, so each connector runs its own
 authorize flow and stores its own grant.
+
+The Documents endpoint does not introduce a second credential plane. Its tools
+call explicit `usl.document.mcp_*` methods with the caller's Odoo key. Only Odoo
+holds the Paperless service token; Odoo record rules, selected companies,
+linked-record ACLs, and synchronized archive permissions are resolved before
+OCR or vector retrieval. The Worker receives only bounded governed results.
 
 ## How the key reaches the server
 

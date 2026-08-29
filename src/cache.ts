@@ -31,6 +31,7 @@ export class TtlCache {
   private readonly clock: () => number;
   private readonly maxEntries: number;
   private readonly store = new Map<string, CacheEntry>();
+  private readonly inFlight = new Map<string, Promise<unknown>>();
   private hits = 0;
   private misses = 0;
 
@@ -65,9 +66,18 @@ export class TtlCache {
   async getOrCompute<T>(key: string, ttlMs: number, fn: () => Promise<T>): Promise<T> {
     const cached = this.get<T>(key);
     if (cached !== undefined) return cached;
-    const value = await fn();
-    this.set(key, value, ttlMs);
-    return value;
+    const pending = this.inFlight.get(key) as Promise<T> | undefined;
+    if (pending) return pending;
+    const computation = fn().then((value) => {
+      this.set(key, value, ttlMs);
+      return value;
+    });
+    this.inFlight.set(key, computation);
+    try {
+      return await computation;
+    } finally {
+      if (this.inFlight.get(key) === computation) this.inFlight.delete(key);
+    }
   }
 
   getMetrics(): CacheMetrics {

@@ -1,7 +1,8 @@
-import { type OdooConnection, callOdoo } from "./odoo";
+import { type OdooCallOptions, type OdooConnection, callOdoo } from "./odoo";
 
 export interface OdooQueueOptions {
   minDelayMs?: number;
+  maxMetricsEntries?: number;
 }
 
 export interface CallMetric {
@@ -15,6 +16,7 @@ export interface Metrics {
   odoo_calls: number;
   total_duration_ms: number;
   calls: CallMetric[];
+  dropped_calls?: number;
 }
 
 interface QueueItem {
@@ -22,6 +24,7 @@ interface QueueItem {
 }
 
 const DEFAULT_MIN_DELAY_MS = 1000;
+const DEFAULT_MAX_METRICS = 1000;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -35,14 +38,18 @@ function sleep(ms: number): Promise<void> {
 export class OdooQueue {
   private readonly callOdooFn: typeof callOdoo;
   private readonly minDelayMs: number;
+  private readonly maxMetricsEntries: number;
   private readonly queue: QueueItem[] = [];
   private readonly calls: CallMetric[] = [];
+  private completedCalls = 0;
+  private totalDurationMs = 0;
   private draining = false;
   private lastStartTime = 0;
 
   constructor(callOdooFn: typeof callOdoo, options: OdooQueueOptions = {}) {
     this.callOdooFn = callOdooFn;
     this.minDelayMs = options.minDelayMs ?? DEFAULT_MIN_DELAY_MS;
+    this.maxMetricsEntries = Math.max(1, options.maxMetricsEntries ?? DEFAULT_MAX_METRICS);
   }
 
   enqueue<T>(
@@ -50,18 +57,18 @@ export class OdooQueue {
     model: string,
     method: string,
     args: Record<string, unknown>,
-    timeoutMs?: number
+    options?: number | OdooCallOptions
   ): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       this.queue.push({
         run: async () => {
           const start = Date.now();
           try {
-            const result = await this.callOdooFn(conn, model, method, args, timeoutMs);
-            this.calls.push({ model, method, ms: Date.now() - start, ok: true });
+            const result = await this.callOdooFn(conn, model, method, args, options);
+            this.recordMetric({ model, method, ms: Date.now() - start, ok: true });
             resolve(result as T);
           } catch (err) {
-            this.calls.push({ model, method, ms: Date.now() - start, ok: false });
+            this.recordMetric({ model, method, ms: Date.now() - start, ok: false });
             reject(err);
           }
         }
@@ -71,6 +78,13 @@ export class OdooQueue {
         void this.drain();
       }
     });
+  }
+
+  private recordMetric(metric: CallMetric): void {
+    this.completedCalls++;
+    this.totalDurationMs += metric.ms;
+    this.calls.push(metric);
+    if (this.calls.length > this.maxMetricsEntries) this.calls.shift();
   }
 
   private async drain(): Promise<void> {
@@ -88,22 +102,26 @@ export class OdooQueue {
 
   getMetrics(): Metrics {
     return {
-      odoo_calls: this.calls.length,
-      total_duration_ms: this.calls.reduce((sum, call) => sum + call.ms, 0),
-      calls: [...this.calls]
+      odoo_calls: this.completedCalls,
+      total_duration_ms: this.totalDurationMs,
+      calls: [...this.calls],
+      dropped_calls: this.completedCalls - this.calls.length
     };
   }
 
   snapshot(): number {
-    return this.calls.length;
+    return this.completedCalls;
   }
 
   delta(snapshot: number): Metrics {
-    const slice = this.calls.slice(snapshot);
+    const retainedStart = this.completedCalls - this.calls.length;
+    const startIndex = Math.max(0, snapshot - retainedStart);
+    const slice = this.calls.slice(startIndex);
     return {
-      odoo_calls: slice.length,
+      odoo_calls: Math.max(0, this.completedCalls - snapshot),
       total_duration_ms: slice.reduce((sum, call) => sum + call.ms, 0),
-      calls: [...slice]
+      calls: [...slice],
+      dropped_calls: Math.max(0, retainedStart - snapshot)
     };
   }
 }

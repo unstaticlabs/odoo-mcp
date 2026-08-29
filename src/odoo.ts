@@ -1,12 +1,56 @@
 const ODOO_TIMEOUT_MS = 15_000;
 const ODOO_MAX_ATTEMPTS = 3;
-const ODOO_RETRY_DELAY_MS = 500;
+const ODOO_RETRY_DELAY_MS = 1_000;
 const ODOO_RETRYABLE_STATUS = new Set([429, 502, 503, 504]);
 
 export interface OdooConnection {
   url: string;
   db: string;
   apiKey: string;
+}
+
+/** Per-call resilience policy. Expensive read facades can use a longer timeout
+ * without blindly replaying work whose first attempt may still be running. */
+export interface OdooCallOptions {
+  timeoutMs?: number;
+  maxAttempts?: number;
+  retryDelayMs?: number;
+  retryTimeouts?: boolean;
+  retryNetworkErrors?: boolean;
+}
+
+function normalizeCallOptions(options: number | OdooCallOptions | undefined): Required<OdooCallOptions> {
+  if (typeof options === "number") {
+    return {
+      timeoutMs: options,
+      maxAttempts: ODOO_MAX_ATTEMPTS,
+      retryDelayMs: ODOO_RETRY_DELAY_MS,
+      retryTimeouts: true,
+      retryNetworkErrors: false
+    };
+  }
+  return {
+    timeoutMs: options?.timeoutMs ?? ODOO_TIMEOUT_MS,
+    maxAttempts: Math.max(1, Math.min(options?.maxAttempts ?? ODOO_MAX_ATTEMPTS, 5)),
+    retryDelayMs: Math.max(0, options?.retryDelayMs ?? ODOO_RETRY_DELAY_MS),
+    retryTimeouts: options?.retryTimeouts ?? true,
+    retryNetworkErrors: options?.retryNetworkErrors ?? false
+  };
+}
+
+function retryBackoffMs(baseMs: number, attempt: number): number {
+  const exponential = baseMs * 2 ** Math.max(0, attempt - 1);
+  return Math.min(30_000, Math.ceil(exponential * (1 + Math.random() * 0.2)));
+}
+
+function retryAfterMs(response: Response, fallbackMs: number): number {
+  const raw = response.headers.get("Retry-After");
+  if (!raw) return fallbackMs;
+  const seconds = Number(raw);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.min(30_000, Math.max(fallbackMs, seconds * 1000));
+  const dateMs = Date.parse(raw);
+  if (!Number.isFinite(dateMs)) return fallbackMs;
+  return Math.min(30_000, Math.max(fallbackMs, dateMs - Date.now()));
 }
 
 /** Odoo RPC context sent as the top-level `context` key of the JSON-2 request body.
@@ -227,13 +271,14 @@ export async function callOdoo(
   model: string,
   method: string,
   args: Record<string, unknown>,
-  timeoutMs: number = ODOO_TIMEOUT_MS
+  options?: number | OdooCallOptions
 ): Promise<unknown> {
+  const policy = normalizeCallOptions(options);
   const endpoint = `${conn.url.replace(/\/+$/, "")}/json/2/${model}/${method}`;
 
-  for (let attempt = 1; attempt <= ODOO_MAX_ATTEMPTS; attempt++) {
+  for (let attempt = 1; attempt <= policy.maxAttempts; attempt++) {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const timer = setTimeout(() => controller.abort(), policy.timeoutMs);
 
     let response: Response;
     try {
@@ -250,10 +295,11 @@ export async function callOdoo(
       });
     } catch (err) {
       if (err instanceof Error && err.name === "AbortError") {
-        if (attempt < ODOO_MAX_ATTEMPTS) {
+        if (policy.retryTimeouts && attempt < policy.maxAttempts) {
+          await sleep(retryBackoffMs(policy.retryDelayMs, attempt));
           continue;
         }
-        const message = `Odoo request to ${model}.${method} timed out after ${timeoutMs}ms`;
+        const message = `Odoo request to ${model}.${method} timed out after ${policy.timeoutMs}ms`;
         throw new OdooError({
           message,
           code: "timeout",
@@ -263,6 +309,10 @@ export async function callOdoo(
           details: message,
           recoverable: true
         });
+      }
+      if (policy.retryNetworkErrors && attempt < policy.maxAttempts) {
+        await sleep(retryBackoffMs(policy.retryDelayMs, attempt));
+        continue;
       }
       const message = `Odoo request to ${model}.${method} failed: network error`;
       throw new OdooError({
@@ -278,8 +328,8 @@ export async function callOdoo(
       clearTimeout(timer);
     }
 
-    if (ODOO_RETRYABLE_STATUS.has(response.status) && attempt < ODOO_MAX_ATTEMPTS) {
-      await sleep(ODOO_RETRY_DELAY_MS);
+    if (ODOO_RETRYABLE_STATUS.has(response.status) && attempt < policy.maxAttempts) {
+      await sleep(retryAfterMs(response, retryBackoffMs(policy.retryDelayMs, attempt)));
       continue;
     }
 

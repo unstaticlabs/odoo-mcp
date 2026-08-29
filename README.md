@@ -4,11 +4,12 @@ A [Model Context Protocol](https://modelcontextprotocol.io) server for **Odoo**,
 Cloudflare Workers. It lets AI clients (Claude Code, Claude Desktop, ChatGPT, and any other
 MCP client) read and write Odoo data over a single remote endpoint.
 
-- **Transport:** Streamable HTTP (via the Cloudflare Agents `McpAgent`), on three sibling
+- **Transport:** Streamable HTTP (via the Cloudflare Agents `McpAgent`), on four sibling
   endpoints sharing one auth front door:
   - `/mcp` — the **full tool surface** (back-compat: existing connectors keep working);
   - `/accounting/mcp` — bookkeeping + billing tools only;
-  - `/projects/mcp` — projects tools only.
+  - `/projects/mcp` — projects tools only;
+  - `/documents/mcp` — governed Odoo/Paperless retrieval tools only.
 
   The domain endpoints exist for clients with small tool budgets (ChatGPT): connect the one
   you need and the model sees a focused tool list instead of everything.
@@ -26,7 +27,8 @@ MCP client) read and write Odoo data over a single remote endpoint.
 ## Connection: BYO-key headers
 
 For clients that can set static headers, every request to an MCP endpoint (`/mcp`,
-`/accounting/mcp`, or `/projects/mcp`) carries three headers (missing/malformed → `401`).
+`/accounting/mcp`, `/projects/mcp`, or `/documents/mcp`) carries three headers
+(missing/malformed → `401`).
 Requests without any `X-Odoo-*` header are treated as OAuth (see
 [Connect ChatGPT](#connect-chatgpt-oauth) below).
 
@@ -61,6 +63,14 @@ The server never logs, stores, or echoes your key.
 | `projects.create_activity` | write | `task_id` (positive int), `summary` (string), `note` (optional), `date_deadline` (optional `YYYY-MM-DD`), `user_id` (positive int), `activity_type_id` (positive int), `context` (optional) — creates one `mail.activity` with `res_model=project.task` / `res_id=task_id` set internally; the caller never names a model |
 | `projects.post_note` | write | `task_id` (positive int), `note` (string), `body_is_html` (bool, default `false`), `context` (optional) — one `message_post` on the `project.task` chatter; plain text is HTML-escaped for you |
 | `projects.update_task` | write | `task_id` (positive int) plus at least one of `name`, `description`, `date_deadline` (`null` clears), `stage_id`, `priority` (`"0"`/`"1"`), `context` (optional); `description_is_html` (bool, default `false`) — curated `project.task` `write`; plain text is HTML-escaped for you; no free-form `values` dict, and an empty update is refused before any Odoo call |
+| `documents.search` | read | `query` (0–2,048 chars; empty requires `filters.saved_view_id`), `mode` (`hybrid` \| `exact` \| `semantic`), `limit` (1–25), `offset` (`offset + limit ≤ 50`), optional saved-view/company/tag/correspondent/type/document-date/archive-date/source/confidentiality/review/link/background filters — exact-first lexical + local BGE-M3 retrieval with bounded excerpts, provenance, and structured degradation warnings. An empty query browses the saved view or replays its stored query |
+| `documents.get` | read | `document_id` — governed metadata and clickable Odoo/preview/download links; no OCR or integrity hashes |
+| `documents.get_content` | read | `document_id`, `offset` (0–1,000,000), `limit` (1–8,000) — one bounded OCR page after record-rule, linked-record, availability, and archive-permission checks |
+| `documents.find_similar` | read | `document_id`, `limit` (1–25), optional search filters — local BGE-M3 similarity; source OCR stays in Paperless and the Odoo-authorized candidates are scoped before retrieval |
+| `documents.get_versions` | read | `document_id` — version metadata and guarded links, intentionally without checksums |
+| `documents.list_tags` / `documents.list_correspondents` / `documents.list_types` | read | `query`, `limit` (1–100, default 25), `offset` — active facet catalogs through Odoo ACLs; identical identity-scoped reads are cached for 60 seconds |
+| `documents.list_saved_views` | read | `query`, `scope` (`all` \| `shared` \| `personal`), `limit` (1–100, default 25), `offset` — shared and caller-owned Documents views, including their safe structured filters and bounded catalog facets; IDs feed `documents.search` and `documents.find_similar`; identical identity-scoped reads are cached for 60 seconds |
+| `documents.get_links` | read | `document_id` — only linked business records the caller may currently read, each with `web_url` |
 | [`aggregate_records`](#aggregate_records--grouped-summaries) | read | `model` (string), `domain` (array), `groupby` (string[], Odoo `field:agg` syntax e.g. `invoice_date:month`), `aggregates` (string[], e.g. `amount_total:sum`, `__count`), `lazy` (bool, default true), `orderby` (string, optional), `limit` (1–100, default 100, fallback scan cap), `offset` (int ≥ 0, default 0) — native `read_group` with bounded connector fallback |
 | `create_record` | write | `model` (string), `values` (object), `context` (string ≤ 500, optional — see [Write context](#write-context-audit-only)) |
 | `update_record` | write | `model` (string), `record_id` (positive int), `values` (object; x2many use Odoo command tuples, e.g. `[[6,0,ids]]`, `[[4,id]]`, `[[3,id]]`), `context` (optional) |
@@ -86,6 +96,10 @@ The server never logs, stores, or echoes your key.
 | `inventory.create_draft_vendor_receipt` | write | `partner_id`, `location_dest_id` (positive ints), `picking_type_id` / `warehouse_id` / `company_id` (positive ints, optional), `scheduled_date` (`YYYY-MM-DD` or ISO datetime), `origin` / `note` (optional), `lines` (1–200 × `{ product_id, product_uom_id, quantity > 0, name? }`), `dry_run` (bool, default `false`), `context` (**required**) — creates one **draft** incoming `stock.picking` with nested `move_ids`. Destination must be internal; `picking_type_id` resolves from `code=incoming` when omitted; `dry_run` previews the exact vals with zero writes. No validate path: `button_validate` / `action_validate` stay human-only and denied on generic tools |
 | `bookkeeping.link_source_document` | write | `document_id` (positive int), `target_model` (enum `account.move`\|`project.task`), `target_id` (positive int), `context` (**required**) — links an existing Documents file to a business record via `res_model`/`res_id`; never copies bytes or creates `ir.attachment`; hard-fails when the Documents app is absent |
 | `feedback.submit` | write | `title` (5–120 chars), `message` (20–4000 chars; concrete details, no secrets), `category` (`bug` \| `documentation_gap` \| `missing_feature` \| `dx_friction`), `tool_name` (string, optional) — files an `[agent-feedback]` card in the maintainers' tracker; see [Agent feedback](#agent-feedback) |
+
+The Documents authorization boundary, content-minimization rule, qualified
+release evidence, capacity assumptions, and Worker-only rollback procedure are
+documented in [docs/product/documents.md](docs/product/documents.md).
 
 **`aggregate_records` validation.** Before calling Odoo `read_group`, the server validates `groupby` and
 `aggregates` against cached `fields_get` metadata:
@@ -575,12 +589,13 @@ claude mcp add --transport http odoo http://localhost:8787/mcp \
 ## Connect ChatGPT (OAuth)
 
 ChatGPT's connector UI can't set custom headers, so the Worker ships an OAuth 2.1 shim
-(authorization code + PKCE + dynamic client registration) shared by all three MCP endpoints:
+(authorization code + PKCE + dynamic client registration) shared by all four MCP endpoints:
 
 1. Deploy the Worker (see below — the `OAUTH_KV` namespace must exist).
 2. In ChatGPT: **Settings → Apps & Connectors → Advanced settings → enable Developer Mode**,
    then **Create connector**: give it a name and the server URL — usually a focused domain
-   endpoint like `https://<worker>.workers.dev/accounting/mcp` or `…/projects/mcp`
+   endpoint like `https://<worker>.workers.dev/accounting/mcp`, `…/projects/mcp`, or
+   `…/documents/mcp`
    (`…/mcp` serves the full surface) — auth **OAuth**. Each endpoint is a separate
    connector with its own authorize flow.
 3. ChatGPT redirects you to the Worker's hosted `/authorize` page. Paste your Odoo URL,
@@ -625,10 +640,12 @@ npx wrangler deploy
   CLOUDFLARE_ACCOUNT_ID=<account-id> npx wrangler deploy
   ```
   Run `npx wrangler whoami` to list the account IDs your login can reach.
-- `wrangler.jsonc` declares the `McpAgent`, `AccountingAgent`, and `ProjectsAgent` Durable
+- `wrangler.jsonc` declares the `McpAgent`, `AccountingAgent`, `ProjectsAgent`, and
+  `DocumentsAgent` Durable
   Objects; the first deploy provisions them automatically — no manual setup needed.
 - On success, wrangler prints the public URL: `https://<worker-name>.<subdomain>.workers.dev`.
-  The MCP endpoints are that URL + `/mcp`, `/accounting/mcp`, and `/projects/mcp`.
+  The MCP endpoints are that URL + `/mcp`, `/accounting/mcp`, `/projects/mcp`, and
+  `/documents/mcp`.
 
 ## Development
 
