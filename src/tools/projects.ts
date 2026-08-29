@@ -428,12 +428,27 @@ export function registerProjectsTools(
         "For deferred work at create time, pass the park `stage_id` (On Hold or equivalent) and keep an ordinary " +
         "open state — never set Waiting; express real blockers only via `depend_on_ids`. " +
         "The response also carries `web_url`: report the new task to the user as [task name](web_url), not as an id. " +
+        "Odoo sanitizes description as HTML on save — plain text is escaped for you unless you set description_is_html. " +
         "For generic models use create_record; for connector bugs use feedback.submit.",
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
       inputSchema: {
         name: z.string().min(1).describe("Task title"),
         project_id: z.number().int().positive().describe("Odoo project.project id (e.g. 4)"),
-        description: z.string().optional().describe("HTML or plain-text description"),
+        description: z
+          .string()
+          .optional()
+          .describe(
+            "Task description. Plain text by default: HTML metacharacters are escaped and newlines become <br> " +
+              "before the write, so angle-bracket placeholders like <R2_ACCESS_KEY_ID> survive Odoo's HTML sanitizer. " +
+              "Set description_is_html when passing real markup."
+          ),
+        description_is_html: z
+          .boolean()
+          .default(false)
+          .describe(
+            "True when `description` is already HTML; plain text is escaped for you. Odoo sanitizes this Html field " +
+              "on save and DELETES unknown tags along with their content, so raw <PLACEHOLDER> text is lost unless escaped."
+          ),
         stage_id: z.number().int().positive().optional().describe("project.task.type stage id"),
         tag_ids: z
           .array(z.number().int().positive())
@@ -442,7 +457,10 @@ export function registerProjectsTools(
         values: z
           .record(z.string(), z.any())
           .optional()
-          .describe("Extra project.task field values merged into the create vals (overrides named fields on key clash)"),
+          .describe(
+            "Extra project.task field values merged into the create vals (overrides named fields on key clash). " +
+              "If you set values.description it bypasses description_is_html and is passed raw into the Html field."
+          ),
         context: zWriteContext
       },
       outputSchema: {
@@ -461,15 +479,21 @@ export function registerProjectsTools(
           .describe("Create succeeded but posting the provenance stamp to the chatter failed")
       }
     },
-    async ({ name, project_id, description, stage_id, tag_ids, values, context }) => {
+    async ({ name, project_id, description, description_is_html, stage_id, tag_ids, values, context }) => {
       logWriteContext("projects.create_task", "project.task", context);
+
+      // `description` is an Odoo Html field: its sanitizer deletes unknown tags AND their content, so
+      // plain text is escaped once here (same contract as projects.post_note / create_activity).
+      const descriptionHtml =
+        description != null ? (description_is_html ? description : plaintextToHtml(description)) : undefined;
 
       const vals: Record<string, unknown> = {
         name,
         project_id,
-        ...(description != null ? { description } : {}),
+        ...(descriptionHtml !== undefined ? { description: descriptionHtml } : {}),
         ...(stage_id != null ? { stage_id } : {}),
         ...(tag_ids != null ? { tag_ids: [[6, 0, tag_ids]] } : {}),
+        // `values.description` overrides the named field and is passed raw (escape hatch).
         ...(values ?? {})
       };
       // Named inputs win over accidental overrides in `values` for the required keys.
@@ -712,8 +736,9 @@ export function registerProjectsTools(
  */
 const PM_SAFE_WRITE_NOTE =
   " This is a PM-safe project-management write: the Odoo model, method and field set are fixed by the tool, " +
-  "so operational prose (banking files, B2C exports, VAT/payroll deadlines) is stored verbatim and is NOT an " +
-  "accounting mutation. Accounting work — tax close, reports, returns, lock exceptions — goes to " +
+  "so operational prose (banking files, B2C exports, VAT/payroll deadlines) is stored as written (plain text is " +
+  "HTML-escaped for Odoo's Html fields) and is NOT an accounting mutation. Accounting work — tax close, reports, " +
+  "returns, lock exceptions — goes to " +
   "bookkeeping.plan_safe_write only; never route it here and never use generic create_record / post_message / " +
   "update_record for project-management notes.";
 
@@ -817,7 +842,7 @@ export function registerProjectWriteTools(
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
       inputSchema: {
         task_id: z.number().int().positive().describe("project.task id to post the note on"),
-        note: z.string().min(1).describe("Note body, stored verbatim"),
+        note: z.string().min(1).describe("Note body (plain text is HTML-escaped unless body_is_html)"),
         body_is_html: z
           .boolean()
           .default(false)
@@ -883,6 +908,7 @@ export function registerProjectWriteTools(
         "expressible, and an update supplying none of them is refused before any Odoo call. " +
         "`description` REPLACES the previous text and is not versioned — for follow-up notes and history use " +
         "projects.post_note; for assigned follow-up work use projects.create_activity. " +
+        "Odoo sanitizes description as HTML on save — plain text is escaped for you unless you set description_is_html. " +
         "To defer/park a task set `stage_id` to the board's On Hold column; Waiting " +
         "(`state=04_waiting_normal`) is Odoo-derived from open Blocked By and is not writable here at all." +
         PM_SAFE_WRITE_NOTE,
@@ -893,7 +919,15 @@ export function registerProjectWriteTools(
         description: z
           .string()
           .optional()
-          .describe("New description (HTML or plain text), stored verbatim — REPLACES the current value"),
+          .describe(
+            "New description — REPLACES the current value and is not versioned. Plain text by default: HTML " +
+              "metacharacters are escaped and newlines become <br>, so <PLACEHOLDER> tokens survive Odoo's HTML " +
+              "sanitizer. Set description_is_html when passing real markup."
+          ),
+        description_is_html: z
+          .boolean()
+          .default(false)
+          .describe("True when `description` is already HTML; plain text is escaped for you"),
         date_deadline: z
           .string()
           .nullable()
@@ -911,13 +945,17 @@ export function registerProjectWriteTools(
           .describe("Canonical clickable Odoo URL of the updated task — surface it as [task name](web_url)")
       }
     },
-    async ({ task_id, name, description, date_deadline, stage_id, priority, context }) => {
+    async ({ task_id, name, description, description_is_html, date_deadline, stage_id, priority, context }) => {
       logWriteContext("projects.update_task", "project.task", context);
+
+      // Html field: escape plain text once, before the safety assessment, so what we assess is what we write.
+      const descriptionHtml =
+        description !== undefined ? (description_is_html ? description : plaintextToHtml(description)) : undefined;
 
       // Only keys the caller actually sent: `date_deadline: null` clears, an absent key is untouched.
       const vals: Record<string, unknown> = {
         ...(name !== undefined ? { name } : {}),
-        ...(description !== undefined ? { description } : {}),
+        ...(descriptionHtml !== undefined ? { description: descriptionHtml } : {}),
         ...(date_deadline !== undefined ? { date_deadline } : {}),
         ...(stage_id !== undefined ? { stage_id } : {}),
         ...(priority !== undefined ? { priority } : {})
