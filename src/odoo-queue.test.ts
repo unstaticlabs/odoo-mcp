@@ -128,4 +128,55 @@ describe("OdooQueue", () => {
     const full = queue.getMetrics();
     expect(full.odoo_calls).toBe(3);
   });
+
+  test("bounds retained metric details while preserving lifetime counters", async () => {
+    const fetchMock = mock(async () => jsonResponse("ok"));
+    globalThis.fetch = fetchMock;
+    const queue = new OdooQueue(callOdoo, { minDelayMs: 0, maxMetricsEntries: 2 });
+
+    await queue.enqueue(conn, "model.a", "one", {});
+    await queue.enqueue(conn, "model.a", "two", {});
+    await queue.enqueue(conn, "model.a", "three", {});
+
+    const metrics = queue.getMetrics();
+    expect(metrics.odoo_calls).toBe(3);
+    expect(metrics.calls.map((call) => call.method)).toEqual(["two", "three"]);
+    expect(metrics.dropped_calls).toBe(1);
+  });
+
+  test("passes a no-timeout-replay policy through to the physical Odoo call", async () => {
+    const fetchMock = mock(async () => {
+      throw new DOMException("Aborted", "AbortError");
+    });
+    globalThis.fetch = fetchMock;
+    const queue = new OdooQueue(callOdoo, { minDelayMs: 0 });
+
+    await expect(queue.enqueue(conn, "usl.document", "mcp_search", {}, {
+      timeoutMs: 10,
+      maxAttempts: 2,
+      retryTimeouts: false
+    })).rejects.toThrow("timed out");
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  test("can retry transient network failures with caller-selected pacing", async () => {
+    let attempts = 0;
+    const fetchMock = mock(async () => {
+      attempts++;
+      if (attempts === 1) throw new TypeError("network down");
+      return jsonResponse("recovered");
+    });
+    globalThis.fetch = fetchMock;
+    const queue = new OdooQueue(callOdoo, { minDelayMs: 0 });
+
+    const result = await queue.enqueue(conn, "usl.document", "mcp_search", {}, {
+      maxAttempts: 2,
+      retryDelayMs: 0,
+      retryNetworkErrors: true
+    });
+
+    expect(result).toBe("recovered");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
 });

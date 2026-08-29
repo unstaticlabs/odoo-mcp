@@ -6,7 +6,7 @@ registers the same ten tools. Accounting and Projects endpoints register none
 of them.
 
 The compatible Odoo distribution is `usl_documents saas~19.3.1.7.6` or later.
-The connector surface is `SERVER_VERSION` `0.22.0`; reconnect or refresh an MCP
+The connector surface is `SERVER_VERSION` `0.23.0`; reconnect or refresh an MCP
 client after upgrading so it discards its cached tool schemas.
 
 ## Tool contract
@@ -18,13 +18,13 @@ client after upgrading so it discards its cached tool schemas.
 | `documents.get_content` | Page through authorized OCR text | 8,000 characters per call; offset <= 1,000,000 |
 | `documents.find_similar` | Find local BGE-M3-nearest documents from one authorized source | 25 results; optional saved-view and structured candidate filters |
 | `documents.get_versions` | List version metadata and guarded preview/download links | No checksums |
-| `documents.list_tags` | List active archive tags | 100 rows per call |
-| `documents.list_correspondents` | List active archive correspondents | 100 rows per call |
-| `documents.list_types` | List active archive document types | 100 rows per call |
-| `documents.list_saved_views` | List accessible shared and caller-owned Documents views | 100 rows per call; `all`, `shared`, or `personal` scope |
+| `documents.list_tags` | List active archive tags | 100 rows per call; default 25 |
+| `documents.list_correspondents` | List active archive correspondents | 100 rows per call; default 25 |
+| `documents.list_types` | List active archive document types | 100 rows per call; default 25 |
+| `documents.list_saved_views` | List accessible shared and caller-owned Documents views | 100 rows per call, default 25; `all`, `shared`, or `personal` scope |
 | `documents.get_links` | List linked Odoo records the caller can currently read | One governed document per call |
 
-Every operation calls one explicit `usl.document.mcp_*` Odoo JSON-2 facade.
+Every uncached operation calls one explicit `usl.document.mcp_*` Odoo JSON-2 facade.
 The Worker has no generic Documents model access, Paperless token, or direct
 Paperless URL.
 
@@ -50,7 +50,8 @@ document type, document date, archive-added date, source, confidentiality,
 review state, linked/unlinked state, one allowed linked record, and background
 document mode.
 
-Search results report `mode`, the effective `query`, an optional `saved_view`,
+Search results report `mode`, the effective `query`, an optional compact
+`saved_view` reference (`id`, `key`, `name`, and `scope`),
 and per-result provenance such as `paperless_lexical`, `paperless_semantic`,
 `paperless_similar`, `odoo_metadata`, or `odoo_saved_view`.
 
@@ -151,6 +152,15 @@ Missing, guessed, and inaccessible document IDs use the same denial.
 
 Search returns excerpts of at most 500 characters. More OCR requires an
 explicit `documents.get_content` call and pages of at most 8,000 characters.
+The Worker projects an explicit field allowlist, drops backend-only or unknown
+fields, caps search responses at 128 KiB and list responses at 96 KiB, and
+never forwards OCR bodies, binary data, checksums, or hashes through metadata
+tools. Legacy JSON text is compact; schema-aware clients also receive the same
+typed `structuredContent`.
+
+Per-document tag metadata is capped at 25 entries. Each saved view carries at
+most 10 tags, 10 correspondents, 10 document types, and four quick filters;
+use the dedicated catalog tools to browse beyond those embedded summaries.
 An external MCP client or its model provider receives the excerpts and OCR
 pages returned by these tools; connect only approved clients and minimize
 content retrieval.
@@ -159,8 +169,16 @@ content retrieval.
 
 The queue serializes calls per Odoo origin at roughly one request per second.
 Search returns at most 25 records inside a window of 50. OCR is paginated.
+Catalog and saved-view reads are cached in memory for 60 seconds, scoped by
+Odoo origin, database, credential fingerprint, method, and normalized arguments;
+concurrent identical misses share one request. OCR, search results, document
+metadata, versions, links, and guarded URLs are never cached. Semantic search
+and similarity use a 45-second timeout and are not automatically replayed after
+a timeout; retryable HTTP/network failures use paced attempts and honor
+`Retry-After`.
 Paperless semantic scopes are chunked behind Odoo without an unscoped service
-query. Track Worker/Durable Object requests, Odoo calls, Paperless lexical
+query. Each facade call logs method, elapsed time, response bytes, and cache-hit
+state without arguments, content, or credentials. Track Worker/Durable Object requests, Odoo calls, Paperless lexical
 latency, and local Ollama latency separately; do not raise concurrency to mask
 retry or permission defects.
 
@@ -196,3 +214,7 @@ SHA-256 was
 `3e65c76922223561d799cbe9ae67b4a1c923745c59b05a58786e831b5ecbf0ed`.
 The coordinated Odoo `usl_documents` gate passed 166 post-install cases (174
 test records) with no failures or errors.
+
+The MCP-only `0.23.0` hardening pass on 2026-08-29 passed TypeScript typecheck,
+all 1,222 Bun tests (4,977 assertions), and a Wrangler deploy dry-run. It did
+not change or requalify the Odoo/Paperless backend.

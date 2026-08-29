@@ -95,6 +95,19 @@ describe("TtlCache", () => {
     await expect(cache.getOrCompute("k", 1000, fn)).rejects.toThrow("boom");
     expect(calls).toBe(2);
   });
+
+  test("coalesces concurrent misses for the same key", async () => {
+    const cache = new TtlCache({ clock: () => 0 });
+    let resolve!: (value: string) => void;
+    const fn = mock(() => new Promise<string>((done) => { resolve = done; }));
+
+    const first = cache.getOrCompute("same", 1000, fn);
+    const second = cache.getOrCompute("same", 1000, fn);
+    resolve("shared");
+
+    expect(await Promise.all([first, second])).toEqual(["shared", "shared"]);
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("getFieldsCached", () => {

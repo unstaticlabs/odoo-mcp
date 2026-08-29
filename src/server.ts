@@ -42,7 +42,7 @@ export interface Props extends Record<string, unknown> {
 
 // Bump this on every future tool-surface change: it's the cache-busting key clients use to
 // refetch the tool list (also stamped into feedback.submit cards to identify the surface seen).
-export const SERVER_VERSION = "0.22.0";
+export const SERVER_VERSION = "0.23.0";
 
 /**
  * Shared plumbing for every endpoint-specific agent. Subclasses differ only in
@@ -63,7 +63,7 @@ export class McpAgent extends OdooAgentBase {
     const getProps = () => this.props;
     registerProjectsTools(this.server, getProps, this.odooQueue, this.cache);
     registerProjectWriteTools(this.server, getProps, this.odooQueue);
-    registerDocumentsTools(this.server, getProps, this.odooQueue);
+    registerDocumentsTools(this.server, getProps, this.odooQueue, this.cache);
     registerReadTools(this.server, getProps, this.odooQueue, this.cache);
     registerResourceTemplates(this.server, getProps, this.odooQueue);
     registerWriteTools(this.server, getProps, this.odooQueue, () => this.env.CONFIRMATION_SECRET);
@@ -122,6 +122,6 @@ export class DocumentsAgent extends OdooAgentBase {
 
   async init() {
     const getProps = () => this.props;
-    registerDocumentsTools(this.server, getProps, this.odooQueue);
+    registerDocumentsTools(this.server, getProps, this.odooQueue, this.cache);
   }
 }
