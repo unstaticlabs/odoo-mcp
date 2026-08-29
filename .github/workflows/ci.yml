@@ -16,7 +16,7 @@ jobs:
 
       - uses: actions/setup-node@v5
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
 
       # The same install the deploy workflow runs. It fails when package.json
