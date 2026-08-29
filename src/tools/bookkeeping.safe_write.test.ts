@@ -2,12 +2,10 @@ import { describe, expect, mock, test } from "bun:test";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { TtlCache } from "../cache";
 import type { OdooQueue } from "../odoo-queue";
-import { toWritePlan, verifyConfirmationToken, type PlanResult } from "../safety";
-import { registerSafeWritePlannerTools } from "./bookkeeping";
+import { registerBookkeepingPreviewTools } from "./bookkeeping";
 import { validatedToolHandler } from "./structured-test-util";
 
 const props = { odooBaseUrl: "http://example.com", odooDb: "test-db", odooApiKey: "secret-key" };
-const SECRET = "test-hmac-secret";
 
 /** Dispatch canned Odoo reads by `${model}.${method}`; `fields_get` keys on the model. */
 function dispatchQueue(responder: (model: string, method: string, args: Record<string, unknown>) => unknown): OdooQueue {
@@ -19,8 +17,8 @@ type ToolResult = { isError?: boolean; content: { text: string }[] };
 
 function buildHandler(queue: OdooQueue) {
   const server = new McpServer({ name: "test", version: "0.0.0" });
-  registerSafeWritePlannerTools(server, () => props, queue, new TtlCache({ clock: () => 0 }), () => SECRET);
-  return validatedToolHandler(server, "bookkeeping.plan_safe_write") as (args: unknown) => Promise<ToolResult>;
+  registerBookkeepingPreviewTools(server, () => props, queue, new TtlCache({ clock: () => 0 }));
+  return validatedToolHandler(server, "bookkeeping.preview_write") as (args: unknown) => Promise<ToolResult>;
 }
 
 // A responder for the CA12 external-value fixture, parameterised by the line/dup rows returned.
@@ -75,8 +73,8 @@ const CA12_VALUES = {
   name: "Applied carryover balance"
 };
 
-describe("bookkeeping.plan_safe_write — create_or_update_report_external_value", () => {
-  test("happy path issues a token that verifies against the reconstructed plan", async () => {
+describe("bookkeeping.preview_write — create_or_update_report_external_value", () => {
+  test("happy path returns an advisory suggested call without any token", async () => {
     const handler = buildHandler(dispatchQueue(ca12Responder()));
     const result = await handler({
       operation: "create_or_update_report_external_value",
@@ -87,25 +85,16 @@ describe("bookkeeping.plan_safe_write — create_or_update_report_external_value
     expect(result.isError).toBeUndefined();
     const parsed = JSON.parse(result.content[0].text);
     expect(parsed.status).toBe("safe");
-    expect(parsed.confirmation_required).toBe(true);
-    expect(typeof parsed.confirmation_token).toBe("string");
+    expect(parsed.advisory).toBe(true);
+    expect(parsed).not.toHaveProperty("confirmation_token");
     expect(parsed.would_write.method).toBe("create");
-
-    // The token verifies against a WritePlan rebuilt from the response (operation + company_id known).
-    const planResult: PlanResult = {
-      status: parsed.status,
-      resolved_target: parsed.resolved_target,
-      existing_records: parsed.existing_records,
-      lock_dates: parsed.lock_dates,
-      warnings: parsed.warnings,
-      would_write: parsed.would_write,
-      duplicate_as_update: false
-    };
-    const plan = toWritePlan("create_or_update_report_external_value", 1, planResult);
-    expect(await verifyConfirmationToken(parsed.confirmation_token, plan, SECRET, 0)).toBe("valid");
+    expect(parsed.suggested_call).toMatchObject({
+      tool: "create_record",
+      arguments: { model: "account.report.external.value", reason: expect.stringContaining("preview") }
+    });
   });
 
-  test("existing value on the same date → duplicate_found update with a token", async () => {
+  test("existing value on the same date → duplicate_found update suggestion", async () => {
     const handler = buildHandler(dispatchQueue(ca12Responder({ existingValues: [{ id: 55, date: "2025-09-30", value: 500 }] })));
     const result = await handler({
       operation: "create_or_update_report_external_value",
@@ -115,10 +104,10 @@ describe("bookkeeping.plan_safe_write — create_or_update_report_external_value
     const parsed = JSON.parse(result.content[0].text);
     expect(parsed.status).toBe("duplicate_found");
     expect(parsed.would_write).toMatchObject({ method: "write", id: 55 });
-    expect(typeof parsed.confirmation_token).toBe("string");
+    expect(parsed.suggested_call).toMatchObject({ tool: "update_record", arguments: { record_id: 55 } });
   });
 
-  test("unknown line code → blocked with no token", async () => {
+  test("unknown line code remains an advisory blocked assessment", async () => {
     const handler = buildHandler(dispatchQueue(ca12Responder({ lineRows: [] })));
     const result = await handler({
       operation: "create_or_update_report_external_value",
@@ -127,7 +116,7 @@ describe("bookkeeping.plan_safe_write — create_or_update_report_external_value
     });
     const parsed = JSON.parse(result.content[0].text);
     expect(parsed.status).toBe("blocked");
-    expect(parsed.confirmation_token).toBeUndefined();
+    expect(parsed).not.toHaveProperty("confirmation_token");
   });
 
   test("unknown company → tool error", async () => {
@@ -142,8 +131,8 @@ describe("bookkeeping.plan_safe_write — create_or_update_report_external_value
   });
 });
 
-describe("bookkeeping.plan_safe_write — create_lock_exception", () => {
-  test("model absent on this Odoo version → blocked, no token", async () => {
+describe("bookkeeping.preview_write — create_lock_exception", () => {
+  test("model absent on this Odoo version → blocked advisory", async () => {
     const handler = buildHandler(
       dispatchQueue((model, method) => {
         if (model === "res.company" && method === "search_read") return [{ id: 1, name: "ACME FR" }];
@@ -158,6 +147,6 @@ describe("bookkeeping.plan_safe_write — create_lock_exception", () => {
     });
     const parsed = JSON.parse(result.content[0].text);
     expect(parsed.status).toBe("blocked");
-    expect(parsed.confirmation_token).toBeUndefined();
+    expect(parsed).not.toHaveProperty("confirmation_token");
   });
 });

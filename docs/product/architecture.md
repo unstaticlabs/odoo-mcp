@@ -1,214 +1,145 @@
 # Architecture
 
-`odoo-mcp` is a single Cloudflare Worker (TypeScript) that exposes Odoo as MCP
-tools. It is stateless and configless: it holds no user database, no Odoo
-credentials of its own, and no per-user state. The only stateful component is a
-Durable Object used purely as a per-Odoo-origin rate limiter.
+`odoo-mcp` is one TypeScript Cloudflare Worker exposing four Streamable HTTP MCP
+surfaces. Odoo is the business/authorization authority; the Worker owns
+transport reliability and interface quality.
 
-```
-  MCP client (Claude Code, Claude, ChatGPT, other app)
-        │  Streamable HTTP  (POST/GET /mcp)
-        │  Authorization: Bearer <odoo-api-key>
-        │  X-Odoo-Url: https://acme.odoo.com
-        │  X-Odoo-Db:  acme-prod
-        ▼
-  ┌─────────────────────────────────────────────┐
-  │  Cloudflare Worker  (McpAgent, TypeScript)   │
-  │                                              │
-  │   tools:  projects.*  booking.*  billing.*   │
-  │            │                                 │
-  │            ▼                                 │
-  │   OdooClient (thin JSON-2 client)            │
-  │            │                                 │
-  │            ▼                                 │
-  │   RateLimiter Durable Object (1 per origin)  │  ← token bucket, ~1 req/s
-  └────────────┼─────────────────────────────────┘
-               │  POST /json/2/{model}/{method}
-               │  Authorization: Bearer <odoo-api-key>
-               │  X-Odoo-Database: <db>
-               ▼
-        User's Odoo instance
+```text
+MCP client
+  -> Worker ingress (headers or OAuth, 4 MiB body cap, target validation)
+  -> endpoint McpAgent Durable Object (tools, session caches, metrics)
+  -> OdooQueue (handshake, capability, retry/outcome contract)
+  -> OdooOriginCoordinator Durable Object (one per normalized origin)
+  -> Odoo /json/2/{model}/{public_method} or /doc-bearer/*.json
 ```
 
-## Runtime & transport
+## Components
 
-- **Runtime:** Cloudflare Worker, TypeScript.
-- **MCP framework:** `McpAgent` from the Cloudflare **`agents`** SDK.
-- **Transport:** **Streamable HTTP** served at `/mcp`. This is the recommended
-  remote MCP transport and what modern MCP clients (Claude, MCP Inspector)
-  speak. A single endpoint handles the POST (client→server requests) and the
-  streamed responses.
-- **SSE:** only added if a legacy client requires the older HTTP+SSE transport.
-  Not a v1 goal.
+### Worker ingress
 
-`McpAgent` is itself backed by a Durable Object for session/agent state, which
-is why the `agents` SDK is used rather than a bare `fetch` handler — it gives us
-the MCP session plumbing for free. Our *own* stateful component (the rate
-limiter) is a second, separate Durable Object.
+`src/index.ts` routes the four sibling endpoints, bounds request bodies even
+without `Content-Length`, normalizes both auth paths, rejects unsupported GET
+streams, and exports all Durable Object classes. Entry-module exports remain
+limited to runtime handlers/classes as required by Workers.
 
-## BYO-key: credentials arrive per request
+### Endpoint agents
 
-The Worker has **no Odoo credentials baked in**. Every MCP request carries the
-caller's own Odoo URL, database, and API key (see [`auth.md`](./auth.md) for the
-exact header contract). The Worker:
+Each MCP endpoint is a separate `McpAgent` Durable Object class. They share:
 
-1. Reads `Authorization: Bearer <odoo-api-key>`, `X-Odoo-Url`, `X-Odoo-Db` from
-   the incoming request.
-2. Constructs an `OdooClient` bound to that origin/db/key for the lifetime of
-   the request.
-3. Calls Odoo **as that user**. Odoo's per-user permissions/record-rules decide
-   what succeeds.
+- one Odoo connection props contract;
+- one queue implementation;
+- concise server instructions;
+- the fixed operations-guide resource and planning prompt.
 
-Because the key is per-request, two different users hitting the same Worker are
-fully isolated — the Worker never mixes credentials and never persists them.
+The endpoint tool composition is intentionally unchanged in 1.0. `/mcp` is the
+full generic surface; focused endpoints reduce client tool-selection cost.
 
-## The Odoo JSON-2 client
+### OdooQueue
 
-A thin TypeScript client, reimplementing the behavior of the Python `OdooClient`
-in the sibling pipeline repo
-(`ai-pipelines-2/src/agent_pipeline/tracker/odoo.py`) — read that for the JSON-2
-shape, but do not port it literally.
+`OdooQueue` is a per-agent facade for:
 
-- **Endpoint:** `POST {origin}/json/2/{model}/{method}`.
-- **Headers:**
-  - `Authorization: Bearer <odoo-api-key>`
-  - `X-Odoo-Database: <db>`
-  - `Content-Type: application/json`, `Accept: application/json`
-- **Body:** method arguments at the JSON root (Odoo 19 JSON-2 does **not** nest
-  them under `kwargs`). Examples:
-  - Read: `search_read` with `{ "domain": [...], "fields": [...], "limit": N }`.
-  - Create: **batched** — `create` with `{ "vals_list": [ {...}, ... ] }`,
-    returning `[id, ...]`. The non-batched `{ "vals": ... }` shape was removed in
-    Odoo 19 and returns 422 (`missing a required argument: 'vals_list'`).
-  - Write: `write` with `{ "ids": [...], "vals": {...} }`.
-  - x2many edits use command tuples, e.g. `tag_ids: [[6, 0, ids]]` (replace),
-    `[[4, id]]` (link), `[[3, id]]` (unlink).
-- **Response:** unwrap the top-level `result` field when present; otherwise
-  return the raw JSON.
-- **Errors:** `401 → auth error` (surface clearly, the caller's key is bad);
-  `429/502/503/504 → transient`, retried with exponential backoff + full jitter,
-  honoring `Retry-After`; other `4xx/5xx → terminal`.
-- **m2o fields** come back as `[id, name]` (or `false`); normalize to a small
-  `{ id, name }` ref.
+- fixed header-credential handshake caching;
+- idempotency capability caching;
+- mutation execution metadata and deterministic child keys;
+- per-tool metrics;
+- read retry policy.
 
-The client is deliberately minimal: one `call(model, method, body)` primitive,
-with typed helpers per tool layered on top.
+It is not the production concurrency authority. Its local FIFO exists for
+tests/injected operation only.
 
-## Rate limiting
+### Origin coordinator
 
-Odoo's cloud AUP is roughly **1 request/second, no parallel calls** per Odoo
-instance. Two regimes:
+`OdooOriginCoordinator` is named with the normalized `scheme://host[:port]`.
+Every physical fetch, including every retry, is proxied through it. The
+coordinator holds the complete outbound request until it can execute it, making
+single-flight cover the entire network call rather than only permit issuance.
 
-- **Hosted / multi-user (the Worker):** a single **Durable Object token-bucket
-  limiter, one instance per Odoo origin** (`scheme://host[:port]`). Every Odoo
-  call from every user of a given Odoo instance funnels through that origin's DO,
-  which enforces single-flight + minimum spacing. Using the origin as the DO name
-  (`env.RATE_LIMITER.idFromName(origin)`) means all Worker isolates and all
-  concurrent requests to the same Odoo server serialize against one coordinator —
-  Durable Objects give us exactly one authoritative instance per name across the
-  whole account. Different Odoo instances get different DOs and never contend.
-- **Local / single-user:** client-side pacing in-process is enough; a full DO
-  round-trip per call is unnecessary overhead. The limiter is abstracted so local
-  dev can use a simple in-memory pacer while production uses the DO. (Miniflare
-  runs the DO locally too, so you *can* exercise the real path — see below.)
+It allows 50 waiters and 60 seconds of queue wait. The next request starts
+immediately after the previous one ends. Different Odoo origins use different
+Durable Objects and do not contend.
 
-The limiter's job is spacing and single-flight, not fairness across users; if two
-users share one Odoo instance they share its ~1 req/s budget, which matches
-Odoo's own per-instance limit.
+No coordinator storage API is used. Headers, bodies, and responses are neither
+persisted nor logged.
 
-## Endpoints: one Worker, four tool surfaces
+### JSON-2 transport
 
-The Worker serves four sibling MCP endpoints, each backed by its own
-`McpAgent` subclass (and Durable Object binding) registering a subset of the
-shared tool modules:
+`callOdoo` constructs only exact public JSON-2 targets, sends named arguments at
+the JSON root, and adds Odoo's bearer/database headers. Create uses
+`vals_list`; write uses `ids` and `vals`. Redirects are manual. Request and
+response bodies are byte-bounded.
 
-- **`/mcp`** — `McpAgent`: the full surface (everything below). Kept intact so
-  existing connectors never break.
-- **`/accounting/mcp`** — `AccountingAgent`: bookkeeping + billing + safe-write
-  planner + feedback. No raw CRUD.
-- **`/projects/mcp`** — `ProjectsAgent`: projects + feedback. No raw CRUD.
-- **`/documents/mcp`** — `DocumentsAgent`: only explicit read-only
-  `usl.document.mcp_*` facade calls. No raw CRUD and no Paperless credential.
+Reads retry bounded transient statuses/timeouts with exponential backoff,
+jitter, and `Retry-After`. Mutations retry ambiguous failures only when the Odoo
+idempotency capability is available. Each retry re-enters the origin
+coordinator.
 
-The domain endpoints exist for clients with small tool budgets (ChatGPT):
-fewer tools means a tighter decision space and less context spent on
-descriptions. Paths are siblings (not nested under `/mcp`) because routing —
-ours and `workers-oauth-provider`'s `apiHandlers` — matches by prefix. Auth is
-shared across all endpoints; see [`auth.md`](./auth.md).
+### Dynamic discovery
 
-**Adding a new endpoint** (e.g. `/booking/mcp`):
+`discover_models` reads `/doc-bearer/index.json`; `describe_model_api` reads the
+model document. These endpoints are authenticated and reflect readable models,
+field access, and public methods for the current user. If unavailable, the MCP
+falls back to `ir.model`, `fields_get`, and form view actions. View actions are
+supplementary hints rather than a complete method catalog.
 
-1. Subclass `OdooAgentBase` in `src/server.ts` with its own `McpServer` name
-   (`odoo-mcp-booking`) and an `init()` registering only that domain's modules;
-   add the class to the `Env` interface and export it from `src/index.ts`.
-2. Add one row to `MCP_ENDPOINTS` in `src/index.ts` — that wires the 405 guard,
-   the header path, and the OAuth `apiHandlers` in one place.
-3. Add the Durable Object binding + a new migration tag in `wrangler.jsonc`.
-4. Extend the "endpoint tool surfaces" tests in `src/index.test.ts` (routing +
-   composition) and bump `SERVER_VERSION`.
-5. Merging to `main` deploys (GitHub Actions); then add the connector in each
-   client. Keep the path a sibling ending in `/mcp`, and keep constants out of
-   `src/index.ts` — the runtime rejects non-handler entry-module exports (put
-   test-support exports in `src/test-exports.ts`).
+The implementation was checked against the local Odoo `api_doc` and JSON-2
+controllers without modifying the Odoo checkout.
 
-## Tool-module structure
+## Transaction model
 
-Tools are grouped by **domain module**, registered on the `McpAgent`:
+Odoo creates one SQL transaction per JSON-2 request. A batch/composite MCP tool
+can therefore span several independent transactions. Deterministic child
+idempotency keys make each step replayable, but do not add rollback between
+steps. Business workflows requiring atomicity belong in one public Odoo method.
 
-- **`projects.*`** — v1. `projects.list_projects`, `projects.list_tasks`,
-  `projects.list_chatter`, `projects.get_task`, `projects.list_stages` (read);
-  `projects.create_task` (write, Odoo 19 `vals_list`), `projects.attach_file` (write, creates
-  one binary `ir.attachment` scoped to an existing `project.task` — the only sanctioned path
-  for attachment bytes, since generic `ir.attachment` CRUD stays PM-denied). Further writes
-  (`update_task`, `move_task`) follow the same pattern.
-- **`documents.*`** — permission-scoped exact/hybrid/semantic search, governed
-  saved-view listing and scoping, bounded OCR paging, similarity, and
-  version/catalog/link reads. The Worker calls Odoo only; Odoo derives the
-  authorized root/candidate set and Paperless performs local retrieval behind
-  that boundary. Guessed and inaccessible document IDs share one denial.
-- **`booking.*`** — later. Read bookings first, then create.
-- **`billing.*`** — later. Read invoices first, then create invoice / link
-  records.
+The optional `usl_json2_idempotency` add-on stores the mutation result in the
+same transaction as the business change. The Worker never substitutes a
+Durable Object commit ledger for database truth.
 
-Shared across every module: **[`src/tools/record-urls.ts`](../../src/tools/record-urls.ts)**,
-the single place that turns `(Odoo origin, model, id, record)` into the record's canonical web
-URL. Reads annotate rows with `_web_url`, writes return `web_url`, and agents are instructed
-to cite records as links rather than ids
-([Record links](../../README.md#record-links--surface-urls-not-bare-ids)). Routes are the
-`ir.actions.act_window.path` values Odoo itself serves — curated per model, with the generic
-`/odoo/{model}/{id}` route Odoo's web client uses for record mentions as the always-available
-fallback. Nothing else in the codebase builds an Odoo UI URL by hand.
+## Context flow
 
-Conventions:
+Generic mutating tools accept legitimate `odoo_context`. Before transport, the
+MCP merges it with any method context and overwrites reserved attribution:
 
-- Every tool **declares whether it is read or write** in its metadata/description
-  so clients and reviewers can see the blast radius at a glance.
-- Every tool that returns or creates a record **returns its canonical URL**, so no client
-  ever has to reconstruct a UI route from an id.
-- **Read-only ships first per domain.** Writes are added only after the reads for
-  that domain are proven, and writes are automatically constrained by the
-  caller's Odoo permissions.
-- Tool names are namespaced by domain (`projects.`, `booking.`, `billing.`) to
-  keep the surface legible as it grows.
+- `usl_agent_origin`;
+- `usl_correlation_id`;
+- `usl_agent_reason`;
+- `usl_idempotency_key`;
+- `usl_idempotency_mode`.
 
-## Local development
+The caller cannot spoof these fields. The Odoo add-ons decide how to persist
+them as immutable audit evidence.
 
-- **`wrangler dev`** — Miniflare runs the Worker **and the Durable Object(s)**
-  locally, so the real rate-limiter path is exercisable without deploying.
-- **MCP Inspector** — `npx @modelcontextprotocol/inspector`, pointed at
-  `http://localhost:8787/mcp`, to list and call tools interactively.
-- **Secrets** — put dev values in **`.dev.vars`** (gitignored). Never commit Odoo
-  URLs/keys.
-- **Dev-only auth bypass** — a dev flag that injects a fixed Odoo URL/db/key
-  (from `.dev.vars`) when no auth header is present, so you don't re-enter
-  credentials on every Miniflare reload. This bypass is strictly gated to local
-  dev and must be off in production.
-- **`wrangler deploy`** — ship to Cloudflare (**Unstatic Labs** account).
+## Error flow
 
-## Hosting & CI note (dogfood)
+Transport produces typed `OdooError` values. Mutation scope wraps failures with
+execution metadata and calculates `succeeded`, `not_applied`, or `unknown`.
+Tool adapters add Odoo refusal-layer diagnostics without changing the refusal.
+Credentials and request values are not reflected.
 
-Deployed on **Cloudflare / Unstatic Labs**. This repo is itself managed by the
-autonomous-dev-pipeline (Odoo board 17), so it will need a **`.ci.json`** gate:
-**build + typecheck + `wrangler deploy --dry-run`**. That gives the pipeline a
-real pass/fail signal on this repo without shipping. (Not present yet — see the
-roadmap.)
+## Bindings and migration
+
+`wrangler.jsonc` declares:
+
+- `McpAgent`;
+- `AccountingAgent`;
+- `ProjectsAgent`;
+- `DocumentsAgent`;
+- `OdooOriginCoordinator` (migration `v4`);
+- `OAUTH_KV`.
+
+The deployment intentionally does not enable strict-public global fetch because
+private/internal HTTPS Odoo origins are supported.
+
+## Adding tools
+
+- Generic functionality should use the universal primitives and Odoo discovery.
+- A dedicated tool should justify its fixed intent by reducing calls or
+  producing clearer structured evidence.
+- Mutation tools use `runMutation`, accept `reason` and `idempotency_key`, and
+  return execution metadata.
+- Composite step names must be stable across exact retries.
+- Post-write readback failures must not imply the write was absent; return the
+  succeeded execution metadata and a warning/error that says the record may
+  already be changed.
+- Record results should carry canonical Odoo URLs.
+- Bump `SERVER_VERSION` for any tool-surface schema change.

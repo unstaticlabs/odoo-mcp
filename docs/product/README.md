@@ -1,91 +1,59 @@
-# odoo-mcp
+# Product overview
 
-A standalone **Model Context Protocol (MCP) server for Odoo**, hosted on
-Cloudflare Workers. It gives AI clients a clean, tool-based gateway to read
-(and eventually write) Odoo data — starting with **projects/tasks** and growing
-into **booking** and **billing**.
+`odoo-mcp` is shared infrastructure for agents that use Odoo as an operational
+system and second brain. It favors broad Odoo compatibility over a
+connector-maintained catalog of permitted business actions.
 
-## What it is
+## Product contract
 
-`odoo-mcp` is a general-purpose Odoo gateway with many consumers. It exposes
-Odoo functionality as MCP tools over **Streamable HTTP** at `/mcp`, so any
-MCP-capable client can connect to a single URL and start calling tools.
+- Bring a real Odoo user credential.
+- Discover the connected installation's schema and public API.
+- Use generic tools for the full Odoo surface and dedicated tools for efficient
+  fixed-intent workflows.
+- Let Odoo make authorization and action-policy decisions.
+- Make retries, ambiguity, transport bounds, and diagnostics explicit.
+- Return links and structured evidence agents can cite and reconcile.
 
-It is a **separate component** from the autonomous-dev-pipeline
-(`ai-pipelines-2`). That pipeline keeps its own direct Odoo access for its own
-purposes; `odoo-mcp` does not replace it and is not coupled to it. Think of
-`odoo-mcp` as shared infrastructure: one Odoo gateway that several independent
-AI clients and projects can point at.
+The MCP does not make a user safer by silently contradicting Odoo permissions.
+AI Agent restrictions belong in Odoo, where they cover every integration path,
+including `sudo()`-mediated behavior guarded by USL policy.
 
-## Who uses it
+## Consumers and endpoints
 
-- **Claude Code** — as a configured MCP server, for reading/creating Odoo tasks
-  from the terminal.
-- **Other Claude instances** — desktop/web Claude, or other agents, connecting
-  to the hosted `/mcp` endpoint.
-- **ChatGPT** (e.g. Valentin's use) — via ChatGPT's remote-connector support.
-  See the ChatGPT caveat in [`auth.md`](./auth.md) — its connector auth may not
-  pass a static API-key header, which is the one path that could later need a
-  thin OAuth shim. After a `SERVER_VERSION` bump, refresh the connector's tool
-  list so new/updated parameters (including top-level `confirmation_token`) appear.
-- **Other projects/apps** — anything that speaks MCP and needs Odoo data.
+Claude, ChatGPT, IDE agents, and other MCP clients can connect to `/mcp` or a
+focused domain endpoint. Header-auth capable clients use BYO-key headers;
+OAuth-only clients use the built-in credential-vault shim.
 
-Every record a tool returns carries its **canonical clickable Odoo URL** (`_web_url` on
-reads, `web_url` on writes), because the person on the other end of the conversation cannot
-do anything with "task 2266". Agents are told to cite records as
-[record name](https://odoo.unstaticlabs.com/odoo/project/17/tasks/2266) and to treat the id
-as a secondary technical identifier — see
-[Record links](../../README.md#record-links--surface-urls-not-bare-ids).
+All endpoints share authentication and safety plumbing. Focused endpoints are
+about tool budgets and domain ergonomics, not separate authorization.
 
-Irreversible ledger writes (post / pay / reconcile / delete / lock) on `/mcp` use a
-two-phase fence: call without `confirmation_token` → `confirmation_required` + token →
-retry with the **top-level** `confirmation_token` argument. See
-[`bookkeeping.md`](../bookkeeping.md) (“The fence” / Caller recipe).
+## Agent experience
 
-## The domains
+The server gives agents three layers of guidance:
 
-Tools are grouped by **domain module**, and each domain ships **read-only
-first**, with writes following once the reads are proven:
+1. short server initialization instructions;
+2. accurate tool descriptions and JSON schemas;
+3. `odoo://guide/operations` plus `plan_odoo_operation` for detailed planning.
 
-1. **`projects.*`** (v1) — read Odoo projects, tasks, stages, comments; later,
-   create/update tasks.
-2. **`booking.*`** (later) — read and eventually create bookings.
-3. **`billing.*`** (later) — read invoices, and eventually create invoices and
-   link records.
+Dynamic discovery avoids guessing against customized/Studio-heavy Odoo
+instances. API docs are preferred; ORM/view inspection is the honest fallback.
 
-Writes are always **bounded by the caller's own Odoo permissions** (see auth,
-below), so a read-only Odoo user simply cannot mutate anything even when a write
-tool exists.
+## Reliability promise
 
-## The auth model in one paragraph
+Reads have bounded transient retry. Mutations always expose a stable key and
+truthful outcome. Exact replay is claimed only when Odoo advertises and enforces
+the atomic idempotency protocol. Cross-call atomicity is never implied.
 
-**Bring-your-own-key (BYO-key), no OAuth for v1.** Each user supplies their
-*own* Odoo instance URL + Odoo API key. The server calls Odoo **as that user**,
-so **Odoo's own per-user permissions and record-rules are the authorization** —
-there are no scopes, no shared service account, and no user store. The server is
-stateless and configless. Full detail in [`auth.md`](./auth.md).
-
-## North star
-
-**One small, stateless Odoo gateway that any AI client can point at, where
-security is Odoo's problem, not ours.** We add tools domain by domain
-(projects → booking → billing), read before write, and never accumulate a user
-database or a scope system — the user's Odoo key already encodes exactly what
-they're allowed to do.
+Every physical request shares a per-origin single-flight Durable Object, so
+multiple agents, users, sessions, and endpoints cannot accidentally overlap
+calls to the same Odoo origin.
 
 ## Documents
 
-- [`overview.md`](./README.md) — this file.
-- [`architecture.md`](./architecture.md) — Worker + Streamable HTTP + BYO-key +
-  JSON-2 client + rate-limit Durable Object + tool-module structure + local dev.
-- [`auth.md`](./auth.md) — the BYO-key model in depth, the header contract, the
-  ChatGPT caveat, and the rejected OAuth-scopes alternative.
-- [`roadmap.md`](./roadmap.md) — milestones M1–M4 and the "add OAuth only if
-  ChatGPT needs it" branch.
-
-## Hosting & dogfood note
-
-Hosted on **Cloudflare, the Unstatic Labs account**. This repo will itself be a
-project managed by the autonomous-dev-pipeline (Odoo board 17), so it will
-eventually need a `.ci.json` gate (build + typecheck + `wrangler deploy
---dry-run`). See the roadmap.
+- [Safety design](../safety-design.md)
+- [Idempotency protocol](../idempotency-protocol.md)
+- [Architecture](architecture.md)
+- [Authentication](auth.md)
+- [Documents facade](documents.md)
+- [Accounting](../bookkeeping.md)
+- [Testing](../testing.md)

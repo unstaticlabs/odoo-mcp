@@ -1984,7 +1984,8 @@ describe("bookkeeping.fetch_attachment", () => {
       details: "Access Denied by Odoo",
       recoverable: false,
       refusing_layer: "odoo_acl",
-      next_step: "Use an Odoo user with the required access rights, or perform the action in the Odoo UI as that user.",
+      next_step:
+        "Odoo denied this identity's access. Accept the denial or ask an Odoo administrator to review the user's rights; do not seek an MCP bypass.",
       odoo_exception: "Access Denied by Odoo"
     });
     expect(result.content[0].text).not.toContain("secret-bookkeeping-key");
@@ -2484,7 +2485,7 @@ describe("bookkeeping.link_source_document", () => {
     document_id: 11,
     target_model: "account.move" as const,
     target_id: 42,
-    context: "filing the scanned invoice against vendor bill 42"
+    reason: "filing the scanned invoice against vendor bill 42"
   };
 
   function mockLinkFetch(opts: {
@@ -2527,7 +2528,15 @@ describe("bookkeeping.link_source_document", () => {
     expect(result.isError).toBeUndefined();
     const write = fetchCalls.find((c) => c.url.endsWith("/documents.document/write"));
     expect(write).toBeDefined();
-    expect(write!.body).toEqual({ ids: [11], vals: { res_model: "account.move", res_id: 42 } });
+    expect(write!.body.ids).toEqual([11]);
+    expect(write!.body.vals).toEqual({ res_model: "account.move", res_id: 42 });
+    expect(write!.body.context).toMatchObject({
+      usl_agent_origin: "odoo-mcp",
+      usl_agent_reason: baseArgs.reason,
+      usl_idempotency_mode: "unavailable"
+    });
+    expect(write!.body.context.usl_correlation_id).toMatch(/^mcp-[a-f0-9]{32}$/);
+    expect(write!.body.context.usl_idempotency_key).toBeString();
     expect(Object.keys(write!.body.vals).sort()).toEqual(["res_id", "res_model"]);
     expect(fetchCalls.some((c) => c.url.includes("/ir.attachment/"))).toBe(false);
 
@@ -2582,7 +2591,7 @@ describe("bookkeeping.link_source_document", () => {
       document_id: 11,
       target_model: "project.task",
       target_id: 7,
-      context: "link scanned brief to task 7"
+      reason: "link scanned brief to task 7"
     });
 
     expect(result.isError).toBeUndefined();
@@ -2679,7 +2688,7 @@ describe("bookkeeping.link_source_document", () => {
       document_id: 11,
       target_model: "res.partner",
       target_id: 42,
-      context: "should not link"
+      reason: "should not link"
     };
     expect(tool.inputSchema.safeParse(bad).success).toBe(false);
     expect(fetchCalls.length).toBe(0);
@@ -2687,7 +2696,7 @@ describe("bookkeeping.link_source_document", () => {
     const result = await tool.handler(bad);
     expect(result.isError).toBe(true);
     const envelope = JSON.parse(result.content[0].text);
-    expect(envelope.error).toBe("write_blocked");
+    expect(envelope.error).toBe("invalid_target");
     expect(fetchCalls.length).toBe(0);
   });
 
@@ -2705,7 +2714,7 @@ describe("bookkeeping.link_source_document", () => {
     expect(fetchCalls.length).toBe(0);
   });
 
-  test("missing or empty context is rejected by the schema with zero fetch calls", async () => {
+  test("reason is optional but an explicitly empty reason is rejected by the schema", async () => {
     const agent = makeAgent();
     const fetchCalls: string[] = [];
     globalThis.fetch = mock(async (url: string) => {
@@ -2714,8 +2723,8 @@ describe("bookkeeping.link_source_document", () => {
     });
 
     const shape = agent._registeredTools["bookkeeping.link_source_document"].inputSchema.shape;
-    expect(shape.context.safeParse("").success).toBe(false);
-    expect(shape.context.safeParse(undefined).success).toBe(false);
+    expect(shape.reason.safeParse("").success).toBe(false);
+    expect(shape.reason.safeParse(undefined).success).toBe(true);
     expect(fetchCalls.length).toBe(0);
   });
 

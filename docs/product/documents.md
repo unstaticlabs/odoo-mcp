@@ -6,7 +6,7 @@ registers the same ten tools. Accounting and Projects endpoints register none
 of them.
 
 The compatible Odoo distribution is `usl_documents saas~19.3.1.7.6` or later.
-The connector surface is `SERVER_VERSION` `0.23.0`; reconnect or refresh an MCP
+The connector surface follows `SERVER_VERSION` `1.0.0`; reconnect or refresh an MCP
 client after upgrading so it discards its cached tool schemas.
 
 ## Tool contract
@@ -167,7 +167,7 @@ content retrieval.
 
 ## Capacity and failure behavior
 
-The queue serializes calls per Odoo origin at roughly one request per second.
+The global origin coordinator serializes complete calls per Odoo origin and starts the next immediately after completion.
 Search returns at most 25 records inside a window of 50. OCR is paginated.
 Catalog and saved-view reads are cached in memory for 60 seconds, scoped by
 Odoo origin, database, credential fingerprint, method, and normalized arguments;

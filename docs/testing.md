@@ -181,7 +181,7 @@ using a domain like `[["model","=","project.task"],["res_id","in",[990,954,991,.
 `fields` including `body`, `preview`, or `email_body`. Reasons:
 
 1. Some MCP hosts block bulk message-body fetches as high-risk.
-2. Odoo rate limit (~1 req/s via `OdooQueue`) makes wide scans slow.
+2. Wide scans consume the globally serialized per-origin request queue.
 3. Message bodies inflate token usage.
 
 **Single-task fallback** — when you only need one task's chatter, call `expand_record` with
@@ -297,5 +297,49 @@ those live in the OAuth grant, not in the connector. When an (ephemeral) test in
 - OAuth-path credentials are validated against Odoo once at `/authorize`, then stored
   end-to-end encrypted in `OAUTH_KV` (decryptable only by presenting the issued token).
 - Auth failures return `401` with a generic message (no header values, no token echoes).
-- Writes (`create`/`update`/`delete`) are limited by the caller's own Odoo permissions on
-  both paths.
+- Writes (`create`/`update`/`delete` and public model methods) are governed by the caller's
+  own Odoo permissions and action policy on both paths.
+
+---
+
+## 4. Safety-redesign release gate
+
+Run the hermetic checks before every release:
+
+```bash
+npm run typecheck
+bun test
+npm run test:miniflare
+npx wrangler deploy --dry-run
+git diff --check
+```
+
+The suite covers universal generic model/method routing, removal of connector
+confirmation contracts, Odoo denial classification, mutation key reuse,
+deterministic child keys, one-shot ambiguity without capability support,
+reserved context attribution, URL/origin validation, redirect refusal,
+credential redaction, streamed payload bounds, dynamic API-doc discovery and
+fallback, and coordinator queue bounds/single-flight.
+
+`npm run test:miniflare` bundles the production coordinator core into a real
+Miniflare Durable Object harness. It proves global same-origin serialization
+and independent-origin concurrency without requiring Odoo credentials.
+
+Before production, run a Miniflare-to-Odoo integration test with
+`usl_json2_idempotency` deployed:
+
+1. Force the response to be lost after Odoo commits a keyed mutation.
+2. Retry with the same key and identical business arguments.
+3. Assert one business record/change, one Agent audit event, and a replayed
+   result.
+4. Send the same key with changed arguments and assert HTTP 409
+   `idempotency_conflict`.
+5. Run simultaneous calls from different MCP sessions and focused endpoints to
+   the same Odoo origin; assert physical peak concurrency is one.
+6. Run another Odoo origin at the same time; assert it is independent.
+7. Verify an AI Agent is denied Odoo-protected irreversible actions, an
+   authorized human succeeds once, and an ordinarily restricted user remains
+   restricted by ACLs/record rules.
+
+Record and monitor replay counts, conflicts, `outcome_unknown`, `origin_busy`,
+Odoo policy denials, and invalid-target failures during rollout.

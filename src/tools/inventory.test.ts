@@ -9,6 +9,7 @@ import { describe, expect, mock, test } from "bun:test";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { OdooError } from "../odoo";
 import type { OdooQueue } from "../odoo-queue";
+import { withTestMutationScope } from "../test-odoo-queue";
 import {
   buildDraftVendorReceiptVals,
   normalizeScheduledDate,
@@ -30,11 +31,11 @@ function recordingQueue(responder: (call: Call) => unknown) {
     calls.push(call);
     return responder(call);
   });
-  const queue = {
+  const queue = withTestMutationScope({
     enqueue,
     snapshot: () => calls.length,
     delta: (snap: number) => ({ odoo_calls: calls.length - snap, total_duration_ms: 0, calls: [] })
-  } as unknown as OdooQueue;
+  });
   return { queue, calls };
 }
 
@@ -115,7 +116,7 @@ const baseArgs = {
   scheduled_date: "2026-06-30",
   origin: "PO-2026-114",
   lines: [{ product_id: 77, product_uom_id: 1, quantity: 3 }],
-  context: "FY2025-26 close: reconstructing the June receipt evidence for Acme"
+  reason: "FY2025-26 close: reconstructing the June receipt evidence for Acme"
 };
 
 describe("registration", () => {
@@ -125,19 +126,20 @@ describe("registration", () => {
 
     expect(tool.annotations.readOnlyHint).toBe(false);
     expect(tool.annotations.destructiveHint).toBe(false);
-    expect(tool.annotations.openWorldHint).toBe(false);
+    expect(tool.annotations.openWorldHint).toBe(true);
     expect(String(tool.description).startsWith("Write:")).toBe(true);
-    expect(tool.description).toContain("button_validate");
+    expect(tool.description).toContain("generic public methods");
     expect(tool.description).toContain("web_url");
   });
 
-  test("context is required and non-empty; lines must carry positive quantities", () => {
+  test("reason and idempotency are optional; lines must carry positive quantities", () => {
     const { server } = buildHandler(receiptQueue().queue);
     const shape = (server as any)._registeredTools["inventory.create_draft_vendor_receipt"].inputSchema.shape;
 
-    expect(shape.context.safeParse("recording the June receipt").success).toBe(true);
-    expect(shape.context.safeParse("").success).toBe(false);
-    expect(shape.context.safeParse(undefined).success).toBe(false);
+    expect(shape.reason.safeParse("recording the June receipt").success).toBe(true);
+    expect(shape.reason.safeParse("").success).toBe(false);
+    expect(shape.reason.safeParse(undefined).success).toBe(true);
+    expect(shape.idempotency_key.safeParse("receipt-2026-06").success).toBe(true);
     expect(shape.lines.safeParse([]).success).toBe(false);
     expect(shape.lines.safeParse([{ product_id: 77, product_uom_id: 1, quantity: 0 }]).success).toBe(false);
     expect(shape.lines.safeParse([{ product_id: 77, product_uom_id: 1, quantity: 2.5 }]).success).toBe(true);

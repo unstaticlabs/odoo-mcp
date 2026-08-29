@@ -1,6 +1,7 @@
 import { mock, describe, test, expect, afterEach } from "bun:test";
 import { z } from "zod";
-import { FINANCE_KEYWORD_PM_TEXT } from "./write-safety.fixtures";
+import { FINANCE_KEYWORD_PM_TEXT } from "./agent-content.fixtures";
+import { withTestMutationScope } from "./test-odoo-queue";
 
 mock.module("agents/mcp", () => {
   return {
@@ -21,7 +22,7 @@ mock.module("agents", () => {
 // workers-oauth-provider imports the workerd-only "cloudflare:workers" module
 // solely for the WorkerEntrypoint base class; a stub suffices under bun.
 mock.module("cloudflare:workers", () => {
-  return { WorkerEntrypoint: class WorkerEntrypoint {} };
+  return { WorkerEntrypoint: class WorkerEntrypoint {}, DurableObject: class DurableObject {} };
 });
 
 const { default: handler } = await import("./index");
@@ -53,7 +54,7 @@ const {
 
 const originalFetch = globalThis.fetch;
 
-/** Tests don't want the production 1000ms min-delay between calls. */
+/** Tests use the injectable local coordinator instead of a Workers Durable Object. */
 function makeQueue() {
   return new OdooQueue(callOdoo, { minDelayMs: 0 });
 }
@@ -61,7 +62,7 @@ function makeQueue() {
 async function buildWriteToolAgent() {
   const AgentCtor = McpAgent as any;
   const agent = new AgentCtor();
-  agent.odooQueue = makeQueue();
+  agent.odooQueue = withTestMutationScope(makeQueue());
   agent.props = { odooBaseUrl: "http://example.com", odooDb: "test-db", odooApiKey: "secret-key" };
   await agent.init();
   return agent;
@@ -94,7 +95,7 @@ function makeStubQueue({ createId = 42, failMessagePost = false }: { createId?: 
 async function buildAgentWithQueue(queue: unknown, propsOverride?: unknown) {
   const AgentCtor = McpAgent as any;
   const agent = new AgentCtor();
-  agent.odooQueue = queue;
+  agent.odooQueue = withTestMutationScope(queue as { enqueue: (...args: any[]) => Promise<any> });
   agent.props = propsOverride ?? { odooBaseUrl: "http://example.com", odooDb: "test-db", odooApiKey: "secret-key" };
   await agent.init();
   return agent;
@@ -286,6 +287,16 @@ describe("callOdoo", () => {
     expect(error?.message).toContain("failed (400): Bad Request");
     expect(fetchMock.mock.calls.length).toBe(1);
   });
+
+  test("rejects malformed JSON-2 target identifiers before fetch", async () => {
+    const fetchMock = mock(() => Promise.reject(new Error("should not be called")));
+    globalThis.fetch = fetchMock;
+    await expect(callOdoo({ url: "https://odoo.example.com", db: "db", apiKey: "key" }, "res.partner", "../web", {})).rejects.toMatchObject({
+      code: "invalid_request",
+      mutationOutcome: "not_applied"
+    });
+    expect(fetchMock.mock.calls.length).toBe(0);
+  });
 });
 
 describe("OdooError classification", () => {
@@ -300,7 +311,7 @@ describe("OdooError classification", () => {
     { status: 403, code: "permission_denied", recoverable: false },
     { status: 404, code: "model_or_method_not_found", recoverable: false },
     { status: 400, code: "invalid_request", recoverable: false },
-    { status: 500, code: "odoo_server_error", recoverable: false }
+    { status: 500, code: "odoo_server_error", recoverable: true }
   ];
 
   for (const { status, code, recoverable } of statusCases) {
@@ -462,7 +473,7 @@ describe("classifyAggregationDiagnosis", () => {
 describe("default fetch handler", () => {
   const validHeaders = {
     Authorization: "Bearer my-secret-token-abc123",
-    "X-Odoo-Url": "http://odoo.example.com",
+    "X-Odoo-Url": "https://odoo.example.com",
     "X-Odoo-Db": "my-db"
   };
 
@@ -470,6 +481,21 @@ describe("default fetch handler", () => {
   function makeRequest(headers: Record<string, string>, path = "/mcp") {
     return new Request(`http://worker.example.com${path}`, { method: "POST", headers });
   }
+
+  test("rejects an oversized streamed body when Content-Length is absent", async () => {
+    const body = new Uint8Array(4 * 1024 * 1024 + 1);
+    const request = new Request("http://worker.example.com/mcp", {
+      method: "POST",
+      headers: validHeaders,
+      body
+    });
+    expect(request.headers.has("Content-Length")).toBe(false);
+
+    const res = await handler.fetch(request, {} as any, {} as any);
+
+    expect(res.status).toBe(413);
+    expect(await res.json()).toEqual({ error: "request_too_large", max_bytes: 4 * 1024 * 1024 });
+  });
 
   test("returns 404 for non-/mcp paths", async () => {
     const res = await handler.fetch(makeRequest(validHeaders, "/other"), {} as any, {} as any);
@@ -584,7 +610,7 @@ describe("endpoint tool surfaces", () => {
     const names = await toolNames(AccountingAgent);
 
     expect(names.has("bookkeeping.get_snapshot")).toBe(true);
-    expect(names.has("bookkeeping.plan_safe_write")).toBe(true);
+    expect(names.has("bookkeeping.preview_write")).toBe(true);
     expect(names.has("billing.audit_expenses")).toBe(true);
     expect(names.has("billing.configure_draft_vendor_bill")).toBe(true);
     // Draft-bill source-PDF attach ships on the accounting surface without opening generic CRUD.
@@ -1328,111 +1354,6 @@ describe("write tool callOdoo call shapes", () => {
   });
 });
 
-describe("create_record provenance stamping", () => {
-  const STAMP_RE = /\[agent-source\] engineering_task corr=src-[0-9a-f]{8} via=\S+/;
-
-  test("project.task happy path: exactly create then message_post targeting the new id", async () => {
-    const queue = makeStubQueue({ createId: 42 });
-    const agent = await buildAgentWithQueue(queue);
-    const handler = getToolHandler(agent, "create_record");
-
-    const result = await handler({ model: "project.task", values: { name: "New Task" } });
-
-    expect(queue.calls.length).toBe(2);
-    expect(queue.calls[0].method).toBe("create");
-    expect(queue.calls[0].args).toEqual({ vals_list: [{ name: "New Task" }] });
-    expect(queue.calls[1].method).toBe("message_post");
-    expect(queue.calls[1].model).toBe("project.task");
-    expect(queue.calls[1].args.ids).toEqual([42]);
-    expect(queue.calls[1].args.message_type).toBe("comment");
-    expect(queue.calls[1].args.body).toMatch(STAMP_RE);
-    expect(result.isError).toBeUndefined();
-  });
-
-  test("result text includes the new id, the same token as the chatter body, and the echo instruction", async () => {
-    const queue = makeStubQueue({ createId: 77 });
-    const agent = await buildAgentWithQueue(queue);
-    const handler = getToolHandler(agent, "create_record");
-
-    const result = await handler({ model: "project.task", values: { name: "X" } });
-    const text = result.content[0].text as string;
-    const bodyToken = (queue.calls[1].args.body as string).match(/src-[0-9a-f]{8}/)![0];
-
-    expect(text).toContain("77");
-    expect(text).toContain(bodyToken);
-    expect(text).toContain("include this token verbatim");
-    // The token must be front-loaded (before the id), not appended, so the model leads with it.
-    expect(text.indexOf(bodyToken)).toBeLessThan(text.indexOf("77"));
-  });
-
-  test("non-task model without provenance stamp: project.tags create passes safety gate", async () => {
-    const queue = makeStubQueue({ createId: 5 });
-    const agent = await buildAgentWithQueue(queue);
-    const handler = getToolHandler(agent, "create_record");
-
-    const result = await handler({ model: "project.tags", values: { name: "urgent" } });
-    const text = result.content[0].text as string;
-
-    expect(queue.calls.length).toBe(1);
-    expect(queue.calls[0].method).toBe("create");
-    expect(text).toContain("5");
-    expect(text).not.toContain("Trace token");
-    expect(text).not.toContain("[agent-source]");
-  });
-
-  test("res.partner non-financial create reaches Odoo (no blanket partner deny)", async () => {
-    const queue = makeStubQueue({ createId: 5 });
-    const agent = await buildAgentWithQueue(queue);
-    const handler = getToolHandler(agent, "create_record");
-
-    const result = await handler({ model: "res.partner", values: { name: "Acme" } });
-
-    expect(result.isError).toBeUndefined();
-    expect(queue.calls.some((c: any) => c.method === "create")).toBe(true);
-  });
-
-  test("post failure isolation: still returns id + warning, isError not set", async () => {
-    const queue = makeStubQueue({ createId: 88, failMessagePost: true });
-    const agent = await buildAgentWithQueue(queue);
-    const handler = getToolHandler(agent, "create_record");
-
-    const result = await handler({ model: "project.task", values: { name: "X" } });
-    const text = result.content[0].text as string;
-
-    expect(text).toContain("88");
-    expect(text).toContain("failed to post the provenance stamp");
-    expect(result.isError).toBeUndefined();
-  });
-
-  test("via=unknown fallback when no clientName prop and no client version", async () => {
-    const queue = makeStubQueue({ createId: 9 });
-    const agent = await buildAgentWithQueue(queue, {
-      odooBaseUrl: "http://example.com",
-      odooDb: "test-db",
-      odooApiKey: "secret-key"
-    });
-    expect(agent.server.server.getClientVersion()).toBeUndefined();
-    const handler = getToolHandler(agent, "create_record");
-
-    await handler({ model: "project.task", values: { name: "X" } });
-
-    expect(queue.calls[1].args.body as string).toMatch(/ via=unknown$/);
-  });
-
-  test("uniqueness: two consecutive project.task creates produce different tokens", async () => {
-    const queue = makeStubQueue({ createId: 1 });
-    const agent = await buildAgentWithQueue(queue);
-    const handler = getToolHandler(agent, "create_record");
-
-    await handler({ model: "project.task", values: { name: "A" } });
-    await handler({ model: "project.task", values: { name: "B" } });
-
-    const t1 = (queue.calls[1].args.body as string).match(/src-[0-9a-f]{8}/)![0];
-    const t2 = (queue.calls[3].args.body as string).match(/src-[0-9a-f]{8}/)![0];
-    expect(t1).not.toBe(t2);
-  });
-});
-
 describe("chatter HTML escaping — no double-escape", () => {
   // Regression: message_post bodies were escaped locally but sent WITHOUT
   // body_is_html, so Odoo re-escaped them (`<p>` → `&amp;lt;p&amp;gt;`), rendering
@@ -1496,275 +1417,6 @@ describe("chatter HTML escaping — no double-escape", () => {
     expect(posts[1].args.body_is_html).toBe(true);
   });
 
-  test("create_record provenance stamp declares body_is_html", async () => {
-    const queue = makeStubQueue({ createId: 42 });
-    const agent = await buildAgentWithQueue(queue);
-    const handler = getToolHandler(agent, "create_record");
-
-    await handler({ model: "project.task", values: { name: "X" } });
-
-    const post = queue.calls.find((c) => c.method === "message_post")!;
-    expect(post.args.body_is_html).toBe(true);
-  });
-});
-
-describe("write safety gate (connector)", () => {
-  test("post_message allows banking/B2C operational note text on project.task", async () => {
-    const queue = makeStubQueue();
-    const agent = await buildAgentWithQueue(queue);
-    const handler = getToolHandler(agent, "post_message");
-
-    const result = await handler({
-      model: "project.task",
-      record_id: 7,
-      body: FINANCE_KEYWORD_PM_TEXT.chatterBody,
-      body_is_html: false
-    });
-
-    expect(result.isError).toBeUndefined();
-    const messagePosts = queue.calls.filter((c) => c.method === "message_post");
-    expect(messagePosts).toHaveLength(1);
-  });
-
-  test("update_record allows finance-keyword description on project.task and reaches Odoo", async () => {
-    const queue = makeStubQueue();
-    const agent = await buildAgentWithQueue(queue);
-    const handler = getToolHandler(agent, "update_record");
-
-    const result = await handler({
-      model: "project.task",
-      record_id: 990,
-      values: { description: FINANCE_KEYWORD_PM_TEXT.taskDescription }
-    });
-
-    expect(result.isError).toBeUndefined();
-    expect(queue.calls).toHaveLength(1);
-    expect(queue.calls[0]).toMatchObject({
-      model: "project.task",
-      method: "write",
-      args: { ids: [990], vals: { description: FINANCE_KEYWORD_PM_TEXT.taskDescription } }
-    });
-  });
-
-  test("update_record allows account.move write through to Odoo (no prefix deny)", async () => {
-    const queue = makeStubQueue();
-    const agent = await buildAgentWithQueue(queue);
-    const handler = getToolHandler(agent, "update_record");
-
-    const result = await handler({ model: "account.move", record_id: 1, values: { ref: "INV/1" } });
-
-    expect(result.isError).toBeUndefined();
-    expect(queue.calls.some((c: any) => c.method === "write")).toBe(true);
-  });
-
-  test("update_record allows finance-keyword text on account.move (structure over content; no prefix deny)", async () => {
-    const queue = makeStubQueue();
-    const agent = await buildAgentWithQueue(queue);
-    const handler = getToolHandler(agent, "update_record");
-
-    const result = await handler({
-      model: "account.move",
-      record_id: 1,
-      values: { narration: FINANCE_KEYWORD_PM_TEXT.chatterBody }
-    });
-
-    expect(result.isError).toBeUndefined();
-    expect(queue.calls.some((c: any) => c.method === "write")).toBe(true);
-  });
-
-  test("call_model_method read bypasses the write safety gate", async () => {
-    const agent = await buildWriteToolAgent();
-    const fetchCalls: { url: string; body: any }[] = [];
-    globalThis.fetch = mock(async (url: string, init: any) => {
-      fetchCalls.push({ url, body: JSON.parse(init.body) });
-      return new Response(JSON.stringify({ result: [] }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" }
-      });
-    });
-
-    const handler = getToolHandler(agent, "call_model_method");
-    const result = await handler({
-      model: "account.move",
-      method: "read",
-      ids: [1],
-      kwargs: { fields: ["name"] },
-      args: []
-    });
-
-    expect(result.isError).toBeUndefined();
-    expect(fetchCalls.length).toBe(1);
-  });
-
-  test("create_record for mail.activity with PM note text reaches Odoo", async () => {
-    const queue = makeStubQueue({ createId: 99 });
-    const agent = await buildAgentWithQueue(queue);
-    const handler = getToolHandler(agent, "create_record");
-
-    const result = await handler({
-      model: "mail.activity",
-      values: {
-        res_model: "project.task",
-        res_id: 42,
-        summary: FINANCE_KEYWORD_PM_TEXT.activitySummary,
-        note: FINANCE_KEYWORD_PM_TEXT.activityNote,
-        activity_type_id: 4,
-        user_id: 7,
-        date_deadline: "2026-07-15"
-      }
-    });
-
-    expect(result.isError).toBeUndefined();
-    expect(queue.calls.length).toBe(1);
-    expect(queue.calls[0].model).toBe("mail.activity");
-    expect(queue.calls[0].method).toBe("create");
-  });
-
-  test("call_model_method allows mail.activity create with PM note text", async () => {
-    const queue = makeStubQueue({ createId: 101 });
-    const agent = await buildAgentWithQueue(queue);
-    const handler = getToolHandler(agent, "call_model_method");
-
-    const result = await handler({
-      model: "mail.activity",
-      method: "create",
-      kwargs: {
-        vals_list: [
-          {
-            res_model: "project.task",
-            res_id: 42,
-            summary: FINANCE_KEYWORD_PM_TEXT.activitySummary,
-            note: FINANCE_KEYWORD_PM_TEXT.activityNote,
-            activity_type_id: 4,
-            user_id: 7,
-            date_deadline: "2026-07-15"
-          }
-        ]
-      },
-      args: []
-    });
-
-    expect(result.isError).toBeUndefined();
-    expect(queue.calls.length).toBe(1);
-    expect(queue.calls[0]).toMatchObject({
-      model: "mail.activity",
-      method: "create",
-      args: {
-        vals_list: [
-          expect.objectContaining({
-            res_model: "project.task",
-            note: FINANCE_KEYWORD_PM_TEXT.activityNote
-          })
-        ]
-      }
-    });
-  });
-
-  test("batch_post_message allows finance-keyword chatter on project.task", async () => {
-    const queue = makeStubQueue();
-    const agent = await buildAgentWithQueue(queue);
-    const handler = getToolHandler(agent, "batch_post_message");
-
-    const result = await handler({
-      model: "project.task",
-      messages: [
-        { record_id: 990, body: FINANCE_KEYWORD_PM_TEXT.chatterBody, body_is_html: false },
-        { record_id: 954, body: FINANCE_KEYWORD_PM_TEXT.chatterBody, body_is_html: false }
-      ]
-    });
-
-    expect(result.isError).toBeUndefined();
-    const posts = queue.calls.filter((c) => c.method === "message_post");
-    expect(posts).toHaveLength(2);
-    expect(posts[0].args.ids).toEqual([990]);
-    expect(posts[1].args.ids).toEqual([954]);
-  });
-
-  test("post_message on non-allowlisted model is blocked before Odoo", async () => {
-    const queue = makeStubQueue();
-    const agent = await buildAgentWithQueue(queue);
-    const handler = getToolHandler(agent, "post_message");
-
-    const result = await handler({
-      model: "sale.order",
-      record_id: 1,
-      body: "Banking deadline note.",
-      body_is_html: false
-    });
-
-    expect(result.isError).toBe(true);
-    expect(queue.calls.length).toBe(0);
-    const envelope = JSON.parse(result.content[0].text);
-    expect(envelope.error).toBe("write_blocked");
-    expect(envelope.intent).toBe("disallowed");
-  });
-
-  test("create_record for res.partner non-financial fields reaches Odoo", async () => {
-    const queue = makeStubQueue({ createId: 9 });
-    const agent = await buildAgentWithQueue(queue);
-    const handler = getToolHandler(agent, "create_record");
-
-    const result = await handler({ model: "res.partner", values: { name: "Acme" } });
-
-    expect(result.isError).toBeUndefined();
-    expect(queue.calls.some((c: any) => c.method === "create")).toBe(true);
-  });
-
-  test("create_record for res.partner with VAT identity fields reaches Odoo", async () => {
-    const queue = makeStubQueue({ createId: 11 });
-    const agent = await buildAgentWithQueue(queue);
-    const handler = getToolHandler(agent, "create_record");
-
-    const result = await handler({
-      model: "res.partner",
-      values: {
-        name: "SARL Fournisseur",
-        vat: "FR12345678901",
-        siret: "12345678900012",
-        company_registry: "123456789",
-        country_id: 75
-      }
-    });
-
-    expect(result.isError).toBeUndefined();
-    expect(queue.calls.some((c: any) => c.method === "create")).toBe(true);
-  });
-
-  test("create_record for res.partner with bank_ids is write_blocked", async () => {
-    const queue = makeStubQueue({ createId: 12 });
-    const agent = await buildAgentWithQueue(queue);
-    const handler = getToolHandler(agent, "create_record");
-
-    const result = await handler({
-      model: "res.partner",
-      values: { name: "Acme", bank_ids: [[0, 0, [{ acc_number: "FR123" }]]] }
-    });
-
-    expect(result.isError).toBe(true);
-    expect(queue.calls.length).toBe(0);
-    const envelope = JSON.parse(result.content[0].text);
-    expect(envelope.error).toBe("write_blocked");
-    expect(envelope.intent).toBe("financial_mutation");
-    expect(envelope.blocked_fields).toContain("bank_ids");
-  });
-
-  test("update_record for res.partner with credit_limit is write_blocked", async () => {
-    const queue = makeStubQueue();
-    const agent = await buildAgentWithQueue(queue);
-    const handler = getToolHandler(agent, "update_record");
-
-    const result = await handler({
-      model: "res.partner",
-      record_id: 5,
-      values: { credit_limit: 1000 }
-    });
-
-    expect(result.isError).toBe(true);
-    expect(queue.calls.length).toBe(0);
-    const envelope = JSON.parse(result.content[0].text);
-    expect(envelope.error).toBe("write_blocked");
-    expect(envelope.blocked_fields).toContain("credit_limit");
-  });
 });
 
 describe("post_message tool callOdoo call shape", () => {
@@ -2073,7 +1725,8 @@ describe("aggregate_records tool callOdoo call shape", () => {
       fields: ["__count"],
       groupby: ["stage_id"],
       lazy: true,
-      orderby: "stage_id"
+      orderby: "stage_id",
+      limit: 100
     });
   });
 
@@ -2100,7 +1753,7 @@ describe("aggregate_records tool callOdoo call shape", () => {
 
     const readGroupCall = findLegacyReadGroupCall(log);
     expect(readGroupCall).toBeDefined();
-    expect(readGroupCall!.body).toEqual({ domain: [], fields: ["__count"], groupby: ["stage_id"], lazy: false });
+    expect(readGroupCall!.body).toEqual({ domain: [], fields: ["__count"], groupby: ["stage_id"], lazy: false, limit: 100 });
     expect(readGroupCall!.body.orderby).toBeUndefined();
     expect(log.find((entry) => entry.url.includes("/fields_get"))).toBeDefined();
   });
@@ -2246,7 +1899,8 @@ describe("aggregate_records pre-flight validation", () => {
       fields: ["amount_total:sum", "__count"],
       groupby: ["stage_id"],
       lazy: true,
-      orderby: "stage_id"
+      orderby: "stage_id",
+      limit: 100
     });
   });
 
@@ -2352,150 +2006,6 @@ describe("get_fields tool callOdoo call shape", () => {
   });
 });
 
-describe("call_model_method tool callOdoo call shape", () => {
-  afterEach(() => {
-    globalThis.fetch = originalFetch;
-  });
-
-  test("passes model, method, args and kwargs through unchanged as { ...kwargs, args }", async () => {
-    const conn = { url: "http://example.com", db: "test-db", apiKey: "secret-key" };
-    let fetchCalls: { url: string; body: any }[] = [];
-    const fetchMock = mock(async (url: string, init: any) => {
-      fetchCalls.push({ url, body: JSON.parse(init.body) });
-      return new Response(JSON.stringify({ result: "ok" }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" }
-      });
-    });
-    globalThis.fetch = fetchMock;
-
-    const args = [1, "two"];
-    const kwargs = { context: { lang: "en_US" }, limit: 5 };
-    const res = await callOdoo(conn, "res.partner", "some_custom_method", { ...kwargs, args });
-
-    expect(fetchCalls.length).toBe(1);
-    expect(fetchCalls[0].url).toContain("/res.partner/some_custom_method");
-    expect(fetchCalls[0].body).toEqual({ args: [1, "two"], context: { lang: "en_US" }, limit: 5 });
-    expect(res).toBe("ok");
-  });
-
-  test("a kwargs key literally named 'args' cannot clobber the real positional args", async () => {
-    const conn = { url: "http://example.com", db: "test-db", apiKey: "secret-key" };
-    let fetchCalls: { url: string; body: any }[] = [];
-    const fetchMock = mock(async (url: string, init: any) => {
-      fetchCalls.push({ url, body: JSON.parse(init.body) });
-      return new Response(JSON.stringify({ result: "ok" }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" }
-      });
-    });
-    globalThis.fetch = fetchMock;
-
-    const args = [[5]];
-    const kwargs = { args: [[999]], vals: { name: "x" } };
-    await callOdoo(conn, "project.task", "write", { ...kwargs, args });
-
-    expect(fetchCalls[0].body).toEqual({ args: [[5]], vals: { name: "x" } });
-  });
-
-  test("retries on 502 and eventually succeeds (proves callOdoo retry reuse)", async () => {
-    const conn = { url: "http://example.com", db: "test-db", apiKey: "secret-key" };
-    let callCount = 0;
-    const fetchMock = mock(() => {
-      callCount++;
-      if (callCount < 2) {
-        return Promise.resolve(new Response("Bad Gateway", { status: 502 }));
-      }
-      return Promise.resolve(
-        new Response(JSON.stringify({ result: "recovered" }), {
-          status: 200,
-          headers: { "Content-Type": "application/json" }
-        })
-      );
-    });
-    globalThis.fetch = fetchMock;
-
-    const res = await callOdoo(conn, "res.partner", "some_custom_method", { args: [], ...{} });
-
-    expect(res).toBe("recovered");
-    expect(fetchMock.mock.calls.length).toBe(2);
-  });
-
-  test("does not leak API key or args/kwargs content on error response", async () => {
-    const conn = { url: "http://example.com", db: "test-db", apiKey: "secret-generic-key-555" };
-    const fetchMock = mock(() =>
-      Promise.resolve(new Response(JSON.stringify({ error: { message: "Method not allowed" } }), { status: 400 }))
-    );
-    globalThis.fetch = fetchMock;
-
-    let error: Error | undefined;
-    try {
-      await callOdoo(conn, "res.partner", "dangerous_method", {
-        args: ["sensitive-arg-value"],
-        secret_field: "sensitive-kwarg-value"
-      });
-    } catch (err) {
-      error = err as Error;
-    }
-
-    expect(error).toBeDefined();
-    expect(error?.message).not.toContain("secret-generic-key-555");
-    expect(error?.message).not.toContain("Bearer");
-  });
-
-  test("rejects empty-string model without calling fetch", async () => {
-    const agent = await buildWriteToolAgent();
-    const fetchMock = mock(() => Promise.reject(new Error("should not be called")));
-    globalThis.fetch = fetchMock;
-
-    const handler = getToolHandler(agent, "call_model_method");
-    const result = await handler({ model: "", method: "some_method", args: [], kwargs: {} });
-
-    expect(result.isError).toBe(true);
-    expect(result.content[0].text).toContain("model must be a non-empty string");
-    expect(fetchMock.mock.calls.length).toBe(0);
-  });
-
-  test("rejects whitespace-only model without calling fetch", async () => {
-    const agent = await buildWriteToolAgent();
-    const fetchMock = mock(() => Promise.reject(new Error("should not be called")));
-    globalThis.fetch = fetchMock;
-
-    const handler = getToolHandler(agent, "call_model_method");
-    const result = await handler({ model: "   ", method: "some_method", args: [], kwargs: {} });
-
-    expect(result.isError).toBe(true);
-    expect(result.content[0].text).toContain("model must be a non-empty string");
-    expect(fetchMock.mock.calls.length).toBe(0);
-  });
-
-  test("rejects empty-string method without calling fetch", async () => {
-    const agent = await buildWriteToolAgent();
-    const fetchMock = mock(() => Promise.reject(new Error("should not be called")));
-    globalThis.fetch = fetchMock;
-
-    const handler = getToolHandler(agent, "call_model_method");
-    const result = await handler({ model: "res.partner", method: "", args: [], kwargs: {} });
-
-    expect(result.isError).toBe(true);
-    expect(result.content[0].text).toContain("method must be a non-empty string");
-    expect(fetchMock.mock.calls.length).toBe(0);
-  });
-
-  test("rejects whitespace-only method without calling fetch", async () => {
-    const agent = await buildWriteToolAgent();
-    const fetchMock = mock(() => Promise.reject(new Error("should not be called")));
-    globalThis.fetch = fetchMock;
-
-    const handler = getToolHandler(agent, "call_model_method");
-    const result = await handler({ model: "res.partner", method: "   ", args: [], kwargs: {} });
-
-    expect(result.isError).toBe(true);
-    expect(result.content[0].text).toContain("method must be a non-empty string");
-    expect(fetchMock.mock.calls.length).toBe(0);
-  });
-});
-
 describe("parseButtonsFromArch", () => {
   test("extracts type=object buttons with name/string/confirm, excludes type=action buttons, dedupes by name", () => {
     const arch = `
@@ -2549,17 +2059,13 @@ describe("mergeModelActions", () => {
     expect(new Set(methods).size).toBe(methods.length);
   });
 
-  test("annotateModelActions marks button_draft executable and action_post confirmation-required", () => {
+  test("annotateModelActions stays connector-neutral", () => {
     const annotated = annotateModelActions(
       "account.move",
       mergeModelActions(CURATED_MODEL_ACTIONS["account.move"], [])
     );
-    const byMethod = new Map(annotated.map((a) => [a.method, a]));
-    expect(byMethod.get("button_draft")?.executable).toBe(true);
-    expect(byMethod.get("action_post")?.executable).toBe(true);
-    expect(byMethod.get("action_post")?.confirmation_required).toBe(true);
-    expect(byMethod.get("action_post")?.alternative).toBe("confirmation_token");
-    expect(byMethod.get("action_post")?.alternative).not.toContain("bookkeeping");
+    expect(annotated).toEqual(mergeModelActions(CURATED_MODEL_ACTIONS["account.move"], []));
+    expect(JSON.stringify(annotated)).not.toContain("executable");
   });
 });
 
@@ -2599,16 +2105,11 @@ describe("list_model_actions tool", () => {
     expect(byMethod.get("action_post")).toMatchObject({
       method: "action_post",
       label: "Post (from view)",
-      source: "view",
-      executable: true,
-      confirmation_required: true,
-      risk_class: "irreversible_posting"
+      source: "view"
     });
     expect(byMethod.get("button_draft")).toMatchObject({
       method: "button_draft",
-      source: "curated",
-      executable: true,
-      risk_class: "reversible_lifecycle"
+      source: "curated"
     });
     expect(byMethod.get("do_print")).toBeUndefined();
   });
@@ -2627,24 +2128,16 @@ describe("list_model_actions tool", () => {
     expect(payload.actions).toEqual([
       {
         method: "action_confirm",
-        source: "curated",
-        executable: false,
-        deny_reason:
-          "Writes to sale.order via generic MCP write tools are not allowlisted. Project-management work should use project.task / mail.activity (res_model=project.task) or chatter.",
-        alternative: "Use dedicated project.* tools where applicable, or the Odoo UI / a human."
+        source: "curated"
       },
       {
         method: "action_cancel",
-        source: "curated",
-        executable: false,
-        deny_reason:
-          "Writes to sale.order via generic MCP write tools are not allowlisted. Project-management work should use project.task / mail.activity (res_model=project.task) or chatter.",
-        alternative: "Use dedicated project.* tools where applicable, or the Odoo UI / a human."
+        source: "curated"
       }
     ]);
   });
 
-  test("marks hr.expense allowlisted lifecycle executable and action_post confirmation-required", async () => {
+  test("returns hr.expense action hints without connector policy annotations", async () => {
     const agent = await buildWriteToolAgent();
     globalThis.fetch = mock(() =>
       Promise.resolve(
@@ -2659,12 +2152,14 @@ describe("list_model_actions tool", () => {
     const result = await handler({ model: "hr.expense" });
     expect(result.isError).toBeUndefined();
     const payload = JSON.parse(result.content[0].text);
-    const byMethod = new Map<string, any>(payload.actions.map((a: any) => [a.method, a]));
-    expect(byMethod.get("action_reset")?.executable).toBe(true);
-    expect(byMethod.get("action_submit")?.executable).toBe(true);
-    expect(byMethod.get("action_approve")?.executable).toBe(true);
-    expect(byMethod.get("action_post")?.executable).toBe(true);
-    expect(byMethod.get("action_post")?.confirmation_required).toBe(true);
+    expect(payload.actions.map((action: { method: string }) => action.method)).toEqual([
+      "action_reset",
+      "action_submit",
+      "action_approve",
+      "action_post",
+      "action_pay"
+    ]);
+    expect(JSON.stringify(payload.actions)).not.toContain("executable");
   });
 
   test("rejects empty-string model without calling fetch", async () => {
@@ -2697,7 +2192,7 @@ describe("JSON error envelope (tool handlers)", () => {
 
     expect(result.isError).toBe(true);
     const envelope = JSON.parse(result.content[0].text);
-    expect(envelope).toEqual({
+    expect(envelope).toMatchObject({
       error: "permission_denied",
       model: "project.task",
       method: "write",
@@ -2705,10 +2200,10 @@ describe("JSON error envelope (tool handlers)", () => {
       details: "Access Denied by Odoo",
       recoverable: false,
       refusing_layer: "odoo_acl",
-      next_step: "Use an Odoo user with the required access rights, or perform the action in the Odoo UI as that user.",
       odoo_exception: "Access Denied by Odoo",
       record_ids: [1]
     });
+    expect(envelope.execution).toMatchObject({ outcome: "not_applied" });
     expect(result.content[0].text).not.toContain("secret-key");
     expect(result.content[0].text).not.toContain("Bearer");
   });
@@ -2779,6 +2274,23 @@ describe("JSON error envelope (tool handlers)", () => {
     expect(envelope.method).toBe("write");
     expect(envelope.recoverable).toBe(false);
     expect(fetchMock.mock.calls.length).toBe(0);
+  });
+
+  test("local mutation refusals also return not-applied execution metadata", async () => {
+    const agent = await buildWriteToolAgent();
+    const handler = getToolHandler(agent, "projects.update_task");
+    const result = await handler({ task_id: 7, idempotency_key: "empty-task-update-7" });
+
+    expect(result.isError).toBe(true);
+    expect(JSON.parse(result.content[0].text)).toMatchObject({
+      error: "tool_error",
+      execution: {
+        idempotency_key: "empty-task-update-7",
+        idempotency_mode: "unavailable",
+        replayed: false,
+        outcome: "not_applied"
+      }
+    });
   });
 });
 
@@ -2908,8 +2420,10 @@ describe("tool metadata (title/annotations)", () => {
     for (const tool of tools) {
       expect(tool.title).toBeTruthy();
       expect(tool.annotations).toBeTruthy();
-      expect(tool.annotations.openWorldHint).toBe(false);
+      expect(typeof tool.annotations.openWorldHint).toBe("boolean");
     }
+    expect(agent.server._registeredTools["create_record"].annotations.openWorldHint).toBe(true);
+    expect(agent.server._registeredTools["call_model_method"].annotations.openWorldHint).toBe(true);
 
     const writeToolNames = [
       "create_record",
@@ -2989,6 +2503,15 @@ describe("tool metadata (title/annotations)", () => {
     expect(tools.length).toBeGreaterThan(0);
     for (const [name, tool] of tools) {
       expect(tool.outputSchema, `tool ${name} is missing an outputSchema`).toBeDefined();
+    }
+  });
+
+  test("every mutating tool declares execution metadata in its success schema", async () => {
+    const agent = await buildWriteToolAgent();
+    const tools = Object.entries(agent.server._registeredTools) as [string, any][];
+    for (const [name, tool] of tools) {
+      if (tool.annotations?.readOnlyHint !== false) continue;
+      expect(tool.outputSchema?.shape?.execution, `mutating tool ${name} must declare execution`).toBeDefined();
     }
   });
 
@@ -4382,7 +3905,12 @@ describe("OAuth shim (ChatGPT path)", () => {
   }
 
   function makeEnv() {
-    return { OAUTH_KV: makeKV() } as any;
+    return {
+      OAUTH_KV: makeKV(),
+      OdooOriginCoordinator: {
+        getByName: () => ({ fetch: (request: Request) => globalThis.fetch(request) })
+      }
+    } as any;
   }
 
   async function pkcePair() {
@@ -4432,8 +3960,9 @@ describe("OAuth shim (ChatGPT path)", () => {
   }
 
   function odooValidationFetchMock() {
-    return mock(async (url: string, init: any) => {
-      if (String(url).includes("/res.users/fields_get")) {
+    return mock(async (input: RequestInfo | URL, _init?: RequestInit) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url.includes("/res.users/fields_get")) {
         return new Response(JSON.stringify({ result: { login: { type: "char" } } }), {
           status: 200,
           headers: { "Content-Type": "application/json" }
@@ -4494,10 +4023,10 @@ describe("OAuth shim (ChatGPT path)", () => {
     expect(code).toBeTruthy();
 
     // The validation call hit Odoo with the submitted credentials.
-    const validationCall = fetchMock.mock.calls[0] as any;
-    expect(String(validationCall[0])).toBe("https://acme.odoo.com/json/2/res.users/fields_get");
-    expect(validationCall[1].headers.Authorization).toBe("Bearer shim-secret-key-example");
-    expect(validationCall[1].headers["X-Odoo-Database"]).toBe("acme-prod");
+    const validationRequest = fetchMock.mock.calls[0]![0] as Request;
+    expect(validationRequest.url).toBe("https://acme.odoo.com/json/2/res.users/fields_get");
+    expect(validationRequest.headers.get("Authorization")).toBe("Bearer shim-secret-key-example");
+    expect(validationRequest.headers.get("X-Odoo-Database")).toBe("acme-prod");
 
     globalThis.fetch = originalFetch;
 
@@ -4537,7 +4066,9 @@ describe("OAuth shim (ChatGPT path)", () => {
       odooBaseUrl: "https://acme.odoo.com",
       odooDb: "acme-prod",
       odooApiKey: "shim-secret-key-example",
-      clientName: "ChatGPT"
+      clientName: "ChatGPT",
+      authMode: "oauth",
+      workerOrigin: ORIGIN
     });
 
     // Refresh grant issues a fresh usable access token.
@@ -4619,7 +4150,7 @@ describe("OAuth shim (ChatGPT path)", () => {
     });
 
     expect(res.status).toBe(400);
-    expect(await res.text()).toContain("valid http(s) URL");
+    expect(await res.text()).toContain("must use HTTPS");
     expect(fetchMock.mock.calls.length).toBe(0);
   });
 
@@ -4712,8 +4243,7 @@ describe("call_model_method JSON-2 body contract", () => {
       model: "ir.attachment",
       method: "read",
       ids: [7, 8],
-      kwargs: { fields: ["name", "mimetype"] },
-      args: []
+      kwargs: { fields: ["name", "mimetype"] }
     });
 
     expect(result.isError).toBeUndefined();
@@ -4737,7 +4267,7 @@ describe("call_model_method JSON-2 body contract", () => {
     });
 
     const handler = getToolHandler(agent, "call_model_method");
-    await handler({ model: "res.partner", method: "search_read", kwargs: { domain: [], limit: 1 }, args: [] });
+    await handler({ model: "res.partner", method: "search_read", kwargs: { domain: [], limit: 1 } });
 
     expect(fetchCalls[0].body).toEqual({ domain: [], limit: 1 });
     expect("ids" in fetchCalls[0].body).toBe(false);
@@ -4755,7 +4285,7 @@ describe("call_model_method JSON-2 body contract", () => {
     });
 
     const handler = getToolHandler(agent, "call_model_method");
-    await handler({ model: "project.task", method: "write", ids: [5], kwargs: { ids: [999], vals: { name: "x" } }, args: [] });
+    await handler({ model: "project.task", method: "write", ids: [5], kwargs: { ids: [999], vals: { name: "x" } } });
 
     expect(fetchCalls[0].body).toEqual({ ids: [5], vals: { name: "x" } });
   });
@@ -4769,7 +4299,7 @@ describe("call_model_method JSON-2 body contract", () => {
     const result = await handler({ model: "res.partner", method: "read", args: [[1, 2]], kwargs: {} });
 
     expect(result.isError).toBe(true);
-    expect(result.content[0].text).toContain("no positional args");
+    expect(JSON.parse(result.content[0].text).details).toContain('Unrecognized key: "args"');
     expect(fetchMock.mock.calls.length).toBe(0);
   });
 });
@@ -4893,10 +4423,10 @@ describe("batch_update tool", () => {
     expect(fetchCalls[1].body).toEqual({ ids: [2], vals: { name: "Two" } });
     expect(result.isError).toBeUndefined();
     // No project_id in `values`, so each task link falls back to the All Tasks route (ODOO2272).
-    expect(JSON.parse(result.content[0].text)).toEqual([
-      { record_id: 1, ok: true, web_url: "http://example.com/odoo/all-tasks/1" },
-      { record_id: 2, ok: true, web_url: "http://example.com/odoo/all-tasks/2" }
-    ]);
+    expect(JSON.parse(result.content[0].text)).toMatchObject({
+      updated_ids: [1, 2],
+      web_urls: ["http://example.com/odoo/all-tasks/1", "http://example.com/odoo/all-tasks/2"]
+    });
   });
 
   test("rejects empty-string model without calling fetch", async () => {
@@ -4974,11 +4504,10 @@ describe("batch_post_message tool", () => {
       ids: [1],
       body: "&lt;b&gt;hi&lt;/b&gt;",
       body_is_html: true,
-      message_type: "comment"
+      subtype_xmlid: "mail.mt_note"
     });
-    expect(fetchCalls[0].body.subtype_xmlid).toBeUndefined();
     expect(result.isError).toBeUndefined();
-    expect(JSON.parse(result.content[0].text)).toEqual([{ record_id: 1, result: 99 }]);
+    expect(JSON.parse(result.content[0].text)).toMatchObject({ posted_record_ids: [1] });
   });
 
   test("body_is_html true passes the body verbatim and subtype maps to subtype_xmlid", async () => {
@@ -5004,7 +4533,6 @@ describe("batch_post_message tool", () => {
       ids: [7],
       body: "<p>already <b>HTML</b></p>",
       body_is_html: true,
-      message_type: "comment",
       subtype_xmlid: "mail.mt_note"
     });
   });
@@ -5032,10 +4560,7 @@ describe("batch_post_message tool", () => {
     expect(fetchCalls.length).toBe(2);
     expect(fetchCalls[0].body.ids).toEqual([1]);
     expect(fetchCalls[1].body.ids).toEqual([2]);
-    expect(JSON.parse(result.content[0].text)).toEqual([
-      { record_id: 1, result: 1 },
-      { record_id: 2, result: 2 }
-    ]);
+    expect(JSON.parse(result.content[0].text)).toMatchObject({ posted_record_ids: [1, 2] });
   });
 
   test("rejects empty-string model without calling fetch", async () => {

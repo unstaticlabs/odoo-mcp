@@ -1,7 +1,6 @@
 import { describe, expect, mock, test } from "bun:test";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { OdooQueue } from "../odoo-queue";
-import { classifyPmWriteIntent } from "../safety";
 import { PDFDocument } from "pdf-lib";
 import { base64ToBytes, bytesToBase64, countPdfPages } from "../pdf-pages";
 import {
@@ -32,10 +31,11 @@ import {
   invalidPaymentMode,
   invalidReviewState
 } from "./billing";
-import { registerSafeWritePlannerTools } from "./bookkeeping";
+import { registerBookkeepingPreviewTools } from "./bookkeeping";
 import { OdooError } from "../odoo";
 import { validatedToolHandler } from "./structured-test-util";
 import { TtlCache } from "../cache";
+import { withTestMutationScope } from "../test-odoo-queue";
 
 const props = { odooBaseUrl: "http://example.com", odooDb: "test-db", odooApiKey: "secret-key" };
 
@@ -56,7 +56,7 @@ function dispatchQueue(responder: (model: string, method: string, args: Record<s
       throw err;
     }
   });
-  return {
+  return withTestMutationScope({
     enqueue,
     snapshot: () => callLog.length,
     delta: (snap: number) => {
@@ -67,7 +67,7 @@ function dispatchQueue(responder: (model: string, method: string, args: Record<s
         calls: [...slice]
       };
     }
-  } as unknown as OdooQueue;
+  });
 }
 
 function buildBillingHandlers(queue: OdooQueue) {
@@ -518,12 +518,12 @@ describe("billing.update_draft_expense", () => {
     const result = await updateExpense({ record_id: 394, values: { date: "2026-07-04" } });
 
     expect(result.isError).toBeUndefined();
-    expect(result.structuredContent).toEqual({
+    expect(result.structuredContent).toEqual(expect.objectContaining({
       ok: true,
       record_id: 394,
       state: "draft",
       web_url: "http://example.com/odoo/expenses/394"
-    });
+    }));
     expect(calls).toEqual([
       { model: "hr.expense", method: "read", args: { ids: [394], fields: [...EXPENSE_MOVE_READ_FIELDS] } },
       { model: "hr.expense", method: "write", args: { ids: [394], vals: { date: "2026-07-04" } } },
@@ -561,7 +561,7 @@ describe("billing.update_draft_expense", () => {
 
     expect(result.isError).toBe(true);
     const envelope = JSON.parse(result.content[0].text);
-    expect(envelope.error).toBe("write_blocked");
+    expect(envelope.error).toBe("tool_contract_violation");
     expect(envelope.blocked_fields).toContain("state");
   });
 
@@ -580,7 +580,7 @@ describe("billing.update_draft_expense", () => {
 
     expect(result.isError).toBe(true);
     const envelope = JSON.parse(result.content[0].text);
-    expect(envelope.error).toBe("write_blocked");
+    expect(envelope.error).toBe("tool_contract_violation");
     expect(envelope.blocked_fields).toContain("total_amount_currency");
     expect(String(envelope.details)).toContain("total_amount_currency");
     expect(String(envelope.details)).toContain("Allowed:");
@@ -600,12 +600,12 @@ describe("billing.update_draft_expense", () => {
     const result = await updateExpense({ record_id: 42, values: { total_amount: 28.61 } });
 
     expect(result.isError).toBeUndefined();
-    expect(result.structuredContent).toEqual({
+    expect(result.structuredContent).toEqual(expect.objectContaining({
       ok: true,
       record_id: 42,
       state: "draft",
       web_url: "http://example.com/odoo/expenses/42"
-    });
+    }));
     expect(calls).toEqual([
       { model: "hr.expense", method: "read", args: { ids: [42], fields: [...EXPENSE_MOVE_READ_FIELDS] } },
       { model: "hr.expense", method: "write", args: { ids: [42], vals: { total_amount: 28.61 } } },
@@ -712,7 +712,7 @@ describe("billing.update_draft_expense", () => {
 
     expect(result.isError).toBe(true);
     const envelope = JSON.parse(result.content[0].text);
-    expect(envelope.error).toBe("write_blocked");
+    expect(envelope.error).toBe("tool_contract_violation");
     expect(envelope.blocked_fields).toContain("state");
     expect(calls).toEqual(["hr.expense.read"]);
   });
@@ -738,7 +738,7 @@ describe("billing.update_draft_expense", () => {
 
       expect(result.isError).toBe(true);
       const envelope = JSON.parse(result.content[0].text);
-      expect(envelope.error).toBe("write_blocked");
+      expect(envelope.error).toBe("tool_contract_violation");
       expect(envelope.blocked_fields).toContain(key);
       expect(calls).toEqual(["hr.expense.read"]);
     }
@@ -793,7 +793,7 @@ describe("billing.update_draft_expense cross-company reassignment", () => {
       calls.push({ model, method, args });
       const key = `${model}.${method}`;
       if (key === "hr.expense.read") {
-        // The preflight read asks for the full move field list; the confirmation re-read does not.
+        // The preflight read asks for the full move field list; the post-write observation does not.
         const isConfirm = !(args.fields as string[]).includes("currency_id");
         const row = isConfirm ? pick("confirm", movedDraft) : pick(key, bareDraft);
         if (typeof row === "function") return (row as () => unknown)();
@@ -828,18 +828,18 @@ describe("billing.update_draft_expense cross-company reassignment", () => {
     const result = await updateExpense({
       record_id: 443,
       values: { company_id: 8, employee_id: 4 },
-      context: "fix mis-routed OCR expense"
+      reason: "fix mis-routed OCR expense"
     });
 
     expect(result.isError).toBeUndefined();
-    expect(result.structuredContent).toEqual({
+    expect(result.structuredContent).toEqual(expect.objectContaining({
       ok: true,
       record_id: 443,
       state: "draft",
       company: { id: 8, name: "USL MEDIA" },
       employee: { id: 4, name: "Valentin Viennot" },
       web_url: "http://example.com/odoo/expenses/443"
-    });
+    }));
 
     const writes = calls.filter((c) => c.method === "write");
     expect(writes).toHaveLength(1);
@@ -1227,13 +1227,13 @@ describe("billing.configure_draft_vendor_bill", () => {
 
     expect(result.isError).toBeUndefined();
     // move_type read live → the link lands on Vendor Bills, not Journal Entries (ODOO2272).
-    expect(result.structuredContent).toEqual({
+    expect(result.structuredContent).toEqual(expect.objectContaining({
       ok: true,
       record_id: 9647,
       state: "draft",
       move_type: "in_invoice",
       web_url: "http://example.com/odoo/vendor-bills/9647"
-    });
+    }));
     expect(calls[0]).toEqual({
       model: "account.move",
       method: "read",
@@ -1263,13 +1263,13 @@ describe("billing.configure_draft_vendor_bill", () => {
 
     expect(result.isError).toBeUndefined();
     // move_type read live → the link lands on Vendor Bills, not Journal Entries (ODOO2272).
-    expect(result.structuredContent).toEqual({
+    expect(result.structuredContent).toEqual(expect.objectContaining({
       ok: true,
       record_id: 9647,
       state: "draft",
       move_type: "in_invoice",
       web_url: "http://example.com/odoo/vendor-bills/9647"
-    });
+    }));
     expect(calls[1].args.vals).toMatchObject({
       partner_id: 10,
       ref: "VB-9647",
@@ -1368,13 +1368,13 @@ describe("billing.configure_draft_vendor_bill", () => {
     const result = await configureBill({ record_id: 8695, values: { review_state: "todo" } });
 
     expect(result.isError).toBeUndefined();
-    expect(result.structuredContent).toEqual({
+    expect(result.structuredContent).toEqual(expect.objectContaining({
       ok: true,
       record_id: 8695,
       state: "draft",
       move_type: "in_invoice",
       web_url: "http://example.com/odoo/vendor-bills/8695"
-    });
+    }));
     expect(calls[1].method).toBe("write");
     expect(calls[1].args.vals).toEqual({ review_state: "todo" });
   });
@@ -1435,7 +1435,7 @@ describe("billing.configure_draft_vendor_bill", () => {
 
     expect(result.isError).toBe(true);
     const envelope = JSON.parse(result.content[0].text);
-    expect(envelope.error).toBe("write_blocked");
+    expect(envelope.error).toBe("tool_contract_violation");
     expect(envelope.blocked_fields).toContain("state");
     expect(calls).toEqual(["account.move.read"]);
   });
@@ -1452,7 +1452,7 @@ describe("billing.configure_draft_vendor_bill", () => {
 
     expect(result.isError).toBe(true);
     const envelope = JSON.parse(result.content[0].text);
-    expect(envelope.error).toBe("write_blocked");
+    expect(envelope.error).toBe("tool_contract_violation");
     expect(envelope.blocked_fields).toContain("payment_mode");
     expect(calls).toEqual(["account.move.read"]);
   });
@@ -1540,7 +1540,7 @@ describe("billing.attach_source_pdf", () => {
   const baseArgs = {
     bill_id: 9647,
     source_attachment_id: 555,
-    context: "user asked to split the Amazon composite PDF onto bill 9647"
+    reason: "user asked to split the Amazon composite PDF onto bill 9647"
   };
 
   test("registers as a write tool with a Write: description", () => {
@@ -1553,13 +1553,14 @@ describe("billing.attach_source_pdf", () => {
     expect(String(tool.description).startsWith("Write:")).toBe(true);
   });
 
-  test("context is required and must be non-empty", () => {
+  test("reason and idempotency are optional", () => {
     const server = new McpServer({ name: "test", version: "0.0.0" });
     registerBillingWriteTools(server, () => props, dispatchQueue(() => null));
     const shape = (server as any)._registeredTools["billing.attach_source_pdf"].inputSchema.shape;
-    expect(shape.context.safeParse("split composite PDF").success).toBe(true);
-    expect(shape.context.safeParse("").success).toBe(false);
-    expect(shape.context.safeParse(undefined).success).toBe(false);
+    expect(shape.reason.safeParse("split composite PDF").success).toBe(true);
+    expect(shape.reason.safeParse("").success).toBe(false);
+    expect(shape.reason.safeParse(undefined).success).toBe(true);
+    expect(shape.idempotency_key.safeParse("pdf-split-9647").success).toBe(true);
     // Page bounds are enforced by the schema too, so out-of-band values never reach the handler.
     expect(shape.page_from.safeParse(0).success).toBe(false);
     expect(shape.page_to.safeParse(1.5).success).toBe(false);
@@ -1571,7 +1572,7 @@ describe("billing.attach_source_pdf", () => {
     const result = await attachSourcePdf({ ...baseArgs, page_from: 2, page_to: 3 });
 
     expect(result.isError).toBeUndefined();
-    expect(result.structuredContent).toEqual({
+    expect(result.structuredContent).toEqual(expect.objectContaining({
       ok: true,
       attachment_id: 7042,
       bill_id: 9647,
@@ -1584,7 +1585,7 @@ describe("billing.attach_source_pdf", () => {
       page_to: 3,
       source_attachment_id: 555,
       source_page_count: 5
-    });
+    }));
 
     const create = calls.find((c) => c.method === "create")!;
     const vals = (create.args.vals_list as Record<string, unknown>[])[0];
@@ -1878,7 +1879,7 @@ describe("billing.copy_or_relink_source_attachment", () => {
   const baseArgs = {
     source_attachment_id: 555,
     target_id: 9647,
-    context: "de-duplicating bill 9099 into canonical draft 9647 before deleting the shell"
+    reason: "de-duplicating bill 9099 into canonical draft 9647 before deleting the shell"
   };
 
   test("registers as a write tool that routes between the four attachment paths", () => {
@@ -1894,8 +1895,9 @@ describe("billing.copy_or_relink_source_attachment", () => {
     expect(tool.description).toContain("projects.attach_file");
 
     const shape = tool.inputSchema.shape;
-    expect(shape.context.safeParse("").success).toBe(false);
-    expect(shape.context.safeParse(undefined).success).toBe(false);
+    expect(shape.reason.safeParse("").success).toBe(false);
+    expect(shape.reason.safeParse(undefined).success).toBe(true);
+    expect(shape.idempotency_key.safeParse("copy-source-9647").success).toBe(true);
     expect(shape.mode.safeParse("copy").success).toBe(true);
     expect(shape.mode.safeParse("move").success).toBe(false);
     expect(shape.target_model.safeParse("project.task").success).toBe(false);
@@ -1941,8 +1943,8 @@ describe("billing.copy_or_relink_source_attachment", () => {
       "account.move.read",
       "ir.attachment.read",
       "ir.attachment.create",
-      "ir.attachment.read",
-      "account.move.message_post"
+      "account.move.message_post",
+      "ir.attachment.read"
     ]);
     const body = String(calls.find((c) => c.method === "message_post")!.args.body);
     expect(body).toContain("mode=copy");
@@ -1978,7 +1980,7 @@ describe("billing.copy_or_relink_source_attachment", () => {
     const result = await copyOrRelink({
       source_document_id: 300,
       target_id: 9647,
-      context: "copy the filed evidence onto the canonical bill"
+      reason: "copy the filed evidence onto the canonical bill"
     });
 
     expect(result.isError).toBeUndefined();
@@ -2018,7 +2020,7 @@ describe("billing.copy_or_relink_source_attachment", () => {
       source_document_id: 300,
       target_id: 9647,
       mode: "relink" as const,
-      context: "move the Documents filing onto the surviving bill"
+      reason: "move the Documents filing onto the surviving bill"
     };
 
     test("repoints the Documents row and reports what the link used to be", async () => {
@@ -2164,7 +2166,7 @@ describe("billing.copy_or_relink_source_attachment", () => {
       const { queue, calls } = copyQueue({ document: { ...SOURCE_DOCUMENT, attachment_id: false } });
       const { copyOrRelink } = buildBillingHandlers(queue);
 
-      const result = await copyOrRelink({ source_document_id: 300, target_id: 9647, context: "copy the evidence" });
+      const result = await copyOrRelink({ source_document_id: 300, target_id: 9647, reason: "copy the evidence" });
 
       expect(result.isError).toBe(true);
       expect(JSON.parse(result.content[0].text).error).toBe("no_source_attachment");
@@ -2194,50 +2196,16 @@ describe("deriveSourcePdfName", () => {
   });
 });
 
-describe("classifier routing for billing models", () => {
-  test("account.move generic write is allowed (Odoo authority; billing.* remain convenience helpers)", () => {
-    const result = classifyPmWriteIntent({
-      model: "account.move",
-      method: "write",
-      args: { ids: [1], vals: { ref: "INV/001" } }
-    });
-    expect(result.verdict).toBe("allowed");
-    expect(result.intent).toBe("financial_mutation");
-    expect(result.risk_class).toBe("reversible_configuration");
-  });
-
-  test("hr.expense generic write is allowed as reversible configuration", () => {
-    const result = classifyPmWriteIntent({
-      model: "hr.expense",
-      method: "write",
-      args: { ids: [394], vals: { date: "2026-07-04" } }
-    });
-    expect(result.verdict).toBe("allowed");
-    expect(result.risk_class).toBe("reversible_configuration");
-  });
-
-  test("other account.* models are action-classified, not prefix-denied", () => {
-    const result = classifyPmWriteIntent({
-      model: "account.tax",
-      method: "write",
-      args: { ids: [1], vals: { name: "x" } }
-    });
-    expect(result.verdict).toBe("allowed");
-    expect(result.risk_class).toBe("reversible_configuration");
-  });
-});
-
-describe("bookkeeping.plan_safe_write enum unchanged", () => {
+describe("bookkeeping.preview_write enum", () => {
   test("input enum is still exactly the four tax/report/return/lock ops", () => {
     const server = new McpServer({ name: "test", version: "0.0.0" });
-    registerSafeWritePlannerTools(
+    registerBookkeepingPreviewTools(
       server,
       () => props,
       dispatchQueue(() => null),
-      new TtlCache({ clock: () => 0 }),
-      () => "secret"
+      new TtlCache({ clock: () => 0 })
     );
-    const tool = (server as any)._registeredTools["bookkeeping.plan_safe_write"];
+    const tool = (server as any)._registeredTools["bookkeeping.preview_write"];
     const operation = tool.inputSchema.shape.operation;
     const allowed = [
       "create_or_update_report_external_value",

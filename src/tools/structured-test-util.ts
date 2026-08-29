@@ -14,7 +14,17 @@ export function validatedToolHandler(server: unknown, name: string) {
   if (!tool) throw new Error(`tool not registered: ${name}`);
   const handler = tool.handler.bind(tool);
   return async (args: unknown) => {
-    const result = await handler(args);
+    const parsedInput = tool.inputSchema?.safeParse(args);
+    if (parsedInput && !parsedInput.success) {
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify({
+          error: "invalid_arguments",
+          details: parsedInput.error.issues.map((issue: { message: string }) => issue.message).join("; ")
+        }) }],
+        isError: true as const
+      };
+    }
+    const result = await handler(parsedInput?.data ?? args);
     if (!result?.isError) {
       if (!tool.outputSchema) throw new Error(`tool ${name} declares no outputSchema`);
       if (result.structuredContent === undefined) {

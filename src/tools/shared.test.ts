@@ -1292,7 +1292,7 @@ describe("mcpErrorFromException non-regression", () => {
       details: "Access Denied by Odoo",
       recoverable: false,
       refusing_layer: "odoo_acl",
-      next_step: "Use an Odoo user with the required access rights, or perform the action in the Odoo UI as that user.",
+      next_step: "Odoo denied this identity's access. Accept the denial or ask an Odoo administrator to review the user's rights; do not seek an MCP bypass.",
       odoo_exception: "Access Denied by Odoo"
     });
     expect(envelope.diagnosis).toBeUndefined();

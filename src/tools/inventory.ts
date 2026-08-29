@@ -1,32 +1,26 @@
 /**
  * Inventory domain tools (`inventory.*`) — ODOO2298.
  *
- * One dedicated safe write: create a **draft** vendor receipt (`stock.picking`, incoming) so an
- * accounting agent reconstructing ledger evidence can record what physically arrived without the
- * connector opening generic `stock.picking` / `stock.move` CRUD (still default-denied, see
- * `write.inventory.test.ts`) and without the graduated master-data path
- * (`inventory-master-data.ts`) growing an operational-document hole.
+ * One dedicated ergonomic write: create a **draft** vendor receipt (`stock.picking`, incoming) so an
+ * agent can resolve and create the related picking and moves in a single logical workflow.
  *
- * The receipt is created and left in draft. There is deliberately **no validate path** here:
- * `button_validate` / `action_validate` move stock and can trigger valuation, so they stay
- * human-only and remain refused on the generic tools by the high-risk method regex in
- * `lifecycle-allowlist.ts`.
+ * The receipt is created and left in draft because that is the promise of this tool. Agents may use
+ * generic public-method calls for later Odoo workflows; Odoo decides whether those calls are allowed.
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { OdooQueue } from "../odoo-queue";
+import { zIdempotencyKey, zMutationExecution, zReason, type MutationExecution } from "../mutation";
 import type { Props } from "../server";
 import { buildRecordUrl, toRecordId } from "./record-urls";
 import {
-  logWriteContext,
   mcpError,
   mcpErrorFromException,
+  mcpMutationResultError,
   mcpStructured,
-  mcpWriteBlockedError,
   plaintextToHtml,
   requireConnection,
-  zRequiredWriteContext,
   zWarnings,
   type WriteBlockedIntent
 } from "./shared";
@@ -66,36 +60,27 @@ export const RECEIPT_LINE_MAX = 200;
 type BlockedContext = { model: string; method?: string };
 
 /**
- * Error envelope for `inventory.*` refusals, mirroring `billingBlocked` / `projectsBlocked`:
- * a custom `error` code gets a hand-built envelope, a plain policy refusal goes through
- * `mcpWriteBlockedError`.
+ * Error envelope for fixed-intent tool-contract validation. These checks protect the semantics
+ * promised by this dedicated helper and do not authorize or deny generic Odoo operations.
  */
 function inventoryBlocked(
   context: BlockedContext,
-  opts: { intent?: WriteBlockedIntent; reason: string; blocked_fields?: string[]; error?: string; recoverable?: boolean }
+  opts: { intent?: WriteBlockedIntent; reason: string; blocked_fields?: string[]; error?: string; recoverable?: boolean; execution?: MutationExecution }
 ) {
-  if (opts.error && opts.error !== "write_blocked") {
+  {
     const envelope = {
-      error: opts.error,
+      error: opts.error ?? "tool_contract_violation",
       intent: opts.intent ?? ("inventory_operation" as const),
       model: context.model,
       method: context.method ?? "create",
       http_status: null,
       details: opts.reason,
       recoverable: opts.recoverable ?? false,
-      ...(opts.blocked_fields?.length ? { blocked_fields: opts.blocked_fields } : {})
+      ...(opts.blocked_fields?.length ? { blocked_fields: opts.blocked_fields } : {}),
+      ...(opts.execution ? { execution: opts.execution } : {})
     };
     return { content: [{ type: "text" as const, text: JSON.stringify(envelope) }], isError: true as const };
   }
-  return mcpWriteBlockedError(
-    { model: context.model, method: context.method ?? "create" },
-    {
-      intent: opts.intent ?? "inventory_operation",
-      reason: opts.reason,
-      blocked_fields: opts.blocked_fields,
-      recoverable: opts.recoverable
-    }
-  );
 }
 
 function firstRecord(rows: unknown): Record<string, unknown> | null {
@@ -231,14 +216,11 @@ export function registerInventoryTools(server: McpServer, getProps: () => Props 
         "Write: create one **draft** incoming stock.picking (vendor receipt) with its move lines, from a vendor, " +
         "an internal destination location, an evidence/scheduled date and explicit line quantities. Built for " +
         "close-time evidence reconstruction: record what arrived, leave the document unvalidated for a human. " +
-        "The receipt is never validated — this tool exposes no button_validate / action_validate path, moves no " +
-        "stock, touches no valuation and writes no account.move; those stay human-only and remain blocked on the " +
-        "generic tools. Pass dry_run: true to get the exact planned vals plus the resolved operation type and " +
+        "The receipt is never validated — this fixed-intent tool exposes no validation path. Odoo-authorized agents may use generic public methods for later workflows. Pass dry_run: true to get the exact planned vals plus the resolved operation type and " +
         "source location without any Odoo write. picking_type_id is resolved from code=incoming (optionally " +
         "narrowed by warehouse_id) when omitted. The response carries web_url — report the receipt to the user as " +
-        "[receipt name](web_url), never as a bare id. This is not generic stock CRUD: create_record / " +
-        "update_record / call_model_method on stock.picking and stock.move stay default-denied.",
-      annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+        "[receipt name](web_url), never as a bare id. This preview is optional and does not authorize the operation.",
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
       inputSchema: {
         partner_id: z.number().int().positive().describe("Vendor res.partner id the goods came from"),
         location_dest_id: z
@@ -279,7 +261,8 @@ export function registerInventoryTools(server: McpServer, getProps: () => Props 
           .boolean()
           .default(false)
           .describe("When true, return the planned vals and resolved defaults without creating anything"),
-        context: zRequiredWriteContext
+        reason: zReason,
+        idempotency_key: zIdempotencyKey
       },
       outputSchema: {
         ok: z.boolean(),
@@ -306,7 +289,8 @@ export function registerInventoryTools(server: McpServer, getProps: () => Props 
           .describe("Receipt created but posting the provenance stamp to the chatter failed"),
         trace_token: z.string().optional().describe("Provenance token stamped into the receipt's chatter"),
         warnings: zWarnings,
-        metadata: zCallMetadata
+        metadata: zCallMetadata,
+        execution: zMutationExecution.optional().describe("Present for a real mutation; absent for dry_run=true")
       }
     },
     async ({
@@ -320,16 +304,10 @@ export function registerInventoryTools(server: McpServer, getProps: () => Props 
       lines,
       company_id,
       dry_run = false,
-      context
+      reason,
+      idempotency_key
     }) => {
       const model = "stock.picking";
-      logWriteContext("inventory.create_draft_vendor_receipt", model, context);
-
-      // Deliberately no assessWriteOperation call here: stock.picking is not action-classified, so
-      // the generic classifier would default-deny this tool's own create. That denial is correct for
-      // create_record / call_model_method and must stay; this tool enforces the narrower invariants
-      // itself (incoming type only, internal destination, draft-only, no validate path) — the same
-      // shape as projects.attach_file and billing.attach_source_pdf.
 
       const before = queue.snapshot();
       const warnings: string[] = [];
@@ -552,16 +530,52 @@ export function registerInventoryTools(server: McpServer, getProps: () => Props 
           });
         }
 
-        const created = await queue.enqueue(conn, model, "create", { vals_list: [vals] });
-        const picking_id = Array.isArray(created) ? created[0] : created;
+        const mutation = await queue.runMutation(
+          conn,
+          { reason, idempotencyKey: idempotency_key },
+          async (scope) => {
+            const created = await scope.call<unknown>(model, "create", { vals_list: [vals] }, "receipt:create");
+            const pickingId = Array.isArray(created) ? created[0] : created;
+            if (typeof pickingId !== "number" || !Number.isInteger(pickingId) || pickingId <= 0) {
+              throw new Error("Odoo create returned no stock.picking id");
+            }
+            const readBack = firstRecord(
+              await queue.enqueue(conn, model, "read", { ids: [pickingId], fields: RECEIPT_READBACK_FIELDS })
+            );
+            const traceToken = `src-${scope.execution.correlation_id.slice(-8)}`;
+            const body =
+              `[agent-source] inventory.create_draft_vendor_receipt corr=${traceToken} ` +
+              `reason=${reason ?? "none"} origin=${origin ?? "none"} lines=${lines.length} scheduled=${scheduled}`;
+            let provenanceWarning: string | undefined;
+            try {
+              await scope.call(
+                model,
+                "message_post",
+                {
+                  ids: [pickingId],
+                  body: plaintextToHtml(body),
+                  body_is_html: true,
+                  message_type: "comment"
+                },
+                "receipt:provenance"
+              );
+            } catch (error) {
+              provenanceWarning =
+                `created stock.picking ${pickingId} but failed to post the provenance stamp (` +
+                `${error instanceof Error ? error.message : String(error)})`;
+            }
+            return { picking_id: pickingId, readBack, trace_token: traceToken, provenanceWarning };
+          }
+        );
+        const { picking_id, readBack, trace_token, provenanceWarning } = mutation.result;
         if (typeof picking_id !== "number" || !Number.isInteger(picking_id) || picking_id <= 0) {
-          return mcpError("Odoo create returned no stock.picking id");
+          return mcpMutationResultError("Odoo create returned no stock.picking id", mutation.execution, {
+            model,
+            method: "create"
+          });
         }
 
         // 6. Read-back gate: prove the document is a receipt and is still unvalidated.
-        const readBack = firstRecord(
-          await queue.enqueue(conn, model, "read", { ids: [picking_id], fields: RECEIPT_READBACK_FIELDS })
-        );
         const state = scalarOrNull(readBack?.state);
         if (state !== null && !RECEIPT_PRE_VALIDATION_STATES.has(state)) {
           return inventoryBlocked(
@@ -571,7 +585,8 @@ export function registerInventoryTools(server: McpServer, getProps: () => Props 
               reason:
                 `stock.picking ${picking_id} was created but read back in state=${state}, which is not a ` +
                 "pre-validation state. This tool never validates or cancels a receipt, so something else on the " +
-                "database acted on it — inspect the picking in Odoo before relying on it as evidence."
+                "database acted on it — inspect the picking in Odoo before relying on it as evidence.",
+              execution: mutation.execution
             }
           );
         }
@@ -583,7 +598,8 @@ export function registerInventoryTools(server: McpServer, getProps: () => Props 
               error: "unexpected_state",
               reason:
                 `stock.picking ${picking_id} was created but read back with picking_type_code=${pickingTypeCode}; ` +
-                "it is not a receipt. Inspect the picking in Odoo before relying on it as evidence."
+                "it is not a receipt. Inspect the picking in Odoo before relying on it as evidence.",
+              execution: mutation.execution
             }
           );
         }
@@ -614,29 +630,14 @@ export function registerInventoryTools(server: McpServer, getProps: () => Props 
           ...(webUrl ? { web_url: webUrl } : {})
         };
 
-        // 7. Provenance stamp. A chatter failure must not hide a receipt that already exists, so it
-        //    degrades to a warning field rather than an error (same shape as projects.create_task).
-        const trace_token = "src-" + crypto.randomUUID().replace(/-/g, "").slice(0, 8);
-        const body =
-          `[agent-source] inventory.create_draft_vendor_receipt corr=${trace_token} ` +
-          `context=${context} origin=${origin ?? "none"} lines=${lines.length} scheduled=${scheduled}`;
-        try {
-          await queue.enqueue(conn, model, "message_post", {
-            ids: [picking_id],
-            body: plaintextToHtml(body),
-            body_is_html: true,
-            message_type: "comment"
-          });
-          return mcpStructured({ ...success, trace_token, warnings, metadata: metadata() });
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
-          return mcpStructured({
-            ...success,
-            provenance_warning: `created stock.picking ${picking_id} but failed to post the provenance stamp (${message})`,
-            warnings,
-            metadata: metadata()
-          });
-        }
+        return mcpStructured({
+          ...success,
+          trace_token,
+          ...(provenanceWarning ? { provenance_warning: provenanceWarning } : {}),
+          warnings,
+          metadata: metadata(),
+          execution: mutation.execution
+        });
       } catch (err) {
         return mcpErrorFromException(err, { model, method: "create" });
       }

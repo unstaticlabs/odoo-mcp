@@ -1,6 +1,6 @@
 {
   "name": "odoo-mcp",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -8,7 +8,8 @@
     "deploy": "wrangler deploy",
     "typecheck": "tsc --noEmit",
     "cf-typegen": "wrangler types",
-    "test": "bun test"
+    "test": "bun test",
+    "test:miniflare": "node scripts/miniflare-origin-integration.mjs"
   },
   "dependencies": {
     "@cloudflare/workers-oauth-provider": "^0.8.1",
@@ -19,6 +20,8 @@
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260704.1",
+    "esbuild": "^0.28.1",
+    "miniflare": "^4.20260721.0",
     "typescript": "^7.0.0",
     "wrangler": "^4.108.0"
   },

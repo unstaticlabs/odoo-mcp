@@ -3,35 +3,30 @@ import { z } from "zod";
 import { readGroupCompat } from "../aggregation";
 import { type CachedFieldMeta, type TtlCache, getFieldsCached, resolveXmlIdCached } from "../cache";
 import { normalizeRecord, normalizeRecords } from "../normalizer";
+import { zIdempotencyKey, zMutationExecution, zReason, type MutationExecution } from "../mutation";
 import { base64ToBytes } from "../pdf-pages";
 import { OdooError, companyRpcContext, type OdooConnection } from "../odoo";
 import type { OdooQueue } from "../odoo-queue";
 import {
   checkLockExceptionSupport,
   getLockDates,
-  issueConfirmationToken,
   planExternalValue,
-  planIssuesToken,
   planLockException,
   planManualReturn,
   planPeriodicityUpdate,
-  toWritePlan,
   type PlanResult
 } from "../safety";
 import type { Props } from "../server";
 import { buildRecordUrl } from "./record-urls";
 import {
-  logWriteContext,
   mcpError,
   mcpErrorFromException,
   mcpImageContent,
   mcpStructured,
-  mcpWriteBlockedError,
   redactDetails,
   requireConnection,
   zOdooRecords,
   zRecordContainer,
-  zRequiredWriteContext,
   zWarnings
 } from "./shared";
 
@@ -1787,7 +1782,7 @@ const DOCUMENTS_PRECONDITION_MESSAGE =
  * Hard refusal when the Documents app is missing or denied — never a soft-degrade, never a
  * traceback-only failure. Odoo detail text is redacted into the log only.
  */
-export function documentsPreconditionError(err: unknown) {
+export function documentsPreconditionError(err: unknown, execution?: MutationExecution) {
   console.warn(
     `documents.document unavailable: ${redactDetails(err instanceof Error ? err.message : String(err))}`
   );
@@ -1798,8 +1793,9 @@ export function documentsPreconditionError(err: unknown) {
     http_status: null,
     details: DOCUMENTS_PRECONDITION_MESSAGE,
     recoverable: false,
-    refusing_layer: "connector_policy",
-    next_step: "Install the Odoo Documents app or grant documents.document access, then retry."
+    refusing_layer: "odoo_acl_or_capability",
+    next_step: "Install the Odoo Documents app or grant documents.document access, then retry.",
+    ...(execution ? { execution } : {})
   };
   return { content: [{ type: "text" as const, text: JSON.stringify(envelope) }], isError: true as const };
 }
@@ -1807,7 +1803,8 @@ export function documentsPreconditionError(err: unknown) {
 function linkSourceDocumentError(
   error: string,
   details: string,
-  context: { model: string; method?: string } = { model: "documents.document", method: "write" }
+  context: { model: string; method?: string } = { model: "documents.document", method: "write" },
+  execution?: MutationExecution
 ) {
   const envelope = {
     error,
@@ -1815,7 +1812,8 @@ function linkSourceDocumentError(
     method: context.method ?? "write",
     http_status: null,
     details,
-    recoverable: false
+    recoverable: false,
+    ...(execution ? { execution } : {})
   };
   return { content: [{ type: "text" as const, text: JSON.stringify(envelope) }], isError: true as const };
 }
@@ -2115,7 +2113,8 @@ export function registerSourceDocumentTools(server: McpServer, getProps: () => P
           .enum(LINKABLE_TARGET_MODELS)
           .describe("Business record model to link the document to"),
         target_id: z.number().int().positive().describe("Business record id (account.move or project.task)"),
-        context: zRequiredWriteContext
+        reason: zReason,
+        idempotency_key: zIdempotencyKey
       },
       outputSchema: {
         ok: z.boolean(),
@@ -2137,12 +2136,12 @@ export function registerSourceDocumentTools(server: McpServer, getProps: () => P
           .optional()
           .describe("Canonical clickable Odoo URL of the record it now points at — cite it as [record name](target_web_url)"),
         warnings: zWarnings,
-        metadata: zCallMetadata
+        metadata: zCallMetadata,
+        execution: zMutationExecution
       }
     },
-    async ({ document_id, target_model, target_id, context }) => {
+    async ({ document_id, target_model, target_id, reason, idempotency_key }) => {
       const before = queue.snapshot();
-      logWriteContext("bookkeeping.link_source_document", "documents.document", context);
       try {
         // Defense-in-depth: schema already enforces this, but MCP callers can bypass validation.
         if (
@@ -2150,16 +2149,9 @@ export function registerSourceDocumentTools(server: McpServer, getProps: () => P
           !Number.isInteger(target_id) ||
           target_id <= 0
         ) {
-          return mcpWriteBlockedError(
-            { model: "documents.document", method: "write" },
-            {
-              intent: "financial_mutation",
-              reason:
-                `target_model must be one of ${LINKABLE_TARGET_MODELS.join(" | ")} and target_id must be a positive integer. ` +
-                "No Odoo call was made.",
-              refusing_layer: "connector_policy",
-              recoverable: true
-            }
+          return linkSourceDocumentError(
+            "invalid_target",
+            `target_model must be one of ${LINKABLE_TARGET_MODELS.join(" | ")} and target_id must be a positive integer. No Odoo call was made.`
           );
         }
 
@@ -2209,29 +2201,32 @@ export function registerSourceDocumentTools(server: McpServer, getProps: () => P
           res_id: toScalar(preRows[0].res_id, isNumberValue)
         };
 
-        let changed = false;
-        if (previous_link.res_model === target_model && previous_link.res_id === target_id) {
+        const shouldWrite = previous_link.res_model !== target_model || previous_link.res_id !== target_id;
+        if (!shouldWrite) {
+          warnings.push(`documents.document ${document_id} was already linked to ${target_model},${target_id}; no write was issued.`);
+        } else if (previous_link.res_model !== null) {
           warnings.push(
-            `documents.document ${document_id} was already linked to ${target_model},${target_id}; no write was issued.`
+            `Relinked documents.document ${document_id} from ${previous_link.res_model},${previous_link.res_id} ` +
+              `to ${target_model},${target_id}; the previous link no longer exists.`
           );
-        } else {
-          if (previous_link.res_model !== null) {
-            warnings.push(
-              `Relinked documents.document ${document_id} from ${previous_link.res_model},${previous_link.res_id} ` +
-                `to ${target_model},${target_id}; the previous link no longer exists.`
-            );
-          }
-          try {
-            await queue.enqueue(conn, "documents.document", "write", {
-              ids: [document_id],
-              vals: { res_model: target_model, res_id: target_id }
-            });
-          } catch (err) {
-            if (isDocumentsUnavailableError(err)) return documentsPreconditionError(err);
-            return mcpErrorFromException(err, { model: "documents.document", method: "write" });
-          }
-          changed = true;
         }
+
+        let mutation;
+        try {
+          mutation = await queue.runMutation(conn, { reason, idempotencyKey: idempotency_key }, async (scope) => {
+            if (shouldWrite) {
+              await scope.call("documents.document", "write", {
+                ids: [document_id],
+                vals: { res_model: target_model, res_id: target_id }
+              });
+            }
+            return shouldWrite;
+          });
+        } catch (err) {
+          if (isDocumentsUnavailableError(err)) return documentsPreconditionError(err);
+          return mcpErrorFromException(err, { model: "documents.document", method: "write" });
+        }
+        const changed = mutation.result;
 
         // READ-BACK evidence — fresh call, not the pre-read row.
         let readBackRows: Array<Record<string, unknown>>;
@@ -2241,14 +2236,16 @@ export function registerSourceDocumentTools(server: McpServer, getProps: () => P
             fields: DOCUMENT_SEARCH_FIELDS
           })) as Array<Record<string, unknown>>;
         } catch (err) {
-          if (isDocumentsUnavailableError(err)) return documentsPreconditionError(err);
+          if (isDocumentsUnavailableError(err)) return documentsPreconditionError(err, mutation.execution);
           throw err;
         }
         const readBackRow = readBackRows[0];
         if (!readBackRow) {
           return linkSourceDocumentError(
             "document_not_found",
-            `documents.document id ${document_id} was not found after write (or record rules hide it).`
+            `documents.document id ${document_id} was not found after write (or record rules hide it).`,
+            { model: "documents.document", method: "read" },
+            mutation.execution
           );
         }
 
@@ -2289,7 +2286,8 @@ export function registerSourceDocumentTools(server: McpServer, getProps: () => P
           ...(document_web_url ? { document_web_url } : {}),
           ...(target_web_url ? { target_web_url } : {}),
           warnings,
-          metadata
+          metadata,
+          execution: mutation.execution
         });
       } catch (err) {
         return mcpErrorFromException(err, { model: "documents.document", method: "write" });
@@ -2867,23 +2865,19 @@ async function planLockExceptionOp(
   });
 }
 
-export function registerSafeWritePlannerTools(
+export function registerBookkeepingPreviewTools(
   server: McpServer,
   getProps: () => Props | undefined,
   queue: OdooQueue,
-  cache: TtlCache,
-  getSecret: () => string | undefined
+  cache: TtlCache
 ) {
   server.registerTool(
-    "bookkeeping.plan_safe_write",
+    "bookkeeping.preview_write",
     {
-      title: "Plan Safe Write (validate-only)",
+      title: "Preview Bookkeeping Write (advisory)",
       description:
-        "Validate-only: NEVER writes to Odoo. Runs read-only checks (company/field existence, record state, period " +
-        "consistency, duplicates, lock dates) for a proposed bookkeeping write and returns a would-write plan plus an " +
-        "HMAC confirmation token. Supported operations: create_or_update_report_external_value, create_manual_tax_return, " +
-        "update_return_type_periodicity, create_lock_exception. A confirmation_token is issued only when status is 'safe' " +
-        "or a 'duplicate_found' that resolves to an in-place update; never for 'blocked' or 'needs_lock_exception'.",
+        "Advisory and read-only: performs domain-specific checks (company/field existence, record state, period consistency, duplicates, and lock dates), then returns warnings, resolved targets, and the exact suggested generic write call. " +
+        "It never authorizes a mutation, never issues a token, and is never a prerequisite for an Odoo-permitted action. Supported operations: create_or_update_report_external_value, create_manual_tax_return, update_return_type_periodicity, create_lock_exception.",
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
       inputSchema: {
         operation: z.enum([
@@ -2898,7 +2892,7 @@ export function registerSafeWritePlannerTools(
       outputSchema: {
         status: z
           .enum(["safe", "blocked", "needs_lock_exception", "duplicate_found"])
-          .describe("Validation verdict; a token is issued only for 'safe' or a duplicate_found resolving to an in-place update"),
+          .describe("Advisory assessment from domain validation; it is not an authorization decision"),
         resolved_target: z
           .looseObject({ model: z.string(), id: z.number().int().optional() })
           .describe("What the write would target, plus provenance fields"),
@@ -2912,11 +2906,14 @@ export function registerSafeWritePlannerTools(
           id: z.number().int().optional().describe("Target record id when method=write"),
           old_value: z.unknown().optional().describe("Pre-write value for periodicity updates")
         }),
-        confirmation_required: z.boolean(),
-        confirmation_token: z
-          .string()
-          .optional()
-          .describe("HMAC token to pass to the matching apply tool; absent when blocked or CONFIRMATION_SECRET is unset")
+        advisory: z.literal(true),
+        suggested_call: z
+          .object({
+            tool: z.enum(["create_record", "update_record"]),
+            arguments: z.record(z.string(), z.unknown())
+          })
+          .nullable()
+          .describe("Exact suggested generic tool call, or null when validation could not resolve an executable target")
       }
     },
     async ({ operation, company, values }) => {
@@ -2950,17 +2947,29 @@ export function registerSafeWritePlannerTools(
           lock_dates: plan.lock_dates,
           warnings: plan.warnings,
           would_write: plan.would_write,
-          confirmation_required: true
+          advisory: true,
+          suggested_call:
+            plan.would_write.method === "write" && plan.would_write.id
+              ? {
+                  tool: "update_record",
+                  arguments: {
+                    model: plan.would_write.model,
+                    record_id: plan.would_write.id,
+                    values: plan.would_write.values,
+                    reason: `Apply reviewed bookkeeping preview: ${operation}`
+                  }
+                }
+              : plan.would_write.method === "create"
+                ? {
+                    tool: "create_record",
+                    arguments: {
+                      model: plan.would_write.model,
+                      values: plan.would_write.values,
+                      reason: `Apply reviewed bookkeeping preview: ${operation}`
+                    }
+                  }
+                : null
         };
-
-        if (planIssuesToken(plan)) {
-          const secret = getSecret();
-          if (!secret) {
-            plan.warnings.push("CONFIRMATION_SECRET is not configured; no confirmation token was issued.");
-          } else {
-            result.confirmation_token = await issueConfirmationToken(toWritePlan(operation, companyId, plan), secret, Date.now());
-          }
-        }
 
         return mcpStructured(result);
       } catch (err) {

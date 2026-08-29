@@ -2,10 +2,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { OdooQueue } from "../odoo-queue";
 import type { Props } from "../server";
-import { annotateActionExecutability } from "../write-safety";
 import { CURATED_MODEL_ACTIONS, type CuratedAction } from "./actions-map";
 import {
-  CORE_MODEL_ALLOWLIST,
   NAMED_FIELD_PRESET_VALUES,
   annotateWaitingTask,
   browseRecords,
@@ -54,14 +52,6 @@ export interface ModelAction {
   label?: string;
   confirm?: string;
   source: "view" | "curated";
-  /** Whether call_model_method may execute this under connector policy. */
-  executable?: boolean;
-  /** When true, executable only after confirmation_token preflight. */
-  confirmation_required?: boolean;
-  deny_reason?: string;
-  alternative?: string;
-  risk_class?: string;
-  policy_rule?: string;
 }
 
 const BUTTON_TAG_RE = /<button\b([^>]*)>/gi;
@@ -112,20 +102,9 @@ export function mergeModelActions(curated: CuratedAction[], viewActions: ModelAc
   return Array.from(merged.values());
 }
 
-/** Attach connector executability annotations (discovery honesty). Exported for unit testing. */
-export function annotateModelActions(model: string, actions: ModelAction[]): ModelAction[] {
-  return actions.map((action) => {
-    const ann = annotateActionExecutability(model, action.method);
-    return {
-      ...action,
-      executable: ann.executable,
-      ...(ann.confirmation_required ? { confirmation_required: true } : {}),
-      ...(ann.deny_reason ? { deny_reason: ann.deny_reason } : {}),
-      ...(ann.alternative ? { alternative: ann.alternative } : {}),
-      ...(ann.risk_class ? { risk_class: ann.risk_class } : {}),
-      ...(ann.policy_rule ? { policy_rule: ann.policy_rule } : {})
-    };
-  });
+/** Connector-neutral action hints. Odoo decides whether a public method may execute. */
+export function annotateModelActions(_model: string, actions: ModelAction[]): ModelAction[] {
+  return actions;
 }
 
 export function registerReadTools(server: McpServer, getProps: () => Props | undefined, queue: OdooQueue, cache: TtlCache) {
@@ -145,9 +124,193 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
       try {
         const { rows } = await searchRecords(queue, conn, "ir.model", [], ["model", "name"], 100);
         return mcpStructured({ records: rows as Record<string, unknown>[] }, JSON.stringify(rows, null, 2));
+      } catch (error) {
+        return mcpErrorFromException(error, { model: "ir.model", method: "search_read" });
+      }
+    }
+  );
+
+  server.registerTool(
+    "discover_models",
+    {
+      title: "Discover Odoo Models",
+      description:
+        "Search and paginate models visible to the authenticated Odoo user. Prefers /doc-bearer metadata (including public method and field counts) and falls back to ir.model when API documentation is unavailable.",
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      inputSchema: z
+        .object({
+          query: z.string().max(200).default(""),
+          limit: z.number().int().min(1).max(100).default(25),
+          offset: z.number().int().min(0).default(0)
+        })
+        .strict(),
+      outputSchema: {
+        source: z.enum(["doc_bearer", "ir_model"]),
+        models: z.array(
+          z.object({
+            model: z.string(),
+            name: z.string(),
+            documentation: z.string().optional(),
+            field_count: z.number().int().nonnegative().optional(),
+            method_count: z.number().int().nonnegative().optional()
+          })
+        ),
+        page: z.object({ offset: z.number().int(), limit: z.number().int(), returned: z.number().int(), total: z.number().int(), has_more: z.boolean() }),
+        warnings: z.array(z.string())
+      }
+    },
+    async ({ query, limit, offset }) => {
+      const conn = requireConnection(getProps());
+      const needle = query.trim().toLowerCase();
+      try {
+        const index = await queue.fetchOdooDocument<{
+          models?: Array<{
+            model?: unknown;
+            name?: unknown;
+            doc?: unknown;
+            fields?: unknown;
+            methods?: unknown;
+          }>;
+        }>(conn, "/doc-bearer/index.json");
+        const models = (Array.isArray(index.models) ? index.models : [])
+          .filter((item) => typeof item.model === "string" && typeof item.name === "string")
+          .map((item) => ({
+            model: item.model as string,
+            name: item.name as string,
+            ...(typeof item.doc === "string" && item.doc ? { documentation: item.doc } : {}),
+            field_count: item.fields && typeof item.fields === "object" ? Object.keys(item.fields).length : 0,
+            method_count: Array.isArray(item.methods) ? item.methods.length : 0
+          }))
+          .filter((item) => !needle || `${item.model} ${item.name} ${item.documentation ?? ""}`.toLowerCase().includes(needle));
+        const page = models.slice(offset, offset + limit);
+        return mcpStructured({
+          source: "doc_bearer" as const,
+          models: page,
+          page: { offset, limit, returned: page.length, total: models.length, has_more: offset + page.length < models.length },
+          warnings: []
+        });
       } catch {
-        const fallback = CORE_MODEL_ALLOWLIST.map((model) => ({ model }));
-        return mcpStructured({ records: fallback }, JSON.stringify(fallback, null, 2));
+        const domain = needle
+          ? ["|", ["model", "ilike", query.trim()], ["name", "ilike", query.trim()]]
+          : [];
+        try {
+          const [rows, total] = await Promise.all([
+            queue.enqueue<Record<string, unknown>[]>(conn, "ir.model", "search_read", {
+              domain,
+              fields: ["model", "name"],
+              limit,
+              offset,
+              order: "model"
+            }),
+            queue.enqueue<number>(conn, "ir.model", "search_count", { domain })
+          ]);
+          const models = rows
+            .filter((row) => typeof row.model === "string")
+            .map((row) => ({ model: row.model as string, name: typeof row.name === "string" ? row.name : (row.model as string) }));
+          return mcpStructured({
+            source: "ir_model" as const,
+            models,
+            page: { offset, limit, returned: models.length, total, has_more: offset + models.length < total },
+            warnings: ["Authenticated /doc-bearer metadata was unavailable; method counts and model documentation are omitted."]
+          });
+        } catch (error) {
+          return mcpErrorFromException(error, { model: "ir.model", method: "search_read" });
+        }
+      }
+    }
+  );
+
+  server.registerTool(
+    "describe_model_api",
+    {
+      title: "Describe Odoo Model API",
+      description:
+        "Return fields plus every public JSON-2 method, signature, parameters, and documentation visible through authenticated /doc-bearer metadata. Falls back to fields_get and form-view action hints when API documentation is unavailable.",
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      inputSchema: z.object({ model: z.string().min(1).max(255) }).strict(),
+      outputSchema: {
+        source: z.enum(["doc_bearer", "orm_fallback"]),
+        model: z.string(),
+        name: z.string(),
+        documentation: z.string(),
+        fields: z.record(z.string(), z.record(z.string(), z.unknown())),
+        methods: z.record(z.string(), z.record(z.string(), z.unknown())),
+        actions: z.array(
+          z.object({
+            method: z.string(),
+            label: z.string().optional(),
+            confirm: z.string().optional(),
+            source: z.enum(["view", "curated"])
+          })
+        ),
+        warnings: z.array(z.string())
+      }
+    },
+    async ({ model }) => {
+      const conn = requireConnection(getProps());
+      try {
+        const api = await queue.fetchOdooDocument<Record<string, unknown>>(
+          conn,
+          `/doc-bearer/${encodeURIComponent(model)}.json`
+        );
+        const fields = api.fields && typeof api.fields === "object" ? (api.fields as Record<string, Record<string, unknown>>) : {};
+        const methods = api.methods && typeof api.methods === "object" ? (api.methods as Record<string, Record<string, unknown>>) : {};
+        let actions: ModelAction[] = [];
+        try {
+          const views = (await queue.enqueue(conn, model, "get_views", { views: [[false, "form"]] })) as {
+            views?: { form?: { arch?: string } };
+          };
+          actions = mergeModelActions(CURATED_MODEL_ACTIONS[model] ?? [], parseButtonsFromArch(views.views?.form?.arch));
+        } catch {
+          actions = mergeModelActions(CURATED_MODEL_ACTIONS[model] ?? [], []);
+        }
+        return mcpStructured({
+          source: "doc_bearer" as const,
+          model,
+          name: typeof api.name === "string" ? api.name : model,
+          documentation: typeof api.doc === "string" ? api.doc : "",
+          fields,
+          methods,
+          actions,
+          warnings: []
+        });
+      } catch {
+        try {
+          const [fields, views] = await Promise.all([
+            queue.enqueue<Record<string, Record<string, unknown>>>(conn, model, "fields_get", {
+              attributes: ["type", "string", "readonly", "required", "selection", "relation", "help"]
+            }),
+            queue
+              .enqueue<{ views?: { form?: { arch?: string } } }>(conn, model, "get_views", {
+                views: [[false, "form"]]
+              })
+              .catch((): { views?: { form?: { arch?: string } } } => ({}))
+          ]);
+          const actions = mergeModelActions(CURATED_MODEL_ACTIONS[model] ?? [], parseButtonsFromArch(views.views?.form?.arch));
+          const methods = Object.fromEntries(
+            actions.map((action) => [
+              action.method,
+              {
+                signature: null,
+                parameters: {},
+                doc: "Discovered as a form-view action; full public method metadata requires /doc-bearer access.",
+                source: action.source
+              }
+            ])
+          );
+          return mcpStructured({
+            source: "orm_fallback" as const,
+            model,
+            name: model,
+            documentation: "",
+            fields,
+            methods,
+            actions,
+            warnings: ["Authenticated /doc-bearer metadata was unavailable; fallback methods are only supplementary UI action hints, not the complete public API."]
+          });
+        } catch (error) {
+          return mcpErrorFromException(error, { model, method: "fields_get" });
+        }
       }
     }
   );
@@ -747,10 +910,8 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
       title: "List Model Actions",
       annotations: { readOnlyHint: true, openWorldHint: false },
       description:
-        "Read-only: discover action methods (e.g. action_post, button_draft) for an Odoo model, combining form-view buttons with a curated list. " +
-        "Discovery ≠ unrestricted execution: actions with executable:true may be called via call_model_method under connector policy " +
-        "(reversible configuration/lifecycle under Odoo ACLs; irreversible ledger ops need confirmation_token). " +
-        "Irreversible methods are annotated executable:true with confirmation_required:true.",
+        "Read-only: discover object-button methods (for example action_post or button_draft) from form views plus supplementary curated hints. " +
+        "These are UI workflow hints, not an authorization list and not the complete public API. Use describe_model_api for public method signatures; Odoo decides whether calls are allowed.",
       inputSchema: {
         model: z.string()
       },
@@ -761,21 +922,10 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
               method: z.string().describe("Model method name to pass to call_model_method"),
               label: z.string().optional().describe("Human-readable button label"),
               confirm: z.string().optional().describe("Confirmation prompt Odoo shows before this action"),
-              source: z.enum(["view", "curated"]).describe("Discovered from the form view or from the curated map"),
-              executable: z
-                .boolean()
-                .describe("True when call_model_method may execute this under connector policy (possibly with confirmation)"),
-              confirmation_required: z
-                .boolean()
-                .optional()
-                .describe("True when a confirmation_token from preflight is required before execute"),
-              deny_reason: z.string().optional().describe("Why the connector refuses or gates execution"),
-              alternative: z.string().optional().describe("Suggested tool, confirmation_token, or human path"),
-              risk_class: z.string().optional().describe("Connector risk class when known"),
-              policy_rule: z.string().optional().describe("Connector policy rule id when known")
+              source: z.enum(["view", "curated"]).describe("Discovered from the form view or from supplementary hints")
             })
           )
-          .describe("Action methods available on this model (with connector executability)"),
+          .describe("Supplementary UI action hints; use describe_model_api for the public method surface"),
         note: z.string().optional().describe("Present when view discovery failed and only curated actions are returned")
       }
     },
@@ -808,7 +958,7 @@ export function registerReadTools(server: McpServer, getProps: () => Props | und
       description:
         "Read-only: summarize what this Odoo instance contains — installed modules, custom/Studio models, " +
         "Studio-added fields, server actions, and automated actions. Costs one Odoo call per requested section " +
-        "(each call goes through the rate-limited queue, so requesting all 5 sections takes ~5x the per-call delay).",
+        "(each call goes through the globally serialized origin queue, so requesting all 5 sections costs five Odoo calls).",
       inputSchema: {
         include: z.array(z.enum(["modules", "custom_models", "studio_fields", "server_actions", "automations"])).optional()
       },

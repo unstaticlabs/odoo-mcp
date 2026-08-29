@@ -3,7 +3,8 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { TtlCache } from "../cache";
 import { OdooError } from "../odoo";
 import type { OdooQueue } from "../odoo-queue";
-import { FINANCE_KEYWORD_PM_TEXT } from "../write-safety.fixtures";
+import { FINANCE_KEYWORD_PM_TEXT } from "../agent-content.fixtures";
+import { withTestMutationScope } from "../test-odoo-queue";
 import { registerProjectsTools, registerProjectWriteTools } from "./projects";
 import { plaintextToHtml } from "./shared";
 import { validatedToolHandler } from "./structured-test-util";
@@ -21,11 +22,11 @@ type ZodLike = { safeParse: (v: unknown) => { success: boolean }; parse: (v: unk
 
 function dispatchQueue(responder: (model: string, method: string, args: Record<string, unknown>) => unknown): OdooQueue {
   const enqueue = mock(async (...a: unknown[]) => responder(a[1] as string, a[2] as string, a[3] as Record<string, unknown>));
-  return {
+  return withTestMutationScope({
     enqueue,
     snapshot: () => ({ odoo_calls: 0 }),
     delta: () => ({ odoo_calls: 0 })
-  } as unknown as OdooQueue;
+  });
 }
 
 /** Verbatim Odoo 19 text for a field gated behind a group the API user is not in. */
@@ -241,11 +242,11 @@ describe("projects.create_task", () => {
     const result = await handler("projects.create_task")({ name: "X", project_id: 4 });
 
     expect(result.isError).toBeUndefined();
-    expect(result.structuredContent).toEqual({
+    expect(result.structuredContent).toEqual(expect.objectContaining({
       id: 88,
       web_url: "http://example.com/odoo/project/4/tasks/88",
       provenance_warning: "created task 88 but failed to post the provenance stamp (chatter down)"
-    });
+    }));
     expect(String(result.content[0].text)).not.toContain("secret-key");
   });
 
@@ -273,7 +274,7 @@ describe("projects.create_task", () => {
 });
 
 describe("projects.create_task — Waiting is derived, not set", () => {
-  test("state=04_waiting_normal returns write_blocked and never reaches Odoo", async () => {
+  test("state=04_waiting_normal reaches Odoo, which is authoritative", async () => {
     const calls: string[] = [];
     const queue = dispatchQueue((_model, method) => {
       calls.push(method);
@@ -287,17 +288,11 @@ describe("projects.create_task — Waiting is derived, not set", () => {
       values: { state: "04_waiting_normal" }
     });
 
-    expect(result.isError).toBe(true);
-    const body = JSON.parse(result.content[0].text);
-    expect(body.error).toBe("write_blocked");
-    expect(body.model).toBe("project.task");
-    expect(body.policy_rule).toBe("waiting_state_forbidden");
-    expect(body.next_step).toContain("depend_on_ids");
-    expect(body.recoverable).toBe(true);
-    expect(calls).toEqual([]);
+    expect(result.isError).toBeUndefined();
+    expect(calls).toEqual(["create", "message_post"]);
   });
 
-  test("state=01_in_progress with an open blocker is refused with the blocker ids", async () => {
+  test("state=01_in_progress with blocker commands reaches Odoo without a connector preflight", async () => {
     const calls: { method: string; args: Record<string, unknown> }[] = [];
     const queue = dispatchQueue((_model, method, args) => {
       calls.push({ method, args });
@@ -312,11 +307,8 @@ describe("projects.create_task — Waiting is derived, not set", () => {
       values: { state: "01_in_progress", depend_on_ids: [[6, 0, [9]]] }
     });
 
-    expect(result.isError).toBe(true);
-    const body = JSON.parse(result.content[0].text);
-    expect(body.policy_rule).toBe("in_progress_blocked_by_dependencies");
-    expect(body.relevant_state).toEqual({ open_blocker_ids: [9], depend_on_ids: [9] });
-    expect(calls.map((c) => c.method)).toEqual(["read"]);
+    expect(result.isError).toBeUndefined();
+    expect(calls.map((c) => c.method)).toEqual(["create", "message_post"]);
   });
 
   test("state=01_in_progress without blockers creates normally", async () => {
@@ -560,12 +552,13 @@ describe("projects.attach_file", () => {
     return JSON.parse(result.content[0].text) as Record<string, unknown>;
   }
 
-  test("input schema requires context, non-empty datas, a real task_id and project.task", () => {
+  test("input schema accepts optional reason/idempotency, non-empty datas, a real task_id and project.task", () => {
     const shape = attachSchema();
 
-    expect(shape.context.safeParse("").success).toBe(false);
-    expect(shape.context.safeParse(undefined).success).toBe(false);
-    expect(shape.context.safeParse("Attaching the Q3 audit workbook.").success).toBe(true);
+    expect(shape.reason.safeParse("").success).toBe(false);
+    expect(shape.reason.safeParse(undefined).success).toBe(true);
+    expect(shape.reason.safeParse("Attaching the Q3 audit workbook.").success).toBe(true);
+    expect(shape.idempotency_key.safeParse("attachment-88").success).toBe(true);
 
     expect(shape.datas.safeParse("").success).toBe(false);
 
@@ -591,11 +584,11 @@ describe("projects.attach_file", () => {
       name: "q3-audit-workbook.xlsx",
       datas: HELLO_B64,
       mimetype: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-      context: "Attaching the generated Q3 audit workbook as evidence."
+      reason: "Attaching the generated Q3 audit workbook as evidence."
     });
 
     expect(result.isError).toBeUndefined();
-    expect(result.structuredContent).toEqual({
+    expect(result.structuredContent).toEqual(expect.objectContaining({
       ok: true,
       attachment_id: 7101,
       task_id: 88,
@@ -604,7 +597,8 @@ describe("projects.attach_file", () => {
       name: "q3-audit-workbook.xlsx",
       mimetype: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
       file_size: 5
-    });
+    }));
+    expect(result.structuredContent?.execution).toEqual(expect.objectContaining({ outcome: "succeeded" }));
 
     expect(calls).toHaveLength(2);
     const create = calls[1];
@@ -619,7 +613,7 @@ describe("projects.attach_file", () => {
       res_id: 88
     });
     expect(vals.datas).toBe(HELLO_B64);
-    // Write context is audit-only — it must never reach Odoo.
+    // The audit reason is context metadata, never a business value.
     expect(vals).not.toHaveProperty("context");
 
     // The task is read, never mutated; no existing attachment is touched.
@@ -641,7 +635,7 @@ describe("projects.attach_file", () => {
       task_id: 5,
       name: "evidence.bin",
       datas: HELLO_B64,
-      context: "Evidence upload."
+      reason: "Evidence upload."
     });
 
     expect(result.structuredContent?.mimetype).toBe("application/octet-stream");
@@ -660,7 +654,7 @@ describe("projects.attach_file", () => {
       task_id: 4242,
       name: "evidence.bin",
       datas: HELLO_B64,
-      context: "Evidence upload."
+      reason: "Evidence upload."
     });
 
     expect(result.isError).toBe(true);
@@ -670,7 +664,7 @@ describe("projects.attach_file", () => {
     expect(calls).toEqual([{ model: "project.task", method: "read" }]);
   });
 
-  test("refuses a non-project.task res_model that slipped past the schema", async () => {
+  test("schema refuses a non-project.task res_model before any Odoo call", async () => {
     const calls: unknown[] = [];
     const queue = dispatchQueue((model, method) => {
       calls.push({ model, method });
@@ -683,11 +677,11 @@ describe("projects.attach_file", () => {
       name: "evidence.bin",
       datas: HELLO_B64,
       res_model: "account.move",
-      context: "Evidence upload."
+      reason: "Evidence upload."
     });
 
     expect(result.isError).toBe(true);
-    expect(envelope(result).error).toBe("invalid_res_model");
+    expect(envelope(result).error).toBe("invalid_arguments");
     expect(calls).toHaveLength(0);
   });
 
@@ -703,7 +697,7 @@ describe("projects.attach_file", () => {
       task_id: 88,
       name: "evidence.bin",
       datas: "not base64!!",
-      context: "Evidence upload."
+      reason: "Evidence upload."
     });
 
     expect(result.isError).toBe(true);
@@ -726,7 +720,7 @@ describe("projects.attach_file", () => {
       name: "big.bin",
       datas,
       max_bytes: 16,
-      context: "Evidence upload."
+      reason: "Evidence upload."
     });
 
     expect(result.isError).toBe(true);
@@ -749,7 +743,7 @@ describe("projects.attach_file", () => {
       task_id: 88,
       name: "empty.bin",
       datas: "   ",
-      context: "Evidence upload."
+      reason: "Evidence upload."
     });
 
     expect(result.isError).toBe(true);
@@ -757,7 +751,7 @@ describe("projects.attach_file", () => {
     expect(calls).toHaveLength(0);
   });
 
-  test("issues no confirmation token — attachment creation is reversible", async () => {
+  test("returns execution metadata without any legacy authorization artifact", async () => {
     const queue = dispatchQueue((model) => (model === "project.task" ? [{ id: 88, name: "Q3" }] : [7101]));
     const { handler } = buildProjectsServer(queue);
 
@@ -765,7 +759,7 @@ describe("projects.attach_file", () => {
       task_id: 88,
       name: "evidence.bin",
       datas: HELLO_B64,
-      context: "Evidence upload."
+      reason: "Evidence upload."
     });
 
     expect(result.isError).toBeUndefined();
@@ -794,7 +788,7 @@ const allWriteCalls: WriteCall[] = [];
 function buildProjectWriteServer(queue: OdooQueue) {
   const server = new McpServer({ name: "test", version: "0.0.0" });
   // Central recorder: every enqueue lands here regardless of the per-test responder.
-  const wrapped = {
+  const wrapped = withTestMutationScope({
     enqueue: async (...a: unknown[]) => {
       allWriteCalls.push({
         model: a[1] as string,
@@ -805,7 +799,7 @@ function buildProjectWriteServer(queue: OdooQueue) {
     },
     snapshot: () => queue.snapshot(),
     delta: (s: number) => queue.delta(s)
-  } as unknown as OdooQueue;
+  });
   registerProjectWriteTools(server, () => props, wrapped);
   const handler = (name: string) => validatedToolHandler(server, name) as (args: unknown) => Promise<ToolResult>;
   return { server, handler };
@@ -885,7 +879,7 @@ describe("projects.* write registration", () => {
       expect(tool.title, name).toBeTruthy();
       expect(tool.outputSchema, name).toBeDefined();
       expect(tool.description.startsWith("Write:"), name).toBe(true);
-      expect(tool.description, name).toContain("bookkeeping.plan_safe_write");
+      expect(tool.description, name).toContain("Odoo remains authoritative");
       // No caller-supplied model / free-form values: structural safety of these tools.
       const keys = Object.keys(tool.inputSchema ?? {});
       for (const forbidden of ["model", "values", "res_model", "method"]) {
@@ -922,7 +916,7 @@ describe("projects.create_activity", () => {
     });
 
     expect(result.isError).toBeUndefined();
-    expect(result.structuredContent).toEqual({ id: 77, web_url: "http://example.com/odoo/all-tasks/42" });
+    expect(result.structuredContent).toEqual(expect.objectContaining({ id: 77, web_url: "http://example.com/odoo/all-tasks/42" }));
     expect(calls).toEqual([
       {
         model: "mail.activity",
@@ -1041,7 +1035,7 @@ describe("projects.post_note", () => {
     const result = await handler("projects.post_note")({ task_id: 42, note: "Line 1\nR&D <ok>" });
 
     expect(result.isError).toBeUndefined();
-    expect(result.structuredContent).toEqual({ result: 4242, web_url: "http://example.com/odoo/all-tasks/42" });
+    expect(result.structuredContent).toEqual(expect.objectContaining({ result: 4242, web_url: "http://example.com/odoo/all-tasks/42" }));
     expect(calls).toEqual([
       {
         model: "project.task",
@@ -1127,7 +1121,7 @@ describe("projects.update_task", () => {
     });
 
     expect(result.isError).toBeUndefined();
-    expect(result.structuredContent).toEqual({ ok: true, web_url: "http://example.com/odoo/all-tasks/42" });
+    expect(result.structuredContent).toEqual(expect.objectContaining({ ok: true, web_url: "http://example.com/odoo/all-tasks/42" }));
     expect(calls).toEqual([
       {
         model: "project.task",
@@ -1237,10 +1231,10 @@ describe("projects.update_task", () => {
   });
 });
 
-describe("projects.* write context is audit-only", () => {
+describe("projects.* reason is audit metadata", () => {
   const CONTEXT = "USL Admin cleanup — banking/B2C follow-up";
 
-  test("create_activity: context never reaches the Odoo wire", async () => {
+  test("create_activity: reason never becomes a business argument", async () => {
     const without: WriteCall[] = [];
     const withCtx: WriteCall[] = [];
     const { handler: h1 } = buildProjectWriteServer(recordingQueue(without, () => [77]));
@@ -1248,13 +1242,13 @@ describe("projects.* write context is audit-only", () => {
     const args = { task_id: 42, summary: "Ping", user_id: 7, activity_type_id: 4 };
 
     await h1("projects.create_activity")(args);
-    await h2("projects.create_activity")({ ...args, context: CONTEXT });
+    await h2("projects.create_activity")({ ...args, reason: CONTEXT });
 
     expect(withCtx[0].args).toEqual(without[0].args);
-    expect(JSON.stringify(withCtx[0].args)).not.toContain("context");
+    expect(JSON.stringify(withCtx[0].args)).not.toContain(CONTEXT);
   });
 
-  test("post_note: context never reaches the Odoo wire", async () => {
+  test("post_note: reason never becomes a business argument", async () => {
     const without: WriteCall[] = [];
     const withCtx: WriteCall[] = [];
     const { handler: h1 } = buildProjectWriteServer(recordingQueue(without));
@@ -1262,13 +1256,13 @@ describe("projects.* write context is audit-only", () => {
     const args = { task_id: 42, note: "hi" };
 
     await h1("projects.post_note")(args);
-    await h2("projects.post_note")({ ...args, context: CONTEXT });
+    await h2("projects.post_note")({ ...args, reason: CONTEXT });
 
     expect(withCtx[0].args).toEqual(without[0].args);
-    expect(JSON.stringify(withCtx[0].args)).not.toContain("context");
+    expect(JSON.stringify(withCtx[0].args)).not.toContain(CONTEXT);
   });
 
-  test("update_task: context never reaches the Odoo wire", async () => {
+  test("update_task: reason never becomes a business argument", async () => {
     const without: WriteCall[] = [];
     const withCtx: WriteCall[] = [];
     const { handler: h1 } = buildProjectWriteServer(recordingQueue(without));
@@ -1276,10 +1270,10 @@ describe("projects.* write context is audit-only", () => {
     const args = { task_id: 42, name: "Renamed" };
 
     await h1("projects.update_task")(args);
-    await h2("projects.update_task")({ ...args, context: CONTEXT });
+    await h2("projects.update_task")({ ...args, reason: CONTEXT });
 
     expect(withCtx[0].args).toEqual(without[0].args);
-    expect(JSON.stringify(withCtx[0].args)).not.toContain("context");
+    expect(JSON.stringify(withCtx[0].args)).not.toContain(CONTEXT);
   });
 });
 

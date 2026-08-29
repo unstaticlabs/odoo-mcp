@@ -1,5 +1,6 @@
 import type { AuthRequest } from "@cloudflare/workers-oauth-provider";
 import { callOdoo, type OdooConnection } from "./odoo";
+import { allowLocalHttpFromEnv, normalizeOdooOrigin, validateOdooDatabase } from "./odoo-target";
 import { escapeHtml } from "./tools/shared";
 import type { Env, Props } from "./server";
 
@@ -27,8 +28,15 @@ const VALIDATION_TIMEOUT_MS = 8_000;
  * res.users is readable by every authenticated Odoo user and returns 401/404
  * for a bad key, database, or host.
  */
-export async function validateOdooCredentials(conn: OdooConnection): Promise<void> {
-  await callOdoo(conn, "res.users", "fields_get", { attributes: ["type"] }, VALIDATION_TIMEOUT_MS);
+export async function validateOdooCredentials(conn: OdooConnection, fetcher?: typeof fetch): Promise<void> {
+  await callOdoo(conn, "res.users", "fields_get", { attributes: ["type"] }, {
+    timeoutMs: VALIDATION_TIMEOUT_MS,
+    maxAttempts: 1,
+    retryTimeouts: false,
+    retryNetworkErrors: false,
+    fetcher,
+    maxResponseBytes: 256 * 1024
+  });
 }
 
 function encodeOauthReq(authRequest: AuthRequest): string {
@@ -153,24 +161,27 @@ async function handleAuthorizePost(request: Request, env: Env): Promise<Response
   const clientName = await lookupClientName(env, authRequest.clientId);
 
   const rawUrl = String(form.get("odoo_url") ?? "").trim();
-  const odooDb = String(form.get("odoo_db") ?? "").trim();
+  const rawDb = String(form.get("odoo_db") ?? "");
   const odooApiKey = String(form.get("odoo_api_key") ?? "").trim();
 
   let odooBaseUrl: string;
+  let odooDb: string;
   try {
-    const parsed = new URL(rawUrl);
-    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") throw new Error("bad protocol");
-    odooBaseUrl = parsed.origin;
-  } catch {
+    odooBaseUrl = normalizeOdooOrigin(rawUrl, {
+      allowLocalHttp: allowLocalHttpFromEnv(env.ALLOW_LOCAL_HTTP_ODOO),
+      workerOrigin: new URL(request.url).origin
+    });
+    odooDb = validateOdooDatabase(rawDb);
+  } catch (error) {
     return renderAuthorizePage({
       authRequest,
       clientName,
-      error: "The Odoo URL must be a valid http(s) URL, e.g. https://your-org.odoo.com",
-      odooDb
+      error: error instanceof Error ? error.message : "The Odoo URL must be a valid HTTPS origin.",
+      odooDb: rawDb.trim()
     });
   }
 
-  if (!odooDb || !odooApiKey) {
+  if (!odooApiKey) {
     return renderAuthorizePage({
       authRequest,
       clientName,
@@ -180,20 +191,29 @@ async function handleAuthorizePost(request: Request, env: Env): Promise<Response
   }
 
   try {
-    await validateOdooCredentials({ url: odooBaseUrl, db: odooDb, apiKey: odooApiKey });
-  } catch (err) {
-    // callOdoo error messages never contain the API key (see src/odoo.ts).
-    const detail = err instanceof Error ? err.message : "unknown error";
+    const coordinatorFetch: typeof fetch = async (input, init) => {
+      const outbound = new Request(input, init);
+      return env.OdooOriginCoordinator.getByName(new URL(outbound.url).origin).fetch(outbound);
+    };
+    await validateOdooCredentials({ url: odooBaseUrl, db: odooDb, apiKey: odooApiKey, authMode: "oauth" }, coordinatorFetch);
+  } catch {
     return renderAuthorizePage({
       authRequest,
       clientName,
-      error: `Odoo rejected these credentials or could not be reached — check the URL, database and API key. (${detail})`,
+      error: "Odoo rejected these credentials or could not be reached — check the URL, database, API key, and final HTTPS origin.",
       odooUrl: odooBaseUrl,
       odooDb
     });
   }
 
-  const props: Props = { odooBaseUrl, odooDb, odooApiKey, clientName };
+  const props: Props = {
+    odooBaseUrl,
+    odooDb,
+    odooApiKey,
+    clientName,
+    authMode: "oauth",
+    workerOrigin: new URL(request.url).origin
+  };
   const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({
     request: authRequest,
     userId: `${new URL(odooBaseUrl).host}/${odooDb}`,

@@ -2,7 +2,6 @@ import { describe, expect, test } from "bun:test";
 import type { LockDates } from "./safety";
 import {
   planExternalValue,
-  planIssuesToken,
   planLockException,
   planManualReturn,
   planPeriodicityUpdate
@@ -40,7 +39,7 @@ function externalInput(overrides: Partial<Parameters<typeof planExternalValue>[0
 }
 
 describe("planExternalValue", () => {
-  test("happy path → safe with a create would_write and a token", () => {
+  test("happy path → safe with a create would_write", () => {
     const plan = planExternalValue(externalInput());
     expect(plan.status).toBe("safe");
     expect(plan.would_write).toEqual({
@@ -49,10 +48,9 @@ describe("planExternalValue", () => {
       values: { name: CA12.name, [CA12.fkField]: CA12.expression.id, date: CA12.date, value: CA12.value }
     });
     expect(plan.existing_records).toEqual([]);
-    expect(planIssuesToken(plan)).toBe(true);
   });
 
-  test("duplicate → duplicate_found resolving to an update (token issued)", () => {
+  test("duplicate → duplicate_found resolving to an update", () => {
     const dup = { id: 999, date: "2025-09-30", value: 500 };
     const plan = planExternalValue(externalInput({ existingValues: [dup] }));
     expect(plan.status).toBe("duplicate_found");
@@ -64,20 +62,17 @@ describe("planExternalValue", () => {
     });
     expect(plan.existing_records).toEqual([dup]);
     expect(plan.duplicate_as_update).toBe(true);
-    expect(planIssuesToken(plan)).toBe(true);
   });
 
-  test("hard lock on the carryover date → blocked, no token", () => {
+  test("hard lock on the carryover date → blocked advisory", () => {
     const plan = planExternalValue(externalInput({ lockDates: { hard_lock_date: "2025-12-31" } }));
     expect(plan.status).toBe("blocked");
-    expect(planIssuesToken(plan)).toBe(false);
     expect(plan.warnings.join(" ")).toContain("hard_lock_date");
   });
 
-  test("soft (tax) lock → needs_lock_exception, no token", () => {
+  test("soft (tax) lock → needs_lock_exception", () => {
     const plan = planExternalValue(externalInput({ lockDates: { tax_lock_date: "2025-12-31" } }));
     expect(plan.status).toBe("needs_lock_exception");
-    expect(planIssuesToken(plan)).toBe(false);
     expect(plan.warnings.join(" ")).toContain("tax_lock_date");
   });
 
@@ -85,7 +80,6 @@ describe("planExternalValue", () => {
     const plan = planExternalValue(externalInput({ expression: { id: 220, label: CA12.expression.label, engine: "tax_tags" } }));
     expect(plan.status).toBe("blocked");
     expect(plan.warnings.join(" ")).toContain("engine");
-    expect(planIssuesToken(plan)).toBe(false);
   });
 
   test("unknown line code → blocked", () => {
@@ -93,14 +87,12 @@ describe("planExternalValue", () => {
     expect(plan.status).toBe("blocked");
     expect(plan.resolved_target.model).toBe("account.report.line");
     expect(plan.warnings.join(" ")).toContain(CA12.line.code);
-    expect(planIssuesToken(plan)).toBe(false);
   });
 
   test("unknown expression label → blocked", () => {
     const plan = planExternalValue(externalInput({ expression: null }));
     expect(plan.status).toBe("blocked");
     expect(plan.resolved_target.model).toBe("account.report.expression");
-    expect(planIssuesToken(plan)).toBe(false);
   });
 
   test("out-of-period date is warned but does not block a clean write", () => {
@@ -113,7 +105,6 @@ describe("planExternalValue", () => {
     const plan = planExternalValue(externalInput({ values: { ...externalInput().values, value: -942 } }));
     expect(plan.status).toBe("safe");
     expect(plan.warnings.join(" ")).toContain("negative");
-    expect(planIssuesToken(plan)).toBe(true);
   });
 
   test("sign of amount: a positive carryover balance produces no sign warning", () => {
@@ -140,7 +131,7 @@ describe("planManualReturn", () => {
     dateFields: { from: "date_from", to: "date_to" }
   };
 
-  test("happy path → safe create with a token", () => {
+  test("happy path → safe create advisory", () => {
     const plan = planManualReturn(base);
     expect(plan.status).toBe("safe");
     expect(plan.would_write).toEqual({
@@ -148,15 +139,13 @@ describe("planManualReturn", () => {
       method: "create",
       values: { date_from: "2025-10-01", date_to: "2026-09-30", type_id: 7, company_id: 1, name: "CA12 2026" }
     });
-    expect(planIssuesToken(plan)).toBe(true);
   });
 
-  test("overlapping existing return → duplicate_found, NOT an update, no token", () => {
+  test("overlapping existing return → duplicate_found, NOT an update", () => {
     const plan = planManualReturn({ ...base, existingReturns: [{ id: 42 }] });
     expect(plan.status).toBe("duplicate_found");
     expect(plan.duplicate_as_update).toBe(false);
     expect(plan.existing_records).toEqual([{ id: 42 }]);
-    expect(planIssuesToken(plan)).toBe(false);
   });
 
   test("unresolved / wrong-model XML ID → blocked", () => {
@@ -164,10 +153,9 @@ describe("planManualReturn", () => {
     expect(planManualReturn({ ...base, resolvedType: { model: "account.report", res_id: 7 } }).status).toBe("blocked");
   });
 
-  test("period start on/before a soft lock → needs_lock_exception, no token", () => {
+  test("period start on/before a soft lock → needs_lock_exception", () => {
     const plan = planManualReturn({ ...base, lockDates: { fiscalyear_lock_date: "2025-12-31" } });
     expect(plan.status).toBe("needs_lock_exception");
-    expect(planIssuesToken(plan)).toBe(false);
   });
 
   test("record state: an overlapping posted return is flagged as finalized", () => {
@@ -186,7 +174,7 @@ describe("planPeriodicityUpdate", () => {
     currentValue: "quarterly"
   };
 
-  test("known field → safe write reporting old_value, with a token", () => {
+  test("known field → advisory write reporting old_value", () => {
     const plan = planPeriodicityUpdate(base);
     expect(plan.status).toBe("safe");
     expect(plan.would_write).toEqual({
@@ -197,14 +185,12 @@ describe("planPeriodicityUpdate", () => {
       old_value: "quarterly"
     });
     expect(plan.resolved_target.deadline_periodicity).toBe("quarterly");
-    expect(planIssuesToken(plan)).toBe(true);
   });
 
-  test("unknown field → blocked, no token", () => {
+  test("unknown field → blocked advisory", () => {
     const plan = planPeriodicityUpdate({ ...base, values: { ...base.values, field: "not_a_field" }, fieldExists: false, currentValue: null });
     expect(plan.status).toBe("blocked");
     expect(plan.warnings.join(" ")).toContain("not_a_field");
-    expect(planIssuesToken(plan)).toBe(false);
   });
 
   test("unresolved XML ID → blocked", () => {
@@ -224,7 +210,7 @@ describe("planLockException", () => {
     values: { company: "ACME FR", field: "tax_lock_date", exception_date: "2025-09-30", reason: "carryover posting" }
   };
 
-  test("supported model → safe create with a token", () => {
+  test("supported model → safe create advisory", () => {
     const plan = planLockException({ ...base, support: { supported: true, model: "account.lock_exception" } });
     expect(plan.status).toBe("safe");
     expect(plan.would_write).toEqual({
@@ -232,16 +218,14 @@ describe("planLockException", () => {
       method: "create",
       values: { company_id: 1, tax_lock_date: "2025-09-30", reason: "carryover posting" }
     });
-    expect(planIssuesToken(plan)).toBe(true);
   });
 
-  test("unsupported model (e.g. saas-19.2) → blocked with a warning, no token", () => {
+  test("unsupported model (e.g. saas-19.2) → blocked with a warning", () => {
     const plan = planLockException({
       ...base,
       support: { supported: false, model: null, warning: "account.lock_exception unavailable (does not exist)" }
     });
     expect(plan.status).toBe("blocked");
     expect(plan.warnings.join(" ")).toContain("unavailable");
-    expect(planIssuesToken(plan)).toBe(false);
   });
 });

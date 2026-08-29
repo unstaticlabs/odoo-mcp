@@ -6,12 +6,13 @@ import {
   type AggregationDiagnosisCode,
   type OdooConnection
 } from "../odoo";
-import { classifyRefusingLayer, extractRejectedFields, nextStepForLayer } from "../policy";
+import { classifyRefusingLayer, extractRejectedFields, nextStepForLayer } from "../odoo-diagnostics";
 import type { OdooQueue } from "../odoo-queue";
 import { annotateWaitingDependency, isWaitingTaskRecord, normalizeRecords } from "../normalizer";
 import { annotateRecordUrls } from "./record-urls";
 import type { Props } from "../server";
 import type { TtlCache } from "../cache";
+import { MutationExecutionError, type MutationExecution } from "../mutation";
 
 export const DEFAULT_TASK_FIELDS = ["id", "name", "stage_id", "project_id"];
 export const DEFAULT_GENERIC_FIELDS = ["id", "display_name"];
@@ -232,11 +233,29 @@ export const CORE_MODEL_ALLOWLIST = ["project.task", "project.project", "res.par
 
 export function requireConnection(props: Props | undefined): OdooConnection {
   if (!props) throw new Error("Missing Odoo connection props");
-  return { url: props.odooBaseUrl, db: props.odooDb, apiKey: props.odooApiKey };
+  return { url: props.odooBaseUrl, db: props.odooDb, apiKey: props.odooApiKey, authMode: props.authMode };
 }
 
 export function mcpError(text: string) {
   return { content: [{ type: "text" as const, text }], isError: true as const };
+}
+
+/** A mutation completed, but Odoo returned an unusable or contradictory result. */
+export function mcpMutationResultError(
+  details: string,
+  execution: MutationExecution,
+  context: { model: string; method: string }
+) {
+  const envelope: ErrorEnvelope = {
+    error: "invalid_odoo_result",
+    model: context.model,
+    method: context.method,
+    http_status: null,
+    details,
+    recoverable: false,
+    execution
+  };
+  return { content: [{ type: "text" as const, text: JSON.stringify(envelope) }], isError: true as const };
 }
 
 /**
@@ -375,6 +394,9 @@ export interface ErrorEnvelope {
   partial_write?: boolean;
   /** Field(s) Odoo's message names as rejected, when confidently extractable (same key as write_blocked). */
   blocked_fields?: string[];
+  denial_kind?: "acl" | "record_rule" | "business_validation" | "irreversible_policy";
+  execution?: MutationExecution;
+  original_error?: string;
 }
 
 export type AggregationErrorEnvelope = ErrorEnvelope & {
@@ -398,157 +420,6 @@ export type WriteBlockedIntent =
   | "inventory_operation"
   | "disallowed";
 
-export type WriteBlockedErrorEnvelope = ErrorEnvelope & {
-  error: "write_blocked";
-  intent: WriteBlockedIntent;
-  blocked_fields?: string[];
-  policy_rule?: string;
-  risk_class?: string;
-  next_step?: string;
-  /** Which authority refused: connector policy vs Odoo ACL / workflow / lock / hash / schema. */
-  refusing_layer?: string;
-  record_ids?: number[];
-  relevant_state?: Record<string, unknown>;
-  /** Original Odoo exception text when the refusal came from Odoo. */
-  odoo_exception?: string;
-  /** Whether some writes in a batch already landed before this refusal. */
-  partial_write?: boolean;
-};
-
-export type ConfirmationRequiredEnvelope = {
-  error: "confirmation_required";
-  intent: WriteBlockedIntent;
-  model: string;
-  method: string;
-  http_status: null;
-  details: string;
-  recoverable: true;
-  refusing_layer: "connector_policy";
-  policy_rule: "irreversible_confirmation_required";
-  risk_class?: string;
-  next_step: string;
-  confirmation_required: true;
-  confirmation_token?: string;
-  record_ids?: number[];
-  relevant_state?: Record<string, unknown>;
-  would_execute: {
-    model: string;
-    method: string;
-    ids?: number[];
-    kwargs?: Record<string, unknown>;
-  };
-};
-
-/** Connector safety rejection — returned before any Odoo call when a write fails the allowlist. */
-export function mcpWriteBlockedError(
-  context: { model: string; method: string },
-  verdict: {
-    intent: WriteBlockedIntent;
-    reason?: string;
-    blocked_fields?: string[];
-    policy_rule?: string;
-    risk_class?: string;
-    next_step?: string;
-    refusing_layer?: string;
-    record_ids?: number[];
-    relevant_state?: Record<string, unknown>;
-    odoo_exception?: string;
-    partial_write?: boolean;
-    /** When true, the agent can retry after fixing inputs (e.g. missing write context). */
-    recoverable?: boolean;
-  }
-) {
-  const envelope: WriteBlockedErrorEnvelope = {
-    error: "write_blocked",
-    intent: verdict.intent,
-    model: context.model,
-    method: context.method,
-    http_status: null,
-    details: verdict.reason ?? "Write blocked by connector safety layer.",
-    recoverable: verdict.recoverable ?? false,
-    refusing_layer: verdict.refusing_layer ?? "connector_policy",
-    ...(verdict.blocked_fields?.length ? { blocked_fields: verdict.blocked_fields } : {}),
-    ...(verdict.policy_rule ? { policy_rule: verdict.policy_rule } : {}),
-    ...(verdict.risk_class ? { risk_class: verdict.risk_class } : {}),
-    ...(verdict.next_step ? { next_step: verdict.next_step } : {}),
-    ...(verdict.record_ids?.length ? { record_ids: verdict.record_ids } : {}),
-    ...(verdict.relevant_state ? { relevant_state: verdict.relevant_state } : {}),
-    ...(verdict.odoo_exception ? { odoo_exception: verdict.odoo_exception } : {}),
-    ...(verdict.partial_write != null ? { partial_write: verdict.partial_write } : {})
-  };
-  return { content: [{ type: "text" as const, text: JSON.stringify(envelope) }], isError: true as const };
-}
-
-/** Irreversible op preflight — issues a confirmation token; does not mutate. */
-export function mcpConfirmationRequired(args: {
-  model: string;
-  method: string;
-  details: string;
-  risk_class?: string;
-  next_step: string;
-  confirmation_token?: string;
-  record_ids?: number[];
-  relevant_state?: Record<string, unknown>;
-  would_execute: ConfirmationRequiredEnvelope["would_execute"];
-}) {
-  const envelope: ConfirmationRequiredEnvelope = {
-    error: "confirmation_required",
-    intent: "financial_mutation",
-    model: args.model,
-    method: args.method,
-    http_status: null,
-    details: args.details,
-    recoverable: true,
-    refusing_layer: "connector_policy",
-    policy_rule: "irreversible_confirmation_required",
-    next_step: args.next_step,
-    confirmation_required: true,
-    would_execute: args.would_execute,
-    ...(args.risk_class ? { risk_class: args.risk_class } : {}),
-    ...(args.confirmation_token ? { confirmation_token: args.confirmation_token } : {}),
-    ...(args.record_ids?.length ? { record_ids: args.record_ids } : {}),
-    ...(args.relevant_state ? { relevant_state: args.relevant_state } : {})
-  };
-  return { content: [{ type: "text" as const, text: JSON.stringify(envelope) }], isError: true as const };
-}
-
-/**
- * Optional agent-declared intent on write tools ("why is this write happening").
- * Audit-only: logged server-side via {@link logWriteContext}, never forwarded to Odoo and never
- * consulted by the write-safety gate (which classifies by model/method/field structure only).
- */
-const WRITE_CONTEXT_DESCRIPTION =
-  "Why this write is happening — one short sentence of intent distilled from the conversation " +
-  "(e.g. 'user asked to move task 42 to Review'). Audit-logged server-side; never sent to Odoo; " +
-  "never a keyword authz bypass (the write-safety gate still classifies by model/method/fields). " +
-  "Do not include credentials, API keys, or sensitive personal data.";
-
-export const zWriteContext = z
-  .string()
-  .min(1)
-  .max(500)
-  .optional()
-  .describe(
-    `${WRITE_CONTEXT_DESCRIPTION} Optional on most write tools; **required** (non-empty) for ` +
-      "allowlisted reversible lifecycle calls."
-  );
-
-/**
- * Same audit-only context, mandatory. Used by the dedicated lifecycle tools, where a state
- * transition is never taken without a recorded reason.
- */
-export const zRequiredWriteContext = z
-  .string()
-  .min(1)
-  .max(500)
-  .describe(`${WRITE_CONTEXT_DESCRIPTION} Required for lifecycle transitions.`);
-
-/** Emit an audit log line for a contextualized write. No-op when the caller omitted context. */
-export function logWriteContext(tool: string, model: string, context: string | undefined): void {
-  if (!context) return;
-  console.log(JSON.stringify({ event: "write_context", tool, model, context }));
-}
-
 /** Redact Odoo API keys and bearer tokens from error detail text. */
 export function redactDetails(text: string): string {
   return text
@@ -557,6 +428,20 @@ export function redactDetails(text: string): string {
 }
 
 function buildErrorEnvelope(err: unknown, context: ErrorContext): ErrorEnvelope {
+  if (err instanceof MutationExecutionError) {
+    const causeEnvelope = buildErrorEnvelope(err.cause, context);
+    return {
+      ...causeEnvelope,
+      error: err.execution.outcome === "unknown" ? "outcome_unknown" : causeEnvelope.error,
+      ...(err.execution.outcome === "unknown" ? { original_error: causeEnvelope.error } : {}),
+      execution: err.execution,
+      recoverable: err.execution.outcome === "unknown" ? false : causeEnvelope.recoverable,
+      next_step:
+        err.execution.outcome === "unknown"
+          ? "Inspect or reconcile the operation in Odoo, then retry only with the returned idempotency_key and identical business arguments. Do not issue a fresh key blindly."
+          : causeEnvelope.next_step
+    };
+  }
   if (err instanceof AggregationError) {
     return {
       error: err.diagnosis,
@@ -576,7 +461,8 @@ function buildErrorEnvelope(err: unknown, context: ErrorContext): ErrorEnvelope 
       method: err.method,
       http_status: err.httpStatus,
       details: err.details,
-      recoverable: err.recoverable
+      recoverable: err.recoverable,
+      ...(err.denialKind ? { denial_kind: err.denialKind } : {})
     };
   }
   return {
@@ -601,22 +487,23 @@ export function mcpErrorFromException(
   context: ErrorContext & { record_ids?: number[]; partial_write?: boolean } = {}
 ) {
   const envelope = buildErrorEnvelope(err, context);
-  const refusing_layer = classifyRefusingLayer(err);
+  const underlying = err instanceof MutationExecutionError ? err.cause : err;
+  const refusing_layer = classifyRefusingLayer(underlying);
   // A schema / validation refusal that names a field must surface that field: "which field did Odoo
   // reject" is the whole difference between an actionable refusal and an opaque one.
-  const blocked_fields = err instanceof OdooError ? extractRejectedFields(err.details) : [];
+  const blocked_fields = underlying instanceof OdooError ? extractRejectedFields(underlying.details) : [];
   const enriched: ErrorEnvelope = {
     ...envelope,
     refusing_layer,
-    next_step: nextStepForLayer(refusing_layer),
+    next_step: envelope.next_step ?? nextStepForLayer(refusing_layer),
     ...(blocked_fields.length ? { blocked_fields } : {}),
-    ...(err instanceof OdooError ? { odoo_exception: redactDetails(err.details) } : {}),
+    ...(underlying instanceof OdooError ? { odoo_exception: redactDetails(underlying.details) } : {}),
     ...(context.record_ids?.length ? { record_ids: context.record_ids } : {}),
     ...(context.partial_write != null ? { partial_write: context.partial_write } : {})
   };
   // Keep original Odoo details verbatim in `details` for ACL denials (acceptance: surfaced verbatim).
-  if (err instanceof OdooError) {
-    enriched.details = redactDetails(err.details);
+  if (underlying instanceof OdooError) {
+    enriched.details = redactDetails(underlying.details);
   }
   return { content: [{ type: "text" as const, text: JSON.stringify(enriched) }], isError: true as const };
 }
@@ -717,7 +604,7 @@ export function plaintextToHtml(text: string): string {
   return escapeHtml(text).replace(/\r\n|\r|\n/g, "<br>");
 }
 
-/** Max ACL-driven field drops per searchRecords call — the queue is ~1 req/s, so keep it small. */
+/** Max ACL-driven field drops per searchRecords call — keep retry cost bounded. */
 export const MAX_ACL_FIELD_RETRIES = 2;
 
 /**

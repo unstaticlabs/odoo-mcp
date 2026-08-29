@@ -1,659 +1,223 @@
 # odoo-mcp
 
-A [Model Context Protocol](https://modelcontextprotocol.io) server for **Odoo**, running on
-Cloudflare Workers. It lets AI clients (Claude Code, Claude Desktop, ChatGPT, and any other
-MCP client) read and write Odoo data over a single remote endpoint.
-
-- **Transport:** Streamable HTTP (via the Cloudflare Agents `McpAgent`), on four sibling
-  endpoints sharing one auth front door:
-  - `/mcp` — the **full tool surface** (back-compat: existing connectors keep working);
-  - `/accounting/mcp` — bookkeeping + billing tools only;
-  - `/projects/mcp` — projects tools only;
-  - `/documents/mcp` — governed Odoo/Paperless retrieval tools only.
-
-  The domain endpoints exist for clients with small tool budgets (ChatGPT): connect the one
-  you need and the model sees a focused tool list instead of everything.
-- **Auth:** **bring-your-own-key (BYO-key)** — each caller supplies their *own* Odoo URL +
-  API key, so Odoo's own per-user permissions are the authorization. Clients that can set
-  static headers (Claude Code, Claude Desktop) send them per request; ChatGPT connects via a
-  built-in **OAuth shim** that collects the same credentials once and stores them encrypted
-  (see [docs/product/auth.md](docs/product/auth.md)). No shared service account, no scopes
-  model.
-- **API:** Odoo JSON-2 (`POST {url}/json/2/{model}/{method}`).
-
-> Status: Milestone 1+ — projects read core, model/field discovery, smart field selection,
-> timeout+retry, record CRUD, and `odoo://` resources.
-
-## Connection: BYO-key headers
-
-For clients that can set static headers, every request to an MCP endpoint (`/mcp`,
-`/accounting/mcp`, `/projects/mcp`, or `/documents/mcp`) carries three headers
-(missing/malformed → `401`).
-Requests without any `X-Odoo-*` header are treated as OAuth (see
-[Connect ChatGPT](#connect-chatgpt-oauth) below).
-
-| Header | Value |
-|---|---|
-| `Authorization` | `Bearer <your-odoo-api-key>` |
-| `X-Odoo-Url` | your Odoo base URL, e.g. `https://your-org.odoo.com` |
-| `X-Odoo-Db` | your Odoo database name |
-
-The server never logs, stores, or echoes your key.
-
-## Tools
-
-| Tool | Kind | Parameters |
-|---|---|---|
-| `search_records` | read | `model` (string), `domain` (array, default `[]`), `fields` (string[] \| null → curated preset), `limit` (1–100, default 10), `order` (string, optional, e.g. `"name desc"`), `offset` (int ≥ 0, default 0) → includes `returned_fields`, `omitted_fields`, `warnings` |
-| `search_records_compact` | read | `model` (string), `domain` (array, default `[]`), `field_preset` (`minimal` \| `tracking_minimal` \| `financial_minimal`, default `minimal`), `fields` (string[] \| null — explicit override; mutually exclusive with non-default preset), `limit` (1–100, default 25), `offset` (int ≥ 0, default 0), `order` (string, optional), `search_count` (boolean, default `true`) → `CompactReadEnvelope`: nested `fields` manifest (`resolved_fields`, `returned_fields`, `omitted_fields`, `resolution`) and `page` (`offset`, `limit`, `count`, `returned`, `has_more`) |
-| `browse_records` | read | `model` (string), `domain` (array, default `[]`), `field_preset` (`minimal` \| `tracking_minimal` \| `financial_minimal`, default `minimal`), `fields` (string[] \| null — explicit override; mutually exclusive with non-default preset), `limit` (1–100, default 25), `offset` (int ≥ 0, default 0), `cursor` (string \| null, optional — stable continuation token), `order` (string, optional) → compact rows with `page`, `field_preset`, `fields_resolution`, `returned_fields`, `omitted_fields`, `warnings`, optional `safeguard_applied` |
-| `search_count` | read | `model` (string), `domain` (array, default `[]`) → `{ count }` via `search_count`, without fetching records |
-| `get_record` | read | `model` (string), `record_id` (positive int), `fields` (string[] \| null → curated preset) → includes field reporting |
-| `batch_read` | read | `model` (string), `ids` (positive int[], min 1, capped at 100), `fields` (string[] \| null → curated preset) → rows via `search_read` + field reporting |
-| `list_models` | read | — |
-| `get_fields` | read | `model` (string) → field name/type/label schema |
-| `expand_record` | read | `model` (string), `record_id` (positive int), `relations` (string[]), `include_chatter` (bool, default true), `include_attachments` (bool, default true), `relation_limit` (1–50, default 10) — record + optional x2many relations, chatter, attachments; caps at 8 Odoo calls |
-| `projects.list_projects` | read | `domain` (array), `fields` (string[]), `limit` (1–100, default 100) — list `project.project` records with field reporting |
-| `projects.list_tasks` | read | `domain` (array), `fields` (string[]), `limit` (1–100, default 100) — convenience wrapper over `project.task`; includes field reporting |
-| `projects.get_task` | read | `task_id` (positive int), `fields` (string[] \| null → curated preset) — single task + optional `_workflow_status` |
-| `projects.list_stages` | read | `project_id` (positive int, optional), `domain` (array), `fields` (string[]), `limit` (1–100) — `project.task.type` stages for a project |
-| `projects.list_chatter` | read | `task_ids` (positive int[], 1–25), `limit_per_task` (1–50, default 20), `order` (string, default `"date desc"`) — canonical multi-task PM chatter; one scoped `mail.message` query per task; caps at 8 Odoo calls |
-| `projects.create_task` | write | `name` (string), `project_id` (positive int), `description` / `description_is_html` (bool, default `false`) / `stage_id` / `tag_ids` (optional), `values` (optional extra vals), `context` (optional) — Odoo 19 `vals_list` create + provenance `trace_token`; plain-text `description` is HTML-escaped for you (Odoo sanitizes the Html field and drops unknown tags) |
-| `projects.attach_file` | write | `task_id` (positive int), `name` (string ≤ 255), `datas` (base64 file bytes), `mimetype` (optional, default `application/octet-stream`), `max_bytes` (default 10 MiB decoded), `context` (**required**) — creates one binary `ir.attachment` with `res_model=project.task` / `res_id=task_id`. Refuses unknown tasks, invalid base64, empty or oversize payloads, and any other `res_model`, before any create. Not generic `ir.attachment` CRUD |
-| `projects.create_activity` | write | `task_id` (positive int), `summary` (string), `note` (optional), `date_deadline` (optional `YYYY-MM-DD`), `user_id` (positive int), `activity_type_id` (positive int), `context` (optional) — creates one `mail.activity` with `res_model=project.task` / `res_id=task_id` set internally; the caller never names a model |
-| `projects.post_note` | write | `task_id` (positive int), `note` (string), `body_is_html` (bool, default `false`), `context` (optional) — one `message_post` on the `project.task` chatter; plain text is HTML-escaped for you |
-| `projects.update_task` | write | `task_id` (positive int) plus at least one of `name`, `description`, `date_deadline` (`null` clears), `stage_id`, `priority` (`"0"`/`"1"`), `context` (optional); `description_is_html` (bool, default `false`) — curated `project.task` `write`; plain text is HTML-escaped for you; no free-form `values` dict, and an empty update is refused before any Odoo call |
-| `documents.search` | read | `query` (0–2,048 chars; empty requires `filters.saved_view_id`), `mode` (`hybrid` \| `exact` \| `semantic`), `limit` (1–25), `offset` (`offset + limit ≤ 50`), optional saved-view/company/tag/correspondent/type/document-date/archive-date/source/confidentiality/review/link/background filters — exact-first lexical + local BGE-M3 retrieval with bounded excerpts, provenance, and structured degradation warnings. An empty query browses the saved view or replays its stored query |
-| `documents.get` | read | `document_id` — governed metadata and clickable Odoo/preview/download links; no OCR or integrity hashes |
-| `documents.get_content` | read | `document_id`, `offset` (0–1,000,000), `limit` (1–8,000) — one bounded OCR page after record-rule, linked-record, availability, and archive-permission checks |
-| `documents.find_similar` | read | `document_id`, `limit` (1–25), optional search filters — local BGE-M3 similarity; source OCR stays in Paperless and the Odoo-authorized candidates are scoped before retrieval |
-| `documents.get_versions` | read | `document_id` — version metadata and guarded links, intentionally without checksums |
-| `documents.list_tags` / `documents.list_correspondents` / `documents.list_types` | read | `query`, `limit` (1–100, default 25), `offset` — active facet catalogs through Odoo ACLs; identical identity-scoped reads are cached for 60 seconds |
-| `documents.list_saved_views` | read | `query`, `scope` (`all` \| `shared` \| `personal`), `limit` (1–100, default 25), `offset` — shared and caller-owned Documents views, including their safe structured filters and bounded catalog facets; IDs feed `documents.search` and `documents.find_similar`; identical identity-scoped reads are cached for 60 seconds |
-| `documents.get_links` | read | `document_id` — only linked business records the caller may currently read, each with `web_url` |
-| [`aggregate_records`](#aggregate_records--grouped-summaries) | read | `model` (string), `domain` (array), `groupby` (string[], Odoo `field:agg` syntax e.g. `invoice_date:month`), `aggregates` (string[], e.g. `amount_total:sum`, `__count`), `lazy` (bool, default true), `orderby` (string, optional), `limit` (1–100, default 100, fallback scan cap), `offset` (int ≥ 0, default 0) — native `read_group` with bounded connector fallback |
-| `create_record` | write | `model` (string), `values` (object), `context` (string ≤ 500, optional — see [Write context](#write-context-audit-only)) |
-| `update_record` | write | `model` (string), `record_id` (positive int), `values` (object; x2many use Odoo command tuples, e.g. `[[6,0,ids]]`, `[[4,id]]`, `[[3,id]]`), `context` (optional) |
-| `delete_record` | write | `model` (string), `record_id` (positive int), `context` (optional) |
-| `batch_update` | write | `model` (string), `updates` (array of `{ record_id, values }`; x2many use Odoo command tuples), `context` (optional) — one `write` per entry, fail-fast |
-| `batch_post_message` | write | `model` (string), `messages` (array of `{ record_id, body, subtype?, body_is_html? }`), `context` (optional) — one `message_post` per entry, HTML-escaped unless `body_is_html` |
-| `bookkeeping.get_snapshot` | read | `company` (string), `date_from`/`date_to` (string), `scopes` (enum[] min 1: `tax_report`, `tax_returns`, `return_types`, `external_values`, `key_accounts`), `key_account_codes` (string[], optional) — batched tax-close snapshot |
-| `bookkeeping.review_key_accounts` | read | `company` (string), `date_to` (string), `account_codes` (string[]) — per-account balance/debit/credit (nullable on query failure), open items, and factual severity (`attention`/`ok`/`info`/`unknown`) |
-| `bookkeeping.explain_report_line` | read | `company` (string), `report_name` (string), `line_code` (string), `date_from`/`date_to` (string) — fact-only diagnosis of why a tax-report line reads its value (e.g. CA12 `box_22` carryover) |
-| `bookkeeping.list_source_documents` | read | `model` (string, default `account.move`), `record_id` (positive int) — `ir.attachment` source docs tagged `original_source`/`official_pdf`/`other` (metadata only; see `bookkeeping.fetch_attachment` for bytes/vision) |
-| `bookkeeping.search_source_documents` | read | `filename` (string, `ilike`), `folder_id` / `owner_id` / `res_id` (positive int), `tag_ids` (positive int[]), `date_from`/`date_to` (`create_date` bounds), `res_model` (string), `limit` (1–200, default 80) — searches the Odoo Documents repository (`documents.document`), metadata only (never `datas`); degrades to `documents: []` + a warning when the module is absent or ACLs deny it |
-| `bookkeeping.fetch_attachment` | read | `attachment_id` (positive int), `max_bytes` (positive int, default `10485760`) — attachment metadata + base64 content unless URL-type or over `max_bytes`; JPEG/PNG (also GIF/WebP) additionally return an inline MCP image part so the model can read the receipt; PDFs are base64 only — never rasterized or OCR'd |
-| `bookkeeping.preview_returns` | read | `company` (positive int), `from`/`to` (string), `return_type_xmlids` (string[] min 1) — which `account.return` cards should exist; blank periodicity → `configuration_issues` |
-| `bookkeeping.plan_safe_write` | validate-only | `operation` (enum: `create_or_update_report_external_value`, `create_manual_tax_return`, `update_return_type_periodicity`, `create_lock_exception`), `company` (string), `values` (object) — dry-run write plan + HMAC confirmation token; never writes |
-| `billing.audit_expenses` | read | `state` / `product_id` / `analytic_account_id` (optional; analytic post-filters `analytic_distribution` keys), `date_from`/`date_to`, `company_id`, `limit` (1–100, default 50), `offset`, `order` — population audit with account/taxes/payment_mode/attachments, in-page duplicate candidates, and totals (attachment ids only; see `bookkeeping.fetch_attachment` for bytes/vision) |
-| `billing.update_draft_expense` | write | `record_id` (positive int), `values` (allowlisted draft `hr.expense` prep fields: date/name/description/product/account/analytics/qty/price/**total_amount**/tax/reference/**payment_mode** (Odoo "Paid By": own_account | company_account — who paid; draft prep, not a lifecycle action)/**company_id**/**employee_id**; `total_amount_currency` is not writable), `context` (optional) — draft-only; lifecycle via `billing.reset_expense` / `billing.submit_expense` / `billing.approve_expense`. `company_id` + `employee_id` are draft-**preparation** only (mis-routed legal entity): both required together, the target employee must belong to the target company, the caller must have access to it, and company-bound fields (product/account/taxes/analytic) that do not exist there are refused by name — never silently kept or cleared. Validated first, then one atomic write |
-| `billing.reset_expense` | write | `record_ids` (1–50 positive ints), `context` (**required**) — `hr.expense` submitted/approved/refused → draft. All-or-nothing; validated against live state and `can_reset` first |
-| `billing.submit_expense` | write | `record_ids` (1–50 positive ints), `context` (**required**) — `hr.expense` draft → submitted |
-| `billing.approve_expense` | write | `record_ids` (1–50 positive ints), `context` (**required**) — `hr.expense` submitted → approved; refuses when Odoo's `can_approve` is false. Never posts or pays |
-| `billing.configure_draft_vendor_bill` | write | `record_id` (positive int), `values` (allowlisted draft `account.move` `in_invoice` header: `partner_id`, dates, `ref`, `fiscal_position_id`, `currency_id`, `narration`, `payment_reference`, `review_state` (`todo` / `reviewed`), plus `invoice_line_ids`), `context` (optional) — draft vendor bills only; reset via `call_model_method` `button_draft` |
-| `billing.attach_source_pdf` | write | `bill_id` (positive int), `source_attachment_id` (positive int), `page_from`/`page_to` (positive ints, optional — 1-based inclusive; omit both to copy the whole PDF), `max_bytes` (positive int, default `10485760`), `name` (1–255 chars, optional), `context` (**required**) — copies or page-extracts a source PDF in-Worker onto a draft `in_invoice` as a new `ir.attachment`. Draft vendor bills only; never posts, never touches the source, not generic attachment CRUD |
-| `billing.copy_or_relink_source_attachment` | write | exactly one of `source_attachment_id` / `source_document_id` (positive int), `target_model` (enum `account.move`, default), `target_id` (positive int), `mode` (`copy` \| `relink`, default `copy`), `name` (1–255 chars, optional), `max_bytes` (positive int, default `10485760`), `context` (**required**) — `copy` creates a new `ir.attachment` holding the same bytes on a draft `in_invoice` and leaves the source untouched (de-duplication: file the evidence before deleting the shell bill); `relink` repoints the `documents.document` filing instead (destructive to the previous link, Documents app required). Refuses URL-only and oversize sources; reports the copy's `checksum` / `file_size` |
-| `inventory.create_draft_vendor_receipt` | write | `partner_id`, `location_dest_id` (positive ints), `picking_type_id` / `warehouse_id` / `company_id` (positive ints, optional), `scheduled_date` (`YYYY-MM-DD` or ISO datetime), `origin` / `note` (optional), `lines` (1–200 × `{ product_id, product_uom_id, quantity > 0, name? }`), `dry_run` (bool, default `false`), `context` (**required**) — creates one **draft** incoming `stock.picking` with nested `move_ids`. Destination must be internal; `picking_type_id` resolves from `code=incoming` when omitted; `dry_run` previews the exact vals with zero writes. No validate path: `button_validate` / `action_validate` stay human-only and denied on generic tools |
-| `bookkeeping.link_source_document` | write | `document_id` (positive int), `target_model` (enum `account.move`\|`project.task`), `target_id` (positive int), `context` (**required**) — links an existing Documents file to a business record via `res_model`/`res_id`; never copies bytes or creates `ir.attachment`; hard-fails when the Documents app is absent |
-| `feedback.submit` | write | `title` (5–120 chars), `message` (20–4000 chars; concrete details, no secrets), `category` (`bug` \| `documentation_gap` \| `missing_feature` \| `dx_friction`), `tool_name` (string, optional) — files an `[agent-feedback]` card in the maintainers' tracker; see [Agent feedback](#agent-feedback) |
-
-The Documents authorization boundary, content-minimization rule, qualified
-release evidence, capacity assumptions, and Worker-only rollback procedure are
-documented in [docs/product/documents.md](docs/product/documents.md).
-
-**`aggregate_records` validation.** Before calling Odoo `read_group`, the server validates `groupby` and
-`aggregates` against cached `fields_get` metadata:
-
-- **Groupby:** `many2one`, `selection`, `date`, and `datetime` fields (stored only). Date/datetime fields
-  may use an optional granularity bucket: `day`, `week`, `month`, `quarter`, or `year`
-  (e.g. `invoice_date:month`). Bare date/datetime fields are allowed (Odoo default grouping).
-- **Aggregates:** `__count`, or `field:sum` on `integer`, `float`, or `monetary` fields.
-- **Pre-flight errors** (returned as JSON envelopes, no `read_group` call): `invalid_groupby`,
-  `unsupported_aggregate`.
-
-Writes are gated by *your* Odoo user's access rights and record rules (BYO-key), so a caller
-can only do what their Odoo account permits.
-
-> **Bookkeeping safety.** The `bookkeeping.*` tools are **read-only by default**. Writes are
-> **two-phase**: `bookkeeping.plan_safe_write` only *validates* and returns a would-write
-> plan plus an HMAC confirmation token — it **never writes**, and the actual write happens
-> only after explicit human confirmation. These tools **never auto-reconcile** and **never
-> guess tax treatment**; they report facts and leave judgment to the human. See
-> [docs/bookkeeping.md](docs/bookkeeping.md) for the snapshot-first workflow, rate-limit and
-> cache model, full tool reference, and worked CA12 walkthroughs.
-
-### Record links — surface URLs, not bare ids
-
-**Whenever you mention an Odoo record to a human, render it as a markdown link to that
-record's own Odoo page, labelled with the record's human-readable name or reference.** The
-numeric id is a *secondary* technical identifier: keep it for tool arguments, JSON payloads
-and debugging notes. On its own it just makes the reader go hunting in the Odoo UI.
-
-**Correct**
-
-> Filed [2025 EU foreign-VAT refunds — file by 30 Sep 2026](https://odoo.unstaticlabs.com/odoo/project/17/tasks/2266)
-> against [BILL/2026/07/0004 — Acme SARL](https://odoo.unstaticlabs.com/odoo/vendor-bills/9921),
-> matched to [bank line 14 Jul 2026 · −1 240,00 €](https://odoo.unstaticlabs.com/odoo/account.bank.statement.line/9844)
-> for [Acme SARL](https://odoo.unstaticlabs.com/odoo/contacts/512).
-
-**Incorrect**
-
-> Filed task 2266 against bill 9921, matched to move 9844 for partner 512.
-
-#### Where the URL comes from — never assemble it yourself
-
-The server derives every URL from the caller's own Odoo origin plus the record's model
-([`src/tools/record-urls.ts`](src/tools/record-urls.ts)) and hands it back in the response.
-Do **not** guess a UI route from an id, and do not hand-build one from a route you saw once:
-
-| Response shape | Field | Tools |
-|---|---|---|
-| Record rows | `_web_url` on every row | `search_records`, `search_records_compact`, `browse_records`, `batch_read`, `projects.list_projects`, `projects.list_tasks`, `projects.list_stages` |
-| Single record | `_web_url` on the record | `get_record`, `expand_record` (`record`), `projects.get_task` |
-| Write result | `web_url` | `create_record`, `update_record`, `projects.create_task`, `billing.update_draft_expense`, `billing.configure_draft_vendor_bill`, `inventory.create_draft_vendor_receipt` |
-| Per-entry write result | `web_url` on each `results[]` entry | `batch_update` |
-| Domain rows | `web_url` per row | `billing.audit_expenses` |
-| Documents | `web_url` (+ `linked_record_web_url` when filed against a record) | `bookkeeping.search_source_documents` |
-| Two-sided link | `document_web_url` + `target_web_url` | `bookkeeping.link_source_document`, `billing.copy_or_relink_source_attachment` (`relink`; `copy` returns `target_web_url` + `attachment_web_url`) |
-| Feedback card | `url` | `feedback.submit` |
-
-Tools that take an id you already have (`post_message`, `batch_post_message`,
-`delete_record`, `call_model_method`) return no link of their own — read the record first, or
-build the link from the route map below via the same helper.
-
-#### Route map (verified against Odoo 19.2 production routing)
-
-Every route below is an `ir.actions.act_window.path` that exists on Odoo Production
-(`https://odoo.unstaticlabs.com`), so the URL shape is
-`{your Odoo origin}/odoo/{route}/{id}`:
-
-| Model | Route | Example |
-|---|---|---|
-| `project.task` (in a project) | `project/{project_id}/tasks/{id}` | `…/odoo/project/17/tasks/2266` |
-| `project.task` (project unknown / private to-do) | `all-tasks/{id}` | `…/odoo/all-tasks/2266` |
-| `project.project` | `project/{id}` | `…/odoo/project/17` |
-| `project.task.type` | `task-stages/{id}` | `…/odoo/task-stages/9` |
-| `account.move` — `in_invoice` / `in_refund` | `vendor-bills` / `vendor-refunds` | `…/odoo/vendor-bills/9921` |
-| `account.move` — `out_invoice` / `out_refund` | `customer-invoices` / `credit-notes` | `…/odoo/customer-invoices/9930` |
-| `account.move` — `entry` (or `move_type` unknown) | `entries/{id}` | `…/odoo/entries/9844` |
-| `account.move.line` | `items/{id}` | `…/odoo/items/77` |
-| `account.payment` — `inbound` / `outbound` | `customer-payments` / `vendor-payments` | `…/odoo/vendor-payments/55` |
-| `account.bank.statement.line` | `account.bank.statement.line/{id}` | `…/odoo/account.bank.statement.line/431` |
-| `hr.expense` | `expenses/{id}` | `…/odoo/expenses/394` |
-| `res.partner` | `contacts/{id}` | `…/odoo/contacts/512` |
-| `res.users` / `hr.employee` / `res.company` | `users` / `employees` / `companies` | `…/odoo/employees/31` |
-| `account.account` / `account.tax` / `account.payment.term` | `accounts` / `taxes` / `payment-terms` | `…/odoo/accounts/1204` |
-| `account.analytic.account` / `account.analytic.line` | `analytic-accounts` / `analytic-items` | `…/odoo/analytic-accounts/8` |
-| `account.asset` / `account.return` | `assets` / `tax-return` | `…/odoo/tax-return/12` |
-| `product.template` / `product.category` | `products` / `product-categories` | `…/odoo/product-categories/7` |
-| `purchase.order` / `sale.order` / `stock.lot` | `purchase-orders` / `orders` / `lots` | `…/odoo/purchase-orders/610` |
-| `stock.picking` — `incoming` / `outgoing` / `internal` | `receipts` / `deliveries` / `internal` | `…/odoo/receipts/60` |
-| `documents.document` / `knowledge.article` | `documents` / `articles` | `…/odoo/documents/11` |
-| **anything else** | `{model.name}/{id}` | `…/odoo/x.custom.model/9` |
-
-The last row is the generic model route Odoo's own web client emits for record mentions, so
-**every** model has a working link — the helper never returns "no route". (A model name
-without a dot takes an `m-` prefix, e.g. `…/odoo/m-board/3`, because the router would
-otherwise read the segment as an action path.)
-
-#### Getting the *precise* route
-
-Some models route by a field, and the server can only use what your read actually returned:
-
-| Model | Field to request | Without it |
-|---|---|---|
-| `project.task` | `project_id` | falls back to `all-tasks/{id}` (still opens the task) |
-| `account.move` | `move_type` | falls back to `entries/{id}` (Journal Entries holds every move) |
-| `account.payment` | `payment_type` | falls back to `account.payment/{id}` |
-| `stock.picking` | `picking_type_code` | falls back to `stock.picking/{id}` |
-
-The curated presets already include `project_id` for `project.task`, so ordinary task reads
-get the nested project route for free. A **sub-task** links through *its own* `project_id`,
-never through its `parent_id` — the parent task is a separate record with its own link.
-
-Every fallback still opens the right record; it only loses the list/breadcrumb context. When
-a response carries **no** URL at all (the server could not determine the Odoo origin), say so
-and identify the record by name plus `model,id` — do not invent a route.
-
-### Project-management writes vs bookkeeping vs billing
-
-- **PM activities, notes and task-field edits → the `projects.*` write tools.** A chatter note
-  goes to `projects.post_note`, an assigned follow-up to `projects.create_activity`, a change to
-  the task's *own* fields (title, description, deadline, stage, priority) to
-  `projects.update_task`; lodge a new card with `projects.create_task`. Each one hardcodes its
-  Odoo model, method and field set — there is no caller-supplied `model` and no free-form `values`
-  dict — so the fixed-intent guarantee is about model/method/field set, not byte-identical Html-field
-  storage (plain-text `description` and chatter bodies are HTML-escaped for you). Operational banking /
-  VAT / payroll / deadline wording is project-management text, **not** an accounting mutation.
-- **Accounting work → `bookkeeping.plan_safe_write` only.** Tax close, reports, returns and
-  lock-date exceptions never route through the `projects.*` tools, whatever the task is called.
-- **Generic `create_record` / `post_message` / `update_record` / `batch_update` remain** for models
-  the `projects.*` surface does not cover — e.g. `project.project` itself, project tags/stages, or a
-  `mail.activity` on `res_model` = `project.project`. Do not reach for them for ordinary PM notes:
-  they carry a caller-supplied `model`, which is exactly what the fixed-intent tools remove.
-- **Files on a task → `projects.attach_file`.** Agent-generated evidence (audit workbooks,
-  exports, reports) is attached with `projects.attach_file` (`task_id` + base64 `datas` +
-  required `context`). Generic `create_record` on `ir.attachment` is **denied** — that
-  denial is deliberate, so do not route around it. To link a file already filed in the
-  Documents app, use `bookkeeping.link_source_document`; for draft vendor bills,
-  `billing.attach_source_pdf` (fresh page-split bytes) or
-  `billing.copy_or_relink_source_attachment` (an attachment/document that already exists).
-- **Evidence stranded on a duplicate bill → `billing.copy_or_relink_source_attachment`.** When a
-  zero-value duplicate shell is about to be deleted, `mode: copy` (the default) puts a new
-  `ir.attachment` with the same bytes on the canonical draft bill and leaves the source untouched,
-  so the shell can then go. `mode: relink` moves the `documents.document` filing instead and is
-  **destructive** to the previous link. Supply exactly one source; the target must be a draft
-  `in_invoice`.
-- **Operational text** may reference banking, B2C exports, VAT, payroll handoffs, deadlines — the
-  connector classifies by **model + method + field names**, not free-text keywords.
-- **Draft vendor-bill / expense prep** — use `billing.update_draft_expense` /
-  `billing.configure_draft_vendor_bill` (draft-only allowlisted fields; no validate/post).
-  Expense monetary prep uses `total_amount`; `total_amount_currency` is audit-only and refused on write.
-  A draft expense that OCR or the email gateway filed against the **wrong legal entity** is fixed before
-  submit by writing `company_id` + `employee_id` together on `billing.update_draft_expense`: the target
-  company, the target employee and every company-bound reference are validated first, and the move then
-  lands in a single write — mismatches are refused by name rather than silently carried across
-  (see [`docs/bookkeeping.md`](docs/bookkeeping.md#cross-company-draft-expense-reassignment)).
-  When one supplier PDF holds several vendors' invoices, `billing.attach_source_pdf` copies or
-  page-extracts it onto each draft bill in-Worker — no generic `ir.attachment` CRUD needed.
-  For a **new French vendor**, create/update `res.partner` via generic `create_record` /
-  `update_record` with VAT/registry identity (`vat`, and often `siret` / `company_registry`,
-  plus name / `country_id` / contact), then set `partner_id` on the draft bill. Banks,
-  receivable/payable property accounts, payment terms, and credit/debit limits stay
-  MCP-blocked; partner identity is not a `bookkeeping.plan_safe_write` path.
-- **Draft vendor receipts → `inventory.create_draft_vendor_receipt`.** Recording what physically
-  arrived (close-time evidence) creates one **draft** incoming `stock.picking` with its move lines,
-  from a vendor into an internal location. `dry_run: true` previews the exact vals with zero writes.
-  The receipt is left unvalidated: the tool exposes no `button_validate` / `action_validate` path,
-  and those methods stay denied on the generic tools, so moving stock remains a human action in Odoo.
-- **Inventory master data** — `product.category`, `stock.location` and `product.template` (and *only*
-  those three inventory models) accept `create_record` / `update_record` / `call_model_method` writes
-  under the caller's own Odoo ACLs. A create is refused when it would duplicate an existing record:
-  same `name` under the same parent for categories/locations (`parent_id` / `location_id`), same
-  `name` under the same `company_id` for templates — plus the same `default_code` under that company
-  when an internal reference is supplied. The refusal names the existing id. `product.product`,
-  `stock.picking`, `stock.move`, `stock.quant` and the rest of `product.*` / `stock.*` stay blocked on
-  generic write tools — the one narrow exception is the dedicated draft-receipt tool above, which is
-  not a widening of this policy — and `unlink` on the three graduated models still needs a
-  `confirmation_token`.
-- **Company default taxes** — `res.company` is admitted to the generic write tools for exactly two
-  fields: **`account_sale_tax_id`** and **`account_purchase_tax_id`**. They decide which tax a future
-  invoice/bill line pre-fills with, never touch a posted entry, and execute under the caller's own
-  Odoo ACLs. Every other company field — `name`, `currency_id`, `vat`, journals, `bank_ids`, the rest
-  of `account_*` / `tax_*` — is refused by name, and a payload mixing an allowed tax field with a
-  denied one is refused whole (nothing is written for you). Lock-boundary fields
-  (`fiscalyear_lock_date`, `tax_lock_date`, `hard_lock_date`, any `*_lock_date`) are reachable but
-  **confirmation-gated**: they return `confirmation_required` + `confirmation_token` and never move a
-  lock in one call, whichever tool is used. `unlink` on a company needs a token too. Unlike every other
-  model, a `res.company` mutation **requires** a non-empty write `context` (audit-logged server-side,
-  never sent to Odoo, never an authorization bypass). `res.config.settings` and other `res.*` models
-  stay blocked, and this is not a `bookkeeping.plan_safe_write` path.
-- **Reversible expense lifecycle** — prefer the dedicated tools `billing.reset_expense` /
-  `billing.submit_expense` / `billing.approve_expense`. They are the **only** lifecycle path on
-  `/accounting/mcp`, which ships no generic write tools. On the full `/mcp` surface the same
-  transitions are also reachable through `call_model_method` on allowlisted methods
-  (`list_model_actions` marks `executable:true`), including the Odoo 17–18 `hr.expense.sheet`
-  equivalents and vendor-bill `button_draft`. Every path runs the same gate: required write
-  `context`, all ids validated against a live read, compatible state, and Odoo's own
-  `can_reset` / `can_approve` flags. Compose reset → draft edit → submit → approve; there is no
-  single orchestrator tool.
-- **The fence: nothing at or past the journal entry.** Posting, paying, reconciling, deleting and
-  lock-exception writes stay blocked on every generic tool, and no lifecycle rule transitions *out*
-  of `posted` / `in_payment` / `paid`. That includes un-posting: `button_draft` is allowlisted only
-  for **cancelled** vendor bills, never posted ones, because resetting a posted move to draft
-  removes its journal entry. Those are Odoo-UI / human operations
-  (`bookkeeping.plan_safe_write` is tax/lock ops only, never posting).
-- **Tax-close / report / return / lock-exception mutations** — **`bookkeeping.plan_safe_write` only**
-  (four operations documented in [docs/bookkeeping.md](docs/bookkeeping.md)). It never handles PM
-  models, draft bill/expense prep, or journal posting.
-- **Multi-task chatter** — see [docs/testing.md](docs/testing.md) § bulk chatter reads.
-
-### Chatter vs business fields
-
-The **chatter is the record's chronological, auditable journal**: entries are append-only,
-timestamped and attributed. Free-text fields (`description`, Terms & Conditions, Internal
-Notes, …) are **not versioned** — a write replaces the previous value, and nothing records
-that it ever existed.
-
-- Follow-up notes, explanations, decisions, justifications, analysis results, action
-  history → **`post_message` / `batch_post_message`**.
-- Business fields → only when the value is **durable, structuring data describing the
-  record's current state** (a scope statement, the contract terms actually in force).
-- **Never** use a non-versioned text field as a substitute for the chatter.
-- Before replacing existing text, confirm you are updating the business data itself, not
-  appending context. **When in doubt, post to the chatter** — it preserves history.
-
-**Correct** — log an observation without touching the record's data:
-
-    post_message({ model: "project.task", record_id: 42,
-      body: "Client confirmed the March deadline; VAT export rerun after the fix." })
-
-**Incorrect** — silently destroys whatever `description` held:
-
-    update_record({ model: "project.task", record_id: 42,
-      values: { description: "Client confirmed the March deadline; VAT export rerun." } })
-
-This is about *where notes live*, not *what is writable*: the PM-vs-bookkeeping fences,
-`billing.*` draft helpers and `bookkeeping.plan_safe_write` boundaries are unchanged.
-
-### Task state vs stage vs assignee vs dates vs Blocked By
-
-On Odoo 19, `project.task.state` is **not** a free-form status field. `04_waiting_normal`
-("Waiting") is **computed** from the task's `stage_id` and its open `depend_on_ids` (Blocked By):
-a successor enters Waiting on its own the moment a predecessor is open, and leaves it on its own
-when every predecessor is closed. Writing that value by hand produces a task the Odoo UI can only
-move to Done or Cancelled. These are five different things and only the last one is derived:
-
-| Concept | Field | Meaning |
-|---|---|---|
-| Stage | `stage_id` | Kanban column — where the work sits in *your* process |
-| Assignee | `user_ids` | Who owns it |
-| Scheduling | `date_start` / `date_deadline` / `mail.activity` | When it is due or planned |
-| Blocked By | `depend_on_ids` | Which tasks must close first |
-| Waiting | `state` | **Derived** by Odoo from stage + open Blocked By |
-| Evidence / files | `ir.attachment` via `projects.attach_file` | The workbook, export or report the task documents — never generic attachment CRUD |
-
-The connector enforces this:
-
-1. **Waiting is never written.** `state = "04_waiting_normal"` is refused on every write path
-   (`projects.create_task`, `create_record`, `update_record`, `batch_update`, `call_model_method`)
-   with `policy_rule: "waiting_state_forbidden"`. No Odoo call is made.
-2. **To express blocking, set `depend_on_ids`** and let Odoo compute Waiting.
-3. **To voluntarily defer / park work, move the card via `stage_id`** to the board's On Hold
-   (or equivalent park column) and keep an ordinary open `state` — do **not** set Waiting.
-   Optional supporting signals: assignees, activities, or dates. Waiting stays Odoo-derived;
-   the UI On Hold column plus an open state (e.g. In Progress / Changes Requested) is the
-   intentional deferral signal.
-
-   **Incorrect** (writes Waiting — refused, zero Odoo write):
-
-   ```
-   update_record({ model: "project.task", record_id: …,
-     values: { stage_id: <On Hold>, state: "04_waiting_normal", … } })
-   ```
-
-   → `write_blocked` / `connector_policy` / `waiting_state_forbidden` (`recoverable: true`).
-
-   **Correct** (park via stage only):
-
-   ```
-   update_record({ model: "project.task", record_id: …,
-     values: { stage_id: <On Hold> } })
-   ```
-
-   → stage moves; open `state` is unchanged.
-4. **In Progress requires no open blockers.** Setting `state = "01_in_progress"` while open
-   `depend_on_ids` remain is refused with `policy_rule: "in_progress_blocked_by_dependencies"` and
-   the blocker ids in `relevant_state`; Odoo would recompute Waiting and the write would be a
-   silent no-op. A blocker counts as closed only in `03_approved`, `1_done` or `1_canceled`.
-5. **Everything else stays editable while Waiting** — stage, assignees, dates, `depend_on_ids`,
-   chatter and activities are never refused by these rules. Only payloads that set `state` are
-   checked, so ordinary PM writes cost no extra Odoo call.
-6. **Dates never imply Waiting.** A future `date_start` or planned date is not a Waiting trigger;
-   the connector does not infer Waiting from dates, stages or assignees, and neither does Odoo.
-7. **Reads explain it.** `projects.get_task` and `get_record` on a Waiting `project.task` return
-   `_waiting_derived`, `_open_blocker_ids` and `_waiting_explanation` alongside `_workflow_status`.
-8. **Stale Waiting is repairable one task at a time.** When the annotation shows no open blockers,
-   the Waiting state is stale — write `state = "01_in_progress"`, which the gate allows precisely
-   because it found nothing blocking. There is deliberately no batch "fix all Waiting tasks" tool.
-
-### Write context (audit only)
-
-Every write tool accepts an optional `context` string (≤ 500 chars): one sentence of
-agent-declared intent, e.g. `"user asked to move task 42 to Review"`. It is **audit-only** —
-logged server-side as a structured `write_context` line (visible in Workers Logs /
-`wrangler tail`), **never sent to Odoo**, and **never consulted by the write-safety gate**,
-which continues to classify purely by model + method + field structure. **Exceptions** — where a
-non-empty `context` is **required**: allowlisted reversible lifecycle via `call_model_method`, and
-any `res.company` mutation on the generic write tools (still audit-only — never a keyword authz
-bypass; the gate refuses a denied company field whatever the context says). Do not put credentials
-or sensitive personal data in it.
-
-### Agent feedback
-
-`feedback.submit` lets agents report connector problems — bugs, documentation gaps, missing
-features, DX friction — instead of silently working around them. Reports are filed as
-`[agent-feedback]`-prefixed `project.task` cards in the maintainers' tracker Inbox, tagged by
-category, with the server version and client name stamped into the description.
-
-Feedback cards are **deliberately low-trust**: the chatter marker uses the distinct
-`[agent-feedback]` prefix (never a trusted `[agent-source]` provenance token), so
-downstream triage treats them as untrusted input from arbitrary conversations. Submitting
-feedback never changes server behavior — humans triage the cards.
-
-### Field selection
-
-For `search_records`, `get_record`, `batch_read`, `projects.list_tasks`, and `projects.get_task`:
-
-- **`fields` omitted / `null`** → a **curated per-model preset** from `MODEL_FIELD_PRESETS` (no extra Odoo call):
-  - `project.task` → `id`, `name`, `stage_id`, `project_id`
-  - `project.project` → `id`, `name`, `partner_id`, `user_id` (`stage_id` is excluded: Odoo gates it behind the *Use Stages on Project* group, so requesting it by default would fail the read for users without it)
-  - `res.partner` → `id`, `name`, `email`, `phone`
-  - `res.users` → `id`, `name`, `login`, `email`
-  - unknown models → `id`, `display_name`
-- **Explicit string array** → exactly those fields (passed verbatim to Odoo).
-- **`["__all__"]` sentinel** → all Odoo fields (token-heavy; discouraged).
-
-Tool responses include structured field reporting alongside the records:
-
-- `_web_url` — on every returned record: its canonical clickable Odoo URL (see
-  [Record links](#record-links--surface-urls-not-bare-ids)). Server-added, not an Odoo field,
-  so it never appears in `returned_fields` and never needs requesting
-- `returned_fields` — fields present in the Odoo rows
-- `omitted_fields` — `{ field, reason }` where `reason` is one of:
-  - `absent-from-rows` — requested, but Odoo returned no such key on the rows
-  - `unknown-field` — not a field of the model (only when a cached `fields_get` result is already available)
-  - `acl-denied` — the Odoo user cannot read the field; the connector dropped it, retried, and returned the remaining columns (always accompanied by a warning)
-- `warnings` — when an **explicitly requested** field is omitted, or on any `acl-denied` omission
-
-`search_records`, `projects.list_projects`, and `projects.list_tasks` **degrade rather than fail** on
-a per-field `AccessError`: the field Odoo named is dropped (up to two drops per call) and the read is
-retried, so an ACL-gated convenience field costs you a column and a warning, not the whole result.
-`id` is never dropped, and an `["__all__"]` read has no field list to trim, so both still error.
-
-Use `get_fields` when you need the full field schema; the default read path does **not** call `fields_get`.
-
-### `aggregate_records` — grouped summaries
-
-Uses Odoo `read_group` when the model supports it. When native `read_group` returns
-`model_or_method_not_found` (HTTP 404) but `search_read` works, the connector performs a
-**bounded fallback**: one `search_count` + one `search_read` page (max **100** records per
-call), then groups in memory. Check `metadata.fallback` and `warnings` in the response.
-
-**Pagination (fallback only).** `limit` (default 100, max 100) and `offset` (default 0) control
-which slice of matching records is scanned. When `metadata.has_more` is true, increase `offset`
-and call again — the connector never auto-fetches additional pages.
-
-**Groupby matrix (fallback supports single-level only).**
-
-| Field type | Native `read_group` | Fallback |
-|---|---|---|
-| `many2one`, `selection`, `char`, `boolean`, `integer` | yes | yes |
-| `date`, `datetime` (+ `:day`/`:week`/`:month`/`:quarter`/`:year`) | yes | yes (UTC buckets) |
-| `one2many`, `many2many`, `binary`, `html`, `text`, `reference` | — | rejected at validation |
-
-**Aggregates.**
-
-| Token | Native | Fallback |
-|---|---|---|
-| `__count` | yes | yes |
-| `field:sum` | yes | yes |
-| `field:avg`, `:min`, `:max`, `:count` | yes | no (`unsupported_aggregate`) |
-
-Multi-level `groupby` (length > 1) is native-only; fallback refuses with `unsupported_aggregate`.
-
-**Error diagnosis** (JSON error envelope field `diagnosis`, alongside `error` / `details`):
-
-| `diagnosis` | When | Fallback attempted? |
-|---|---|---|
-| `permission_denied` | HTTP 401 / 403 | never |
-| `unsupported_model` | Unknown model or no `fields_get` / `search_read` | no |
-| `invalid_groupby` | Unknown or non-groupable groupby field | no (pre-native) |
-| `unsupported_aggregate` | Unsupported operator in fallback, or multi-level groupby | no |
-| `connector_bug` | Unexpected connector failure | no |
-
-Transient Odoo errors (`timeout`, `rate_limited`, 5xx, etc.) keep the standard `OdooErrorCode`
-in `error` with `recoverable: true` — no fallback. An HTTP 200 response with a JSON `{error: ...}`
-body (e.g. some Odoo builds rejecting `read_group` without 404) surfaces as `error: "unknown"` —
-also no fallback.
-
-For compact paginated triage, use `search_records_compact` or `browse_records` — see
-[Compact browse](#compact-browse-search_records_compact-vs-browse_records) below.
-
-**Browse workflow:** `search_records_compact` or `browse_records` → scan compact rows and note `id` values →
-`batch_read({ model, ids: [...], fields: null })` or `get_record` for full detail
-on selected records only.
-
-### Compact browse (`search_records_compact` vs `browse_records`)
-
-Use **`search_records_compact`** when you want a nested `CompactReadEnvelope` with a `fields`
-manifest (`resolved_fields`, `returned_fields`, `omitted_fields`, `resolution`) and offset/limit
-paging only. Set `search_count: false` to skip the `search_count` round-trip (page `has_more`
-becomes heuristic when the page is full).
-
-Use **`browse_records`** when you need a flat response with cursor continuation (`cursor` /
-`page.next_cursor`), mandatory total `count`, and automatic payload-size safeguards.
-
-Both tools share named **field presets** (compact, no `fields_get` round-trip):
-- `minimal` — curated core columns for known models (`project.task`, `project.project`,
-  `res.partner`, `res.users`); generic `id` + `display_name` fallback for unknown models.
-- `tracking_minimal` — workflow/triage fields (stage, assignees, deadlines, state, …).
-- `financial_minimal` — amount/partner/account oriented subsets where curated.
-
-When both `field_preset` and explicit `fields` are supplied, **explicit `fields` win**.
-`search_records_compact` nests field provenance under `fields`; `browse_records` flattens it
-as `field_preset`, `fields_resolution`, `returned_fields`, and `omitted_fields`.
-
-**Paging:** pass a stable `order` when scanning multiple pages. `search_records_compact`
-uses offset/limit only. `browse_records` also supports `cursor` / `page.next_cursor` and
-shrinks oversized pages automatically (`safeguard_applied`).
-
-**Drill-down:** ids from compact rows can be fetched in full with `batch_read` or
-`get_record` for field data. For chatter on a single task use
-`expand_record({ model: "project.task", record_id, include_chatter: true })`; for
-multiple tasks use `projects.list_chatter({ task_ids: [...] })`.
-
-### Project-management chatter
-
-**Triage:** `projects.list_tasks`, `browse_records`, or `search_records_compact` on
-`project.task` to collect task ids.
-
-**Single-task detail + chatter:**
-`expand_record({ model: "project.task", record_id, include_chatter: true, include_attachments: false })`.
-
-**Multi-task chatter:** `projects.list_chatter({ task_ids: [...] })`. Each task id
-triggers one scoped `mail.message` query (never `res_id in [...]` with `body`/`preview`).
-Re-invoke with remaining ids when `metadata.truncated_task_ids` is set (8 Odoo calls max
-per invocation) or when you have more than 8 tasks.
-
-**Do not** bulk-fetch PM chatter via `search_records` on `mail.message` with
-`[["model","=","project.task"],["res_id","in",ids]]` and `body`/`preview` — MCP hosts may
-block finance-keyword message bodies. Accounting chatter on invoices/journals is still
-blocked on `account.move` / `hr.expense`; draft bill/expense prep uses `billing.*`, reversible
-lifecycle uses allowlisted `call_model_method` (see [docs/bookkeeping.md](docs/bookkeeping.md)), and
-tax-close mutations use `bookkeeping.plan_safe_write` — not generic `mail.message` reads.
-Reads use `expand_record` / `projects.list_chatter`; writes go through `post_message` /
-`batch_post_message` (see *Chatter vs business fields*).
-
-## Resources
-
-In addition to tools, the server exposes read-only Odoo data as **MCP resources** via URI
-templates. Any MCP client can discover them with `resources/templates/list` (handled
-automatically by the SDK) and read them with `resources/read`.
-
-| URI template | Description | Example |
-|---|---|---|
-| `odoo://{model}/record/{id}` | Fetch a single record by id (carries `_web_url`) | `odoo://project.task/record/42` |
-| `odoo://{model}/search` | List records for a model (each carries `_web_url`). Optional `?domain=<JSON array>&fields=<comma-separated>&limit=<1-100>` query params (defaults: `domain=[]`, smart fields, `limit=10`) | `odoo://project.task/search?domain=%5B%5B%22active%22%2C%22%3D%22%2Ctrue%5D%5D&limit=5` |
-| `odoo://{model}/count` | Count records matching a domain via `search_count`. Optional `?domain=<JSON array>` query param (default `[]`) | `odoo://project.task/count?domain=%5B%5B%22active%22%2C%22%3D%22%2Ctrue%5D%5D` |
-| `odoo://{model}/fields` | Field schema (name, type, string label) for a model | `odoo://project.task/fields` |
-
-All four resources are strictly read-only (`read` / `search_read` / `search_count` / `fields_get`
-only) and use the same BYO-key connection headers as the tools above.
-
-## Quick start
-
-See **[docs/testing.md](docs/testing.md)** for the full local + deployed testing guide. In short:
-
-```bash
-npm ci
-npx wrangler dev        # serves http://localhost:8787/mcp
-
-# connect Claude Code to the local server:
-claude mcp add --transport http odoo http://localhost:8787/mcp \
-  --header "Authorization: Bearer $ODOO_API_KEY" \
-  --header "X-Odoo-Url: https://your-org.odoo.com" \
-  --header "X-Odoo-Db: your-db"
+A Cloudflare Workers MCP server that exposes Odoo as a general agent gateway.
+The authenticated Odoo user is the authority for access rights, record rules,
+field access, company scope, workflows, and irreversible-action policy. The MCP
+does not maintain a second authorization policy.
+
+Server/tool-surface version: **1.0.0**.
+
+## What changed in 1.0
+
+This is a breaking safety and reliability redesign:
+
+- `create_record`, `update_record`, `batch_update`, `delete_record`, chatter
+  tools, and `call_model_method` are available for every valid Odoo model and
+  public JSON-2 method on `/mcp`.
+- MCP confirmation tokens, model/field authorization lists, lifecycle gates,
+  inferred-risk denials, mandatory state preflights, and the runtime secret for
+  signing confirmations are removed.
+- Mutation inputs use optional `reason`, `odoo_context`, and
+  `idempotency_key`. The former audit-only context string is removed.
+- Every attempted mutation reports `idempotency_key`, `idempotency_mode`,
+  `replayed`, `correlation_id`, and `outcome`.
+- All physical Odoo requests are globally single-flight per normalized Odoo
+  origin through `OdooOriginCoordinator`.
+- Odoo target URLs and payloads are bounded and validated. Credential-bearing
+  redirects are never followed.
+- Authenticated `/doc-bearer` discovery exposes visible models, fields, and
+  public methods, with ORM/view fallback.
+- `bookkeeping.preview_write` is advisory. Dry-run helpers never authorize a
+  later operation.
+
+Existing focused endpoint composition is unchanged:
+
+| Endpoint | Surface |
+| --- | --- |
+| `/mcp` | Full generic and domain tool surface |
+| `/accounting/mcp` | Accounting, billing, inventory, feedback, and advisory accounting tools |
+| `/projects/mcp` | Project and feedback tools |
+| `/documents/mcp` | Governed Documents facade |
+
+Clients must reconnect after deployment so they refresh the 1.0 tool schemas.
+
+## Authority and safety boundary
+
+For a valid credential, the MCP sends what Odoo permits. An Odoo AI Agent
+identity remains subject to `usl_access_control`; a human identity with
+Irreversible Actions permission can exercise that permission through this MCP.
+On installations without that add-on, the MCP honors the installation's native
+policy.
+
+The MCP still owns its boundary:
+
+- input and identifier shape validation;
+- HTTPS/origin validation and redirect refusal;
+- request, response, attachment, PDF, pagination, and queue bounds;
+- per-origin physical-request serialization;
+- idempotency protocol negotiation and truthful ambiguity;
+- reserved audit-context attribution;
+- credential redaction and non-persistence on the header path;
+- stable Odoo error classification and observability.
+
+Odoo records, chatter, documents, and API documentation are untrusted data.
+They are never treated as authorization or as instructions that override the
+user's request.
+
+See [Safety design](docs/safety-design.md) for the full trust model.
+
+## Authentication
+
+### Header/BYO-key
+
+Send these headers on every MCP request:
+
+```text
+Authorization: Bearer <odoo-api-key>
+X-Odoo-Url: https://acme.odoo.com
+X-Odoo-Db: acme-prod
 ```
 
-## Connect ChatGPT (OAuth)
+Before a header-authenticated session makes Odoo calls, the server performs a
+fixed, bounded, redacted `res.users.fields_get` handshake. Credentials are not
+persisted or logged.
 
-ChatGPT's connector UI can't set custom headers, so the Worker ships an OAuth 2.1 shim
-(authorization code + PKCE + dynamic client registration) shared by all four MCP endpoints:
+### OAuth shim
 
-1. Deploy the Worker (see below — the `OAUTH_KV` namespace must exist).
-2. In ChatGPT: **Settings → Apps & Connectors → Advanced settings → enable Developer Mode**,
-   then **Create connector**: give it a name and the server URL — usually a focused domain
-   endpoint like `https://<worker>.workers.dev/accounting/mcp`, `…/projects/mcp`, or
-   `…/documents/mcp`
-   (`…/mcp` serves the full surface) — auth **OAuth**. Each endpoint is a separate
-   connector with its own authorize flow.
-3. ChatGPT redirects you to the Worker's hosted `/authorize` page. Paste your Odoo URL,
-   database, and API key — the shim verifies them against your Odoo before accepting.
-4. Back in ChatGPT, the connector shows the tool list; try a read tool (e.g. ask it to
-   search `project.task`).
+Clients that cannot supply static headers use the built-in authorization-code
+and PKCE flow. The hosted form collects and verifies the same Odoo URL, database,
+and API key. Grant props are encrypted by
+`@cloudflare/workers-oauth-provider` in `OAUTH_KV`.
 
-After any tool-surface change (`SERVER_VERSION` bump), ChatGPT keeps serving its cached
-tool list — open the connector's settings and refresh it so the new/removed tools and
-updated parameters (e.g. top-level `confirmation_token` on irreversible writes) appear;
-new connectors are unaffected. Irreversible ledger ops need the preflight → confirm →
-retry round-trip documented in [`docs/bookkeeping.md`](docs/bookkeeping.md) (“The fence”).
+Both paths become the same in-memory connection props and call Odoo as the same
+user. See [Authentication](docs/product/auth.md).
 
-Your credentials are stored end-to-end encrypted in Workers KV and resolved per request —
-tools behave exactly as on the header path, limited by your own Odoo permissions. Token
-lifetime is 1 h (refresh 1 year, fixed at connect time — re-authorize after that). Revocation: delete the `grant:*` key via
-`npx wrangler kv key list/delete --binding OAUTH_KV --remote` (details in
-[docs/product/auth.md](docs/product/auth.md)).
+## Odoo target rules
 
-## Deploy
+- Hosted deployments require HTTPS.
+- HTTP is allowed only when `ALLOW_LOCAL_HTTP_ODOO=true` and the target is
+  loopback (`localhost`, `127.0.0.0/8`, or `::1`).
+- The configured value must be a root origin. Credentials, paths, queries, and
+  fragments are rejected.
+- The target cannot equal the Worker's own public origin.
+- Redirects are not followed.
+- Private/internal HTTPS origins are intentionally supported. This is a product
+  decision: SSRF risk is constrained, not eliminated. Operators that need a
+  public-only boundary must add an operator hostname policy or Cloudflare's
+  strict-public routing control.
 
-**Pushes to `main` deploy automatically** via GitHub Actions
-([.github/workflows/deploy.yml](.github/workflows/deploy.yml)) using the
-`CLOUDFLARE_ACCOUNT_ID` repo variable and `CLOUDFLARE_API_TOKEN` secret. Durable Object
-migrations in `wrangler.jsonc` apply as part of the deploy. Manual deploys still work:
+## Generic JSON-2 operations
 
-```bash
-npm ci                # required — node_modules must actually be installed before bundling
-npx wrangler deploy
+Use discovery before calling generic operations:
+
+1. `discover_models` searches and paginates the authenticated model catalog.
+2. `describe_model_api` returns fields and all documented public methods,
+   signatures, parameters, and docs.
+3. `get_fields` and `list_model_actions` provide ORM/schema and supplementary UI
+   hints.
+4. Call generic CRUD or `call_model_method` with exact named arguments.
+
+`call_model_method` is JSON-2-native: it accepts `model`, `method`, optional
+`ids`, named `kwargs`, optional `odoo_context`, `reason`, and
+`idempotency_key`. Positional `args` are not supported.
+
+Each JSON-2 request is its own SQL transaction. When several related changes
+must be atomic, expose or call one Odoo public method that performs the whole
+workflow.
+
+For x2many fields, use Odoo command triples:
+
+```text
+[0, 0, values]  create related record
+[1, id, values] update related record
+[2, id, 0]      delete related record
+[3, id, 0]      unlink relation
+[4, id, 0]      link existing record
+[5, 0, 0]       clear relations
+[6, 0, ids]     replace relations
 ```
 
-- `wrangler` must already be logged in (`npx wrangler whoami`; if not, `npx wrangler login`).
-- The header path is stateless/BYO-key, so there are no secrets or `.dev.vars` to set for a
-  deploy. The ChatGPT OAuth shim needs one resource: the **`OAUTH_KV`** KV namespace bound in
-  `wrangler.jsonc`. Deploying to a new account? Create it once with
-  `npx wrangler kv namespace create OAUTH_KV` and put the printed `id` into the
-  `kv_namespaces` entry.
-- If your Cloudflare login can reach **multiple accounts**, `wrangler deploy` needs to know
-  which one to use. `wrangler deploy` has no `--account-id` flag — set the account via the
-  `CLOUDFLARE_ACCOUNT_ID` env var instead (or add `"account_id"` to `wrangler.jsonc`):
-  ```bash
-  CLOUDFLARE_ACCOUNT_ID=<account-id> npx wrangler deploy
-  ```
-  Run `npx wrangler whoami` to list the account IDs your login can reach.
-- `wrangler.jsonc` declares the `McpAgent`, `AccountingAgent`, `ProjectsAgent`, and
-  `DocumentsAgent` Durable
-  Objects; the first deploy provisions them automatically — no manual setup needed.
-- On success, wrangler prints the public URL: `https://<worker-name>.<subdomain>.workers.dev`.
-  The MCP endpoints are that URL + `/mcp`, `/accounting/mcp`, `/projects/mcp`, and
-  `/documents/mcp`.
+Generic read results carry `_web_url`; generic create/update results carry
+`web_url` or `web_urls`. Cite those links rather than bare record IDs.
+
+## Mutation reliability
+
+Every mutating tool accepts an optional opaque `idempotency_key`. Omit it for a
+new UUID. Reuse a key only for the exact same logical mutation and identical
+business arguments.
+
+```json
+{
+  "idempotency_key": "expense-submit-2026-08-29-42",
+  "idempotency_mode": "odoo_atomic",
+  "replayed": false,
+  "correlation_id": "mcp-...",
+  "outcome": "succeeded",
+  "expires_at": "..."
+}
+```
+
+`odoo_atomic` requires the separately governed Odoo add-on described in
+[Odoo idempotency protocol](docs/idempotency-protocol.md). Without that
+capability the MCP makes exactly one mutation attempt, reports
+`idempotency_mode: "unavailable"`, and never pretends a timeout or lost response
+is safe. An ambiguous failure returns `outcome_unknown`; reconcile in Odoo, then
+retry only with the returned key and identical arguments.
+
+Composite and batch tools derive deterministic child keys from the root key and
+stable step/index names. This makes retries stable but does not make several
+independent Odoo transactions atomic.
+
+## Agent guidance
+
+All endpoint servers publish concise initialization instructions plus:
+
+- resource `odoo://guide/operations`;
+- prompt `plan_odoo_operation`;
+- compact per-tool descriptions.
+
+The guide teaches discovery, untrusted-data handling, read-before-write,
+multi-company context, x2many commands, one-method atomicity, idempotency,
+ambiguity reconciliation, Odoo denial handling, and record-link citation.
+
+Dedicated helpers remain useful when their fixed intent reduces calls. They may
+validate promises in their names—for example, a tool named “configure draft
+vendor bill” may require a draft vendor bill—but generic `/mcp` operations are
+never blocked merely because a dedicated helper is narrower.
 
 ## Development
 
-- `npm run typecheck` — `tsc --noEmit`
-- `npx wrangler deploy --dry-run` — bundle check
-- `bun test` — hermetic unit/integration tests
-- CI gate: `.ci.json` (install → typecheck → test → deploy dry-run)
+```bash
+npm ci
+npm run typecheck
+bun test
+npm run test:miniflare
+npx wrangler deploy --dry-run
+npx wrangler dev
+```
 
-## License
+Miniflare exercises the Durable Object bindings declared in `wrangler.jsonc`.
+Use MCP Inspector against `http://localhost:8787/mcp`. Local HTTP Odoo targets
+need the explicit loopback flag; external targets still require HTTPS.
 
-MIT (see repository).
+Before release, run the checks in [Testing](docs/testing.md), including
+multi-session origin serialization and an end-to-end forced-response-loss test
+against an Odoo deployment with the idempotency add-on.
+
+## Odoo-side dependency
+
+This repository does **not** modify or bundle Odoo. The sibling Odoo checkout
+was inspected read-only to confirm the native JSON-2 dispatcher and
+`/doc-bearer` document shapes. Exact replay semantics require
+`usl_json2_idempotency` to land through the Odoo repository's own review,
+action-risk, and deployment process before this MCP can report `odoo_atomic`.
+
+## Further documentation
+
+- [Safety design](docs/safety-design.md)
+- [Odoo idempotency protocol](docs/idempotency-protocol.md)
+- [Architecture](docs/product/architecture.md)
+- [Authentication](docs/product/auth.md)
+- [Accounting and advisory previews](docs/bookkeeping.md)
+- [Testing](docs/testing.md)
+- [Documents facade](docs/product/documents.md)
