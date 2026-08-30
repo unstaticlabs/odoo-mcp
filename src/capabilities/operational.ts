@@ -28,11 +28,10 @@ const readAnnotations = {
 const ActionOutputSchema = z.object({
   result: z.unknown(),
   correlation_id: z.string(),
-  outcome: z.enum(["succeeded", "unknown"]),
+  outcome: z.enum(["succeeded", "requires_follow_up", "unknown"]),
   record: z.object({
     model: z.string(), id: z.number().int(), display_name: z.string(), url: z.string()
-  }).strict().optional(),
-  warnings: z.array(z.string()).optional()
+  }).strict().optional()
 }).strict();
 
 function rpcContext(requested: Record<string, unknown>, context: RequestContext) {
@@ -437,9 +436,9 @@ export function registerOperationalCapabilities(registry: CapabilityRegistry, cl
   }));
 
   for (const action of [
-    { name: "expenses_reset_draft", id: "expenses.reset_draft", method: "action_reset", title: "Reset Expense to Draft", verb: "reset the selected expenses to draft" },
-    { name: "expenses_submit", id: "expenses.submit", method: "action_submit", title: "Submit Expenses", verb: "submit the selected draft expenses" },
-    { name: "expenses_approve", id: "expenses.approve", method: "action_approve", title: "Approve Expenses", verb: "approve the selected submitted expenses" }
+    { name: "expenses_reset_draft", id: "expenses.reset_draft", method: "action_reset", title: "Reset Expense to Draft", verb: "reset the selected expenses to draft", expectedStates: ["draft"] },
+    { name: "expenses_submit", id: "expenses.submit", method: "action_submit", title: "Submit Expenses", verb: "submit the selected draft expenses", expectedStates: ["submitted", "approved"] },
+    { name: "expenses_approve", id: "expenses.approve", method: "action_approve", title: "Approve Expenses", verb: "approve the selected submitted expenses", expectedStates: ["approved"] }
   ]) {
     registry.add(defineCapability({
       id: action.id,
@@ -461,10 +460,38 @@ export function registerOperationalCapabilities(registry: CapabilityRegistry, cl
       input: z.object({ expense_ids: z.array(PositiveIdSchema).min(1).max(50), context: OdooContextSchema }).strict(),
       output: ActionOutputSchema,
       async handler({ expense_ids, context: requestedContext }, context, signal) {
+        const common = rpcContext(requestedContext, context);
         const result = await client.call<unknown>(context, "hr.expense", action.method, {
-          ids: expense_ids, context: rpcContext(requestedContext, context)
+          ids: expense_ids, context: common
         }, { kind: "mutation", signal });
-        return { data: { result, correlation_id: context.correlationId, outcome: "succeeded" as const } };
+        const warnings: string[] = [];
+        let observed: Record<string, unknown>[] = [];
+        let outcome: "succeeded" | "requires_follow_up" | "unknown" = "succeeded";
+        try {
+          observed = await client.call<Record<string, unknown>[]>(context, "hr.expense", "read", {
+            ids: expense_ids, fields: ["id", "display_name", "state"], context: common
+          }, { signal });
+          const unexpected = observed.filter((record) => !action.expectedStates.includes(String(record.state)));
+          if (unexpected.length > 0) {
+            outcome = "requires_follow_up";
+            warnings.push(
+              `Odoo completed ${action.method}, but ${unexpected.map((record) => `hr.expense,${String(record.id)}=${String(record.state)}`).join(", ")} did not reach ${action.expectedStates.join(" or ")}. Inspect the returned method result; Odoo may require a follow-up wizard or validation decision.`
+            );
+          }
+        } catch (error) {
+          outcome = "unknown";
+          warnings.push(
+            `Odoo completed ${action.method}, but the resulting expense states could not be read: ${error instanceof Error ? error.message : String(error)}`
+          );
+        }
+        return {
+          data: {
+            result: { method_result: result, observed },
+            correlation_id: context.correlationId,
+            outcome
+          },
+          ...(warnings.length ? { warnings } : {})
+        };
       }
     }));
   }

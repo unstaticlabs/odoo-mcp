@@ -55,19 +55,48 @@ describe("fixed-intent operational capabilities", () => {
   });
 
   it("runs an expense transition as one non-retried Odoo method call", async () => {
-    const fetcher = vi.fn<typeof fetch>(async () => Response.json(true));
+    const fetcher = vi.fn<typeof fetch>(async (url) => String(url).endsWith("/action_submit")
+      ? Response.json(true)
+      : Response.json([
+          { id: 10, display_name: "Expense 10", state: "submitted" },
+          { id: 11, display_name: "Expense 11", state: "approved" }
+        ]));
     const client = await connected(fetcher);
     const result = await client.callTool({
       name: "expenses_submit",
       arguments: { expense_ids: [10, 11], context: { allowed_company_ids: [2] } }
     });
     expect(result.isError).not.toBe(true);
-    expect(fetcher).toHaveBeenCalledTimes(1);
-    const [url, init] = fetcher.mock.calls[0]!;
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    const actionCalls = fetcher.mock.calls.filter(([url]) => String(url).endsWith("/json/2/hr.expense/action_submit"));
+    expect(actionCalls).toHaveLength(1);
+    const [url, init] = actionCalls[0]!;
     expect(String(url).endsWith("/json/2/hr.expense/action_submit")).toBe(true);
     expect(JSON.parse(String(init?.body))).toMatchObject({
       ids: [10, 11],
       context: { allowed_company_ids: [2], usl_agent_origin: "odoo-mcp" }
+    });
+    expect(result.structuredContent).toMatchObject({
+      data: { result: { observed: [{ id: 10, state: "submitted" }, { id: 11, state: "approved" }] } }
+    });
+  });
+
+  it("reports when Odoo returns an approval wizard without reaching the approved state", async () => {
+    const fetcher = vi.fn<typeof fetch>(async (url) => String(url).endsWith("/action_approve")
+      ? Response.json({ type: "ir.actions.act_window", res_model: "hr.expense.approve.duplicate" })
+      : Response.json([{ id: 10, display_name: "Expense 10", state: "submitted" }]));
+    const client = await connected(fetcher);
+    const result = await client.callTool({
+      name: "expenses_approve",
+      arguments: { expense_ids: [10], context: {} }
+    });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      data: {
+        result: { method_result: { type: "ir.actions.act_window" }, observed: [{ id: 10, state: "submitted" }] },
+        outcome: "requires_follow_up"
+      },
+      warnings: [expect.stringContaining("follow-up wizard")]
     });
   });
 
