@@ -54,6 +54,27 @@ function estimateSchemaTokens(input: z.ZodType, output: z.ZodType): number {
   return Math.ceil(serialized.length / 4);
 }
 
+export function instrumentCancellation(
+  signal: AbortSignal,
+  context: RequestContext,
+  capability: Pick<CapabilityMetadata, "id" | "name" | "effect">,
+  started: number
+): () => void {
+  const emitCancellation = () => emitEvent("mcp.request.cancelled", {
+    request_id: context.requestId,
+    correlation_id: context.correlationId,
+    capability_id: capability.id,
+    tool_name: capability.name,
+    profile: context.profile,
+    target_id: context.principal.targetId,
+    effect: capability.effect,
+    duration_ms: Date.now() - started
+  });
+  if (signal.aborted) emitCancellation();
+  else signal.addEventListener("abort", emitCancellation, { once: true });
+  return () => signal.removeEventListener("abort", emitCancellation);
+}
+
 export function defineCapability<I extends ObjectSchema, O extends ObjectSchema>(
   spec: CapabilitySpec<I, O>
 ): Capability {
@@ -85,6 +106,8 @@ export function defineCapability<I extends ObjectSchema, O extends ObjectSchema>
         },
         async (input, mcpContext) => {
           const started = Date.now();
+          const signal = mcpContext.mcpReq.signal;
+          const stopInstrumentingCancellation = instrumentCancellation(signal, context, spec, started);
           emitEvent("mcp.tool.started", {
             request_id: context.requestId,
             correlation_id: context.correlationId,
@@ -95,7 +118,7 @@ export function defineCapability<I extends ObjectSchema, O extends ObjectSchema>
             effect: spec.effect
           });
           try {
-            const result = await spec.handler(input as z.infer<I>, context, mcpContext.mcpReq.signal);
+            const result = await spec.handler(input as z.infer<I>, context, signal);
             const envelope = resultEnvelope(context, spec.id, result.data, result.warnings);
             emitEvent("mcp.tool.completed", {
               request_id: context.requestId,
@@ -123,6 +146,8 @@ export function defineCapability<I extends ObjectSchema, O extends ObjectSchema>
               duration_ms: Date.now() - started
             });
             return toolError(failure, context);
+          } finally {
+            stopInstrumentingCancellation();
           }
         }
       );
