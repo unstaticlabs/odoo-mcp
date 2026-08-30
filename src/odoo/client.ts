@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { RequestContext } from "../runtime/context.js";
 import { emitEvent } from "../runtime/logging.js";
+import { injectTraceHeaders } from "../runtime/observability.js";
 import { Semaphore } from "../runtime/semaphore.js";
 import { assertBoundedJson, ModelNameSchema, MethodNameSchema } from "./schemas.js";
 
@@ -172,6 +173,7 @@ export class OdooClient {
     const maximumAttempts = kind === "read" ? 3 : 1;
     const responseBytes = options.responseBytes ?? this.defaultResponseBytes;
     const body = JSON.stringify(kwargs);
+    const traceHeaders = injectTraceHeaders(context.trace?.context);
 
     return await this.semaphore(context.principal.targetId).run(async () => {
       for (let attempt = 1; attempt <= maximumAttempts; attempt++) {
@@ -184,8 +186,12 @@ export class OdooClient {
           method,
           effect: kind,
           attempt,
-          request_bytes: Buffer.byteLength(body)
-        });
+          request_bytes: Buffer.byteLength(body),
+          principal_id: context.analyticsPrincipalId,
+          trace_id: context.trace?.traceId,
+          parent_span_id: context.trace?.spanId,
+          trace_sampled: context.trace?.sampled
+        }, context.eventObserver);
         try {
           const timeoutSignal = AbortSignal.timeout(options.timeoutMs ?? 15_000);
           const signal = options.signal ? AbortSignal.any([options.signal, timeoutSignal]) : timeoutSignal;
@@ -198,7 +204,8 @@ export class OdooClient {
                 "X-Odoo-Database": context.principal.database,
                 "Content-Type": "application/json",
                 Accept: "application/json",
-                "User-Agent": "usl-odoo-mcp/2"
+                "User-Agent": "usl-odoo-mcp/2",
+                ...traceHeaders
               },
               redirect: "manual",
               body,
@@ -218,6 +225,25 @@ export class OdooClient {
             const code = statusCode(response.status);
             const retryable = RETRYABLE_STATUS.has(response.status);
             if (kind === "read" && retryable && attempt < maximumAttempts) {
+              emitEvent("odoo.call.completed", {
+                request_id: context.requestId,
+                correlation_id: context.correlationId,
+                target_id: context.principal.targetId,
+                model,
+                method,
+                effect: kind,
+                attempt,
+                status: code,
+                retry: attempt > 1,
+                will_retry: true,
+                duration_ms: Date.now() - started,
+                request_bytes: Buffer.byteLength(body),
+                response_bytes: Buffer.byteLength(text),
+                principal_id: context.analyticsPrincipalId,
+                trace_id: context.trace?.traceId,
+                parent_span_id: context.trace?.spanId,
+                trace_sampled: context.trace?.sampled
+              }, context.eventObserver);
               await delay(retryAfterMs(response, 250 * 2 ** (attempt - 1)), options.signal);
               continue;
             }
@@ -243,9 +269,16 @@ export class OdooClient {
             effect: kind,
             attempt,
             status: "ok",
+            retry: attempt > 1,
+            will_retry: false,
             duration_ms: Date.now() - started,
-            response_bytes: Buffer.byteLength(text)
-          });
+            request_bytes: Buffer.byteLength(body),
+            response_bytes: Buffer.byteLength(text),
+            principal_id: context.analyticsPrincipalId,
+            trace_id: context.trace?.traceId,
+            parent_span_id: context.trace?.spanId,
+            trace_sampled: context.trace?.sampled
+          }, context.eventObserver);
           return payload as T;
         } catch (error) {
           const cancelled = options.signal?.aborted === true;
@@ -260,6 +293,7 @@ export class OdooClient {
                 !cancelled,
                 kind === "mutation" ? "unknown" : "not_applied"
               );
+          const willRetry = kind === "read" && typed.retryable && !cancelled && attempt < maximumAttempts;
           emitEvent("odoo.call.completed", {
             request_id: context.requestId,
             correlation_id: context.correlationId,
@@ -269,9 +303,16 @@ export class OdooClient {
             effect: kind,
             attempt,
             status: typed.code,
-            duration_ms: Date.now() - started
-          });
-          if (kind === "read" && typed.retryable && !cancelled && attempt < maximumAttempts) {
+            retry: attempt > 1,
+            will_retry: willRetry,
+            duration_ms: Date.now() - started,
+            request_bytes: Buffer.byteLength(body),
+            principal_id: context.analyticsPrincipalId,
+            trace_id: context.trace?.traceId,
+            parent_span_id: context.trace?.spanId,
+            trace_sampled: context.trace?.sampled
+          }, context.eventObserver);
+          if (willRetry) {
             await delay(250 * 2 ** (attempt - 1), options.signal);
             continue;
           }
@@ -293,7 +334,8 @@ export class OdooClient {
     const headers: Record<string, string> = {
       Authorization: `Bearer ${context.principal.apiKey}`,
       "X-Odoo-Database": context.principal.database,
-      Accept: "application/json"
+      Accept: "application/json",
+      ...injectTraceHeaders(context.trace?.context)
     };
     if (cached?.etag) headers["If-None-Match"] = cached.etag;
     const response = await this.fetcher(`${context.principal.internalOrigin}${path}`, {

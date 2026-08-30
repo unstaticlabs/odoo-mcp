@@ -25,9 +25,13 @@
     "@modelcontextprotocol/express": "2.0.0",
     "@modelcontextprotocol/node": "2.0.0",
     "@modelcontextprotocol/server": "2.0.0",
+    "@opentelemetry/api": "1.9.1",
+    "@opentelemetry/core": "2.10.0",
+    "@posthog/mcp": "0.12.0",
     "better-auth": "1.7.2",
     "better-sqlite3": "^12.2.0",
     "express": "^5.1.0",
+    "posthog-node": "5.51.4",
     "zod": "^4.4.3"
   },
   "devDependencies": {

@@ -130,7 +130,7 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
         profile: context.profile,
         target_id: context.principal.targetId,
         result_count: registry.search(query, limit, context.availableModules).length
-      });
+      }, context.eventObserver);
       return { data: { capabilities: registry.search(query, limit, context.availableModules).map(capabilitySummary) } };
     }
   }));

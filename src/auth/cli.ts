@@ -7,7 +7,8 @@ import { createRuntimeServices } from "../runtime/server.js";
 async function main(): Promise<void> {
   const command = process.argv[2];
   const config = loadRuntimeConfig();
-  const oauth = createOAuthService(config, createRuntimeServices(config));
+  const services = createRuntimeServices(config);
+  const oauth = createOAuthService(config, services);
   if (!oauth) throw new Error("Set MCP_OAUTH_ENABLED=true and configure the OAuth vault first");
   try {
     await oauth.ready;
@@ -29,6 +30,7 @@ async function main(): Promise<void> {
     throw new Error("Usage: npm run oauth:migrate or npm run oauth:backup -- /absolute/path/to/backup.sqlite");
   } finally {
     oauth.close();
+    await services.observability.close();
   }
 }
 

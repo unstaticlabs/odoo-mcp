@@ -7,12 +7,23 @@ const config = loadRuntimeConfig();
 const principal = resolveEnvironmentConnection(config);
 const services = createRuntimeServices(config);
 
-serveStdio(createStdioServerFactory(services, "default", principal), {
+const handle = serveStdio(createStdioServerFactory(services, "default", principal), {
   legacy: "serve",
   onerror: (error) => emitEvent("mcp.request.completed", {
     profile: "default",
     target_id: principal.targetId,
     status: "stdio_error",
     error_name: error.name
-  })
+  }, services.observability)
 });
+
+let closing = false;
+const close = async () => {
+  if (closing) return;
+  closing = true;
+  await handle.close();
+  await services.observability.close();
+};
+process.stdin.once("end", () => void close());
+process.once("SIGTERM", () => void close());
+process.once("SIGINT", () => void close());
