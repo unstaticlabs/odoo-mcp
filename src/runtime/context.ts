@@ -29,6 +29,7 @@ export interface RequestContext {
   correlationId: string;
   profile: ProfileName;
   principal: OdooPrincipal;
+  availableModules?: ReadonlySet<string> | null;
   authInfo?: AuthInfo;
 }
 

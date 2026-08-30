@@ -34,6 +34,29 @@ describe("canonical capability registry", () => {
     expect(registry.search("public method escape hatch", 5).map((item) => item.name)).toContain("odoo_call_method");
   });
 
+  it("treats profiles as filtered canonical views without leaking advanced tools", () => {
+    const registry = createCapabilityRegistry(new OdooClient());
+    const accounting = registry.list("accounting").map((item) => item.name);
+    expect(accounting).toContain("odoo_search_records");
+    expect(accounting).toContain("accounting_get_invoice_context");
+    expect(accounting).toContain("expense_batches_post");
+    expect(accounting).not.toContain("odoo_call_method");
+    expect(accounting).not.toContain("odoo_delete_records");
+
+    const readOnly = registry.list("read-only");
+    expect(readOnly.every((item) => item.effect === "read")).toBe(true);
+  });
+
+  it("omits capabilities whose Distribution modules are known to be unavailable", () => {
+    const registry = createCapabilityRegistry(new OdooClient());
+    const modules = new Set(["base", "api_doc", "mail", "project"]);
+    const names = registry.list("all", modules).map((item) => item.name);
+    expect(names).toContain("odoo_search_models");
+    expect(names).toContain("projects_get_task_context");
+    expect(names).not.toContain("documents_search");
+    expect(names).not.toContain("expense_batches_post");
+  });
+
   it("registers valid MCP v2 schemas and structured tool metadata", async () => {
     const registry = createCapabilityRegistry(new OdooClient());
     const server = registry.createServer(requestContext());
@@ -51,5 +74,7 @@ describe("canonical capability registry", () => {
     expect(search?.inputSchema).toMatchObject({ type: "object", additionalProperties: false });
     expect(search?.outputSchema).toMatchObject({ type: "object", additionalProperties: false });
     expect(search?._meta).toMatchObject({ "odoo/layer": "generic" });
+    const semantic = tools.tools.find((tool) => tool.name === "projects_get_task_context");
+    expect(semantic?._meta).toMatchObject({ defer_loading: true, "odoo/toolsets": expect.arrayContaining(["projects"]) });
   });
 });

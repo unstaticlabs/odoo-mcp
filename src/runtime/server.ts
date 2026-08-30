@@ -33,17 +33,23 @@ export function directAuthInfo(
   };
 }
 
-export function createHttpServerFactory(registry: CapabilityRegistry, profile: ProfileName) {
-  return (mcpContext: McpRequestContext) => {
+export function createHttpServerFactory(services: RuntimeServices, profile: ProfileName) {
+  return async (mcpContext: McpRequestContext) => {
     const principal = principalFromAuthInfo(mcpContext.authInfo);
-    return registry.createServer(createRequestContext(profile, principal, mcpContext.authInfo));
+    const context = createRequestContext(profile, principal, mcpContext.authInfo);
+    context.availableModules = await services.client.installedModules(context, mcpContext.requestInfo?.signal);
+    return services.registry.createServer(context);
   };
 }
 
 export function createStdioServerFactory(
-  registry: CapabilityRegistry,
+  services: RuntimeServices,
   profile: ProfileName,
   principal: OdooPrincipal
 ) {
-  return () => registry.createServer(createRequestContext(profile, principal));
+  return async () => {
+    const context = createRequestContext(profile, principal);
+    context.availableModules = await services.client.installedModules(context);
+    return services.registry.createServer(context);
+  };
 }

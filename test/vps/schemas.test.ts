@@ -33,7 +33,7 @@ describe("generic substrate bounds", () => {
       allowed_company_ids: [1, 2],
       usl_agent_origin: "forged",
       usl_correlation_id: "forged",
-      usl_idempotency_key: "obsolete"
+      usl_future_connector_field: "forged"
     }, "correlation-1");
     expect(result).toEqual({
       lang: "en_US",

@@ -141,6 +141,7 @@ function delay(milliseconds: number, signal?: AbortSignal): Promise<void> {
 export class OdooClient {
   private readonly semaphores = new Map<string, Semaphore>();
   private readonly apiDocumentCache = new Map<string, ApiDocumentCacheEntry>();
+  private readonly moduleCache = new Map<string, { expiresAt: number; modules: ReadonlySet<string> | null }>();
 
   constructor(
     private readonly concurrency = 8,
@@ -288,6 +289,7 @@ export class OdooClient {
       .digest("base64url");
     const cacheKey = `${identity}:${path}`;
     const cached = this.apiDocumentCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) return cached.value as T;
     const headers: Record<string, string> = {
       Authorization: `Bearer ${context.principal.apiKey}`,
       "X-Odoo-Database": context.principal.database,
@@ -321,11 +323,32 @@ export class OdooClient {
       expiresAt: Date.now() + 5 * 60_000,
       value
     });
-    if (this.apiDocumentCache.size > 500) {
+    if (this.apiDocumentCache.size > 50) {
       const oldest = this.apiDocumentCache.keys().next().value as string | undefined;
       if (oldest) this.apiDocumentCache.delete(oldest);
     }
     return value;
+  }
+
+  async installedModules(context: RequestContext, signal?: AbortSignal): Promise<ReadonlySet<string> | null> {
+    const identity = createHash("sha256")
+      .update(`${context.principal.targetId}\0${context.principal.database}\0${context.principal.apiKey}`)
+      .digest("base64url");
+    const cached = this.moduleCache.get(identity);
+    if (cached && cached.expiresAt > Date.now()) return cached.modules;
+    try {
+      const document = await this.fetchApiDocument<{ modules?: unknown }>(context, undefined, signal);
+      const modules = new Set(
+        Array.isArray(document.modules)
+          ? document.modules.filter((item): item is string => typeof item === "string")
+          : []
+      );
+      this.moduleCache.set(identity, { expiresAt: Date.now() + 5 * 60_000, modules });
+      return modules;
+    } catch {
+      this.moduleCache.set(identity, { expiresAt: Date.now() + 60_000, modules: null });
+      return null;
+    }
   }
 }
 

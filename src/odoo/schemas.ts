@@ -74,20 +74,13 @@ export function decodeCursor(value: string | undefined, fingerprint: string): nu
   return cursor.offset;
 }
 
-const RESERVED_CONTEXT_KEYS = new Set([
-  "usl_agent_origin",
-  "usl_correlation_id",
-  "usl_idempotency_key",
-  "usl_idempotency_mode"
-]);
-
 export function attributedContext(
   requested: Record<string, unknown> | undefined,
   correlationId: string
 ): Record<string, unknown> {
   const context: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(requested ?? {})) {
-    if (!RESERVED_CONTEXT_KEYS.has(key)) context[key] = value;
+    if (!key.startsWith("usl_")) context[key] = value;
   }
   context.usl_agent_origin = "odoo-mcp";
   context.usl_correlation_id = correlationId;

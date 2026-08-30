@@ -129,9 +129,9 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
         correlation_id: context.correlationId,
         profile: context.profile,
         target_id: context.principal.targetId,
-        result_count: registry.search(query, limit).length
+        result_count: registry.search(query, limit, context.availableModules).length
       });
-      return { data: { capabilities: registry.search(query, limit).map(capabilitySummary) } };
+      return { data: { capabilities: registry.search(query, limit, context.availableModules).map(capabilitySummary) } };
     }
   }));
 
@@ -147,7 +147,7 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
     effect: "read",
     annotations: readAnnotations,
     keywords: ["schema", "model discovery", "database", "objects"],
-    requiredModules: ["api_doc"],
+    requiredModules: [],
     defaultVisible: true,
     alwaysLoad: true,
     sortOrder: 10,
@@ -251,7 +251,7 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
     effect: "read",
     annotations: readAnnotations,
     keywords: ["schema", "fields", "methods", "signature", "API documentation"],
-    requiredModules: ["api_doc"],
+    requiredModules: [],
     defaultVisible: true,
     alwaysLoad: true,
     sortOrder: 20,

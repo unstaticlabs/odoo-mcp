@@ -54,7 +54,7 @@ export function createHttpApp(
   function mcpHandler(profile: ProfileName) {
     let current = mcpHandlers.get(profile);
     if (!current) {
-      current = createMcpHandler(createHttpServerFactory(services.registry, profile), {
+      current = createMcpHandler(createHttpServerFactory(services, profile), {
         legacy: "stateless",
         responseMode: "json",
         onerror: (error) => emitEvent("mcp.request.completed", {

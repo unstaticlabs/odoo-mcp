@@ -7,7 +7,7 @@ const config = loadRuntimeConfig();
 const principal = resolveEnvironmentConnection(config);
 const services = createRuntimeServices(config);
 
-serveStdio(createStdioServerFactory(services.registry, "default", principal), {
+serveStdio(createStdioServerFactory(services, "default", principal), {
   legacy: "serve",
   onerror: (error) => emitEvent("mcp.request.completed", {
     profile: "default",
