@@ -16,6 +16,22 @@ function environment(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
 }
 
 describe("runtime target mapping", () => {
+  it("accepts standards-defined localhost subdomains only with the local HTTP opt-in", () => {
+    const local = environment({
+      ODOO_PUBLIC_ORIGIN: "http://odoo.localhost:28669",
+      MCP_ALLOW_LOCAL_HTTP_ODOO: "true"
+    });
+    expect(loadRuntimeConfig(local).targets[0]?.publicOrigin).toBe("http://odoo.localhost:28669");
+    expect(() => loadRuntimeConfig({
+      ...local,
+      MCP_ALLOW_LOCAL_HTTP_ODOO: "false"
+    })).toThrow("must use HTTPS");
+    expect(() => loadRuntimeConfig({
+      ...local,
+      ODOO_PUBLIC_ORIGIN: "http://localhost.example:28669"
+    })).toThrow("must use HTTPS");
+  });
+
   it("maps an approved public target to its internal VPS origin", () => {
     const config = loadRuntimeConfig(environment());
     const principal = resolveDirectConnection(config, new Headers({

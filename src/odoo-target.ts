@@ -13,7 +13,7 @@ export class OdooTargetError extends Error {
 
 function isLoopbackHostname(hostname: string): boolean {
   const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, "");
-  if (normalized === "localhost" || normalized === "::1") return true;
+  if (normalized === "localhost" || normalized.endsWith(".localhost") || normalized === "::1") return true;
   const match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(normalized);
   if (!match) return false;
   const octets = match.slice(1).map(Number);
