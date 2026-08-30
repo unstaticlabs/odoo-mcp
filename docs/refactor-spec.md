@@ -113,7 +113,9 @@ Every returned record includes a stable `{model, id, display_name, url}` referen
 - Consolidate Documents into `documents_search`, `documents_get_context`, `documents_get_content`, `documents_find_similar`, and `documents_list_catalog` using `usl.document.mcp_*` methods.
 - Replace every legacy source-document search/link path with `usl.document` and `usl.document.link_to_record`.
 - Preserve measured accounting context/preview operations against their actual `account.*` and transitional `rebuild.*` owners. Rename expense, vendor-bill, inventory receipt, and lifecycle operations by business intent.
-- Remove `feedback.submit`; usage analytics is a separate workstream.
+- Remove `feedback.submit`; the completed analytics workstream uses optional,
+  privacy-filtered PostHog MCP Analytics rather than an agent-visible feedback
+  tool or custom analytics platform.
 
 Initial additions grounded in current Distribution services are partner, activity, invoice, expense-batch, Home attention, and B2C order context tools plus document-link and expense-batch workflow actions. Platform billing, Sign, TESE, and additional B2C actions remain discoverable through the generic substrate until evaluations justify dedicated contracts.
 

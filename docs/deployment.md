@@ -19,6 +19,9 @@ Required runtime configuration:
 - one or more Odoo targets;
 - request/response bounds and per-target concurrency if defaults are unsuitable;
 - OAuth database/secrets/trusted origins when hosted clients are enabled.
+- optional PostHog analytics configuration from `docs/observability.md`; keep
+  `MCP_ANALYTICS_ENABLED=false` until residency, retention, deletion, and
+  project access have been approved.
 
 `MCP_ALLOWED_HOSTS` and `MCP_ALLOWED_ORIGINS` are comma-separated hostnames accepted by the MCP Express boundary. `MCP_OAUTH_TRUSTED_ORIGINS` contains complete trusted web origins for OAuth.
 
@@ -29,17 +32,17 @@ Required runtime configuration:
 3. Run `oauth:migrate` with the candidate image and production mounts.
 4. Start the candidate container without removing the preceding image.
 5. Require `GET /healthz` to return `status=ok`.
-6. Require `GET /readyz` to return `status=ready`, the default tool budget within 20/15,000, and OAuth `ready` or deliberately `disabled`.
+6. Require `GET /readyz` to return `status=ready`, the default tool budget within 20/15,000, OAuth `ready` or deliberately `disabled`, and analytics `ready` or deliberately `disabled`. Analytics `degraded` does not make the MCP unavailable, but fix it before treating telemetry as complete.
 7. Run the authenticated MCP initialization/tool-list smoke test and a bounded Odoo read.
 8. Run a hosted OAuth reconnect test when OAuth is enabled.
 9. Shift reverse-proxy traffic and monitor content-free error/latency events.
 
-The process handles `SIGTERM`/`SIGINT` by closing the listener and OAuth vault. Give the container a normal termination grace period; in-flight mutations are not replayed after termination.
+The process handles `SIGTERM`/`SIGINT` by closing the listener and OAuth vault, then attempting a bounded two-second analytics flush. Give the container a normal termination grace period; PostHog failure never delays shutdown beyond that bound and in-flight mutations are not replayed after termination.
 
 ## Reverse proxy requirements
 
 - TLS 1.2+ on the public origin.
-- Preserve `Host`, request method/body, `Authorization`, the three direct Odoo headers, `Content-Type`, `Accept`, and `X-Correlation-Id`.
+- Preserve `Host`, request method/body, `Authorization`, the three direct Odoo headers, `Content-Type`, `Accept`, `X-Correlation-Id`, and standard `traceparent`, `tracestate`, and `baggage` headers.
 - Enforce a body limit no larger than the configured MCP maximum.
 - Do not buffer or automatically replay failed POST requests.
 - Route `/.well-known/*`, `/api/auth/*`, and `/oauth/*` when OAuth is enabled.
