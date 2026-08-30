@@ -417,7 +417,7 @@ export function registerDocumentCapabilities(registry: CapabilityRegistry, clien
     name: "documents_search",
     title: "Search Documents",
     description:
-      "Search the USL document archive through the Distribution's bounded hybrid, exact, or semantic facade. Use for document content/metadata discovery; do not query the removed Enterprise documents.document model.",
+      "Search the USL document archive through the Distribution's bounded hybrid, exact, or semantic facade. Use this purpose-built archive interface for document content and metadata discovery.",
     layer: "semantic",
     toolsets: ["documents"],
     profiles: ["documents"],
