@@ -29,6 +29,20 @@ export interface RuntimeConfig {
   targetConcurrency: number;
   allowLocalHttpOdoo: boolean;
   oauth: OAuthRuntimeConfig | null;
+  analytics: AnalyticsRuntimeConfig;
+}
+
+export type AnalyticsStatus = "disabled" | "ready" | "degraded";
+
+export interface AnalyticsRuntimeConfig {
+  status: AnalyticsStatus;
+  environment: string;
+  apiKey?: string;
+  host?: string;
+  pseudonymizationKey?: Buffer;
+  deploymentId?: string;
+  buildId?: string;
+  missingConfiguration?: string[];
 }
 
 export interface OAuthRuntimeConfig {
@@ -77,6 +91,100 @@ function normalizeInternalOrigin(raw: string): string {
     throw new Error("An internal Odoo origin must not contain credentials, path, query, or fragment");
   }
   return parsed.origin;
+}
+
+function safeLabel(value: string | undefined, fallback: string, name: string): string {
+  const label = value?.trim() || fallback;
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(label)) {
+    throw new Error(`${name} must be a 1-128 character operational label`);
+  }
+  return label;
+}
+
+function parseAnalytics(env: NodeJS.ProcessEnv): AnalyticsRuntimeConfig {
+  const enabled = booleanEnv(env.MCP_ANALYTICS_ENABLED);
+  if (!enabled) {
+    try {
+      return {
+        status: "disabled",
+        environment: safeLabel(env.MCP_ENVIRONMENT, "development", "MCP_ENVIRONMENT")
+      };
+    } catch {
+      return { status: "disabled", environment: "development" };
+    }
+  }
+  let environment = "development";
+  try {
+    environment = safeLabel(env.MCP_ENVIRONMENT, "development", "MCP_ENVIRONMENT");
+  } catch {
+    return {
+      status: "degraded",
+      environment: "development",
+      missingConfiguration: ["MCP_ENVIRONMENT"]
+    };
+  }
+  const missing = new Set<string>();
+  let apiKey: string | undefined;
+  let pseudonymizationKey: Buffer | undefined;
+  try {
+    apiKey = secretValue(env, "POSTHOG_API_KEY");
+  } catch {
+    missing.add("POSTHOG_API_KEY");
+  }
+  if (!apiKey) missing.add("POSTHOG_API_KEY");
+
+  const rawHost = env.POSTHOG_HOST?.trim();
+  let host: string | undefined;
+  try {
+    if (!rawHost) throw new Error("missing");
+    const parsed = new URL(rawHost);
+    if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.pathname !== "/" || parsed.search || parsed.hash) {
+      throw new Error("invalid");
+    }
+    host = parsed.origin;
+  } catch {
+    missing.add("POSTHOG_HOST");
+  }
+
+  try {
+    const encodedKey = secretValue(env, "MCP_ANALYTICS_PSEUDONYMIZATION_KEY");
+    if (!encodedKey || !/^[A-Za-z0-9+/]{43}=$/.test(encodedKey)) throw new Error("invalid");
+    const decoded = Buffer.from(encodedKey, "base64");
+    if (decoded.length !== 32 || decoded.toString("base64") !== encodedKey) throw new Error("invalid");
+    pseudonymizationKey = decoded;
+  } catch {
+    missing.add("MCP_ANALYTICS_PSEUDONYMIZATION_KEY");
+  }
+
+  let deploymentId: string | undefined;
+  let buildId: string | undefined;
+  try {
+    deploymentId = safeLabel(env.MCP_DEPLOYMENT_ID, "", "MCP_DEPLOYMENT_ID");
+  } catch {
+    missing.add("MCP_DEPLOYMENT_ID");
+  }
+  try {
+    buildId = safeLabel(env.MCP_BUILD_ID, "", "MCP_BUILD_ID");
+  } catch {
+    missing.add("MCP_BUILD_ID");
+  }
+
+  if (missing.size > 0) {
+    return {
+      status: "degraded",
+      environment,
+      missingConfiguration: [...missing].sort()
+    };
+  }
+  return {
+    status: "ready",
+    environment,
+    apiKey: apiKey!,
+    host: host!,
+    pseudonymizationKey: pseudonymizationKey!,
+    deploymentId: deploymentId!,
+    buildId: buildId!
+  };
 }
 
 function parseTargets(env: NodeJS.ProcessEnv): unknown[] {
@@ -135,6 +243,7 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runtime
     responseBytes: boundedInteger(env.MCP_MAX_RESPONSE_BYTES, 1024 * 1024, 1024, 16 * 1024 * 1024, "MCP_MAX_RESPONSE_BYTES"),
     targetConcurrency: boundedInteger(env.MCP_TARGET_CONCURRENCY, 8, 1, 64, "MCP_TARGET_CONCURRENCY"),
     allowLocalHttpOdoo: allowLocalHttp,
+    analytics: parseAnalytics(env),
     oauth: oauthEnabled
       ? {
           databasePath: env.MCP_OAUTH_DATABASE!,
