@@ -11,8 +11,11 @@
     "stdio": "node dist/stdio.js",
     "oauth:migrate": "node dist/auth/cli.js migrate",
     "oauth:backup": "node dist/auth/cli.js backup",
+    "eval:validate": "npm run build && node dist/evals/cli.js validate",
+    "eval:surfaces": "npm run build && node dist/evals/cli.js surfaces",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run test/vps",
+    "test": "vitest run test/vps test/evals",
+    "test:integration": "vitest run test/integration",
     "test:watch": "vitest test/vps",
     "check": "npm run typecheck && npm test && npm run build"
   },
