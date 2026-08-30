@@ -85,8 +85,8 @@ jobs:
           fi
           reference="$IMAGE@$DIGEST"
           docker pull "$reference"
-          test "$(docker image inspect "$reference" --format '{{index .Config.Labels \"org.opencontainers.image.revision\"}}')" = "$GITHUB_SHA"
-          test "$(docker image inspect "$reference" --format '{{index .Config.Labels \"org.opencontainers.image.source\"}}')" = "https://github.com/unstaticlabs/odoo-mcp.git"
+          test "$(docker image inspect "$reference" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$GITHUB_SHA"
+          test "$(docker image inspect "$reference" --format '{{index .Config.Labels "org.opencontainers.image.source"}}')" = "https://github.com/unstaticlabs/odoo-mcp.git"
           echo "digest_reference=$reference" >> "$GITHUB_OUTPUT"
 
       - name: Generate build provenance
