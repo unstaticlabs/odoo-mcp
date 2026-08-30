@@ -3,7 +3,7 @@
   "steps": [
     {
       "name": "install",
-      "cmd": "SHARP_IGNORE_GLOBAL_LIBVIPS=1 npm ci",
+      "cmd": "npm ci",
       "cwd": ".",
       "timeout": 600,
       "gate": true
@@ -25,6 +25,13 @@
     {
       "name": "build",
       "cmd": "npm run build",
+      "cwd": ".",
+      "timeout": 300,
+      "gate": true
+    },
+    {
+      "name": "eval-validate",
+      "cmd": "node dist/evals/cli.js validate",
       "cwd": ".",
       "timeout": 300,
       "gate": true

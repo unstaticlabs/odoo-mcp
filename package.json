@@ -16,7 +16,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run test/vps test/evals",
     "test:integration": "vitest run test/integration",
-    "test:watch": "vitest test/vps",
+    "test:watch": "vitest test/vps test/evals",
     "check": "npm run typecheck && npm test && npm run build"
   },
   "dependencies": {
