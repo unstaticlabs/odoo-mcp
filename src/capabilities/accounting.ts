@@ -115,11 +115,10 @@ export function registerAccountingCapabilities(registry: CapabilityRegistry, cli
       const accountIds = accounts.map((account) => account.id).filter((id): id is number => Number.isInteger(id));
       if (accountIds.length === 0) return { data: { accounts: [], balances: [], open_items: [], missing_codes: codes } };
       const [balances, openItems] = await Promise.all([
-        client.call<Record<string, unknown>[]>(context, "account.move.line", "read_group", {
+        client.call<Record<string, unknown>[]>(context, "account.move.line", "formatted_read_group", {
           domain: [["company_id", "=", company_id], ["move_id.state", "=", "posted"], ["date", "<=", date_to], ["account_id", "in", accountIds]],
-          fields: ["debit:sum", "credit:sum", "balance:sum"],
           groupby: ["account_id"],
-          lazy: false,
+          aggregates: ["debit:sum", "credit:sum", "balance:sum"],
           limit: 50,
           context: common
         }, { signal }),

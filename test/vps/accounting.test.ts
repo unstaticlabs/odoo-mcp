@@ -67,6 +67,42 @@ describe("rebuilt accounting capabilities", () => {
     });
   });
 
+  it("uses Odoo 19 formatted grouping for key-account balances", async () => {
+    const fetcher = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/json/2/account.account/search_read")) {
+        return Response.json([{ id: 42, code: "512000", display_name: "Bank" }]);
+      }
+      if (url.endsWith("/json/2/account.move.line/formatted_read_group")) {
+        return Response.json([{ account_id: [42, "Bank"], debit: 100, credit: 25, balance: 75 }]);
+      }
+      if (url.endsWith("/json/2/account.move.line/search_read")) return Response.json([]);
+      return Response.json({ message: "unexpected test request" }, { status: 500 });
+    });
+    const client = await connected(fetcher);
+
+    const result = await client.callTool({
+      name: "accounting_review_key_accounts",
+      arguments: {
+        company_id: 3,
+        account_codes: ["512000"],
+        date_to: "2026-08-30",
+        context: {}
+      }
+    });
+
+    expect(result.isError).not.toBe(true);
+    const groupingCall = fetcher.mock.calls.find(([url]) =>
+      String(url).endsWith("/json/2/account.move.line/formatted_read_group")
+    );
+    expect(groupingCall).toBeDefined();
+    expect(JSON.parse(String(groupingCall?.[1]?.body))).toMatchObject({
+      groupby: ["account_id"],
+      aggregates: ["debit:sum", "credit:sum", "balance:sum"],
+      limit: 50
+    });
+  });
+
   it("keeps rebuilt report tools out of the generic default while making overview broad", () => {
     const registry = createCapabilityRegistry(new OdooClient());
     const defaultNames = registry.list("default").map((item) => item.name);

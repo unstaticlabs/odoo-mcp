@@ -489,7 +489,7 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
     name: "odoo_aggregate_records",
     title: "Aggregate Odoo Records",
     description:
-      "Group and aggregate accessible records on any model using Odoo read_group. Use for counts, sums, averages, and grouped cross-domain analysis. Inspect field metadata first when groupability or aggregate support is uncertain.",
+      "Group and aggregate accessible records on any model using Odoo formatted grouping. Use for counts, sums, averages, and grouped cross-domain analysis. Inspect field metadata first when groupability or aggregate support is uncertain.",
     layer: "generic",
     toolsets: ["core"],
     profiles: [],
@@ -512,13 +512,12 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
     output: z.object({ rows: RecordsSchema }).strict(),
     async handler({ model, domain, groupby, aggregates, order, limit, context: requestedContext }, context, signal) {
       assertBoundedDomain(domain);
-      const rows = await client.call<unknown[]>(context, model, "read_group", {
+      const rows = await client.call<unknown[]>(context, model, "formatted_read_group", {
         domain,
-        fields: aggregates,
         groupby,
-        lazy: false,
+        aggregates,
         limit,
-        ...(order ? { orderby: order } : {}),
+        ...(order ? { order } : {}),
         context: attributedContext(requestedContext, context.correlationId)
       }, { signal });
       return { data: { rows: decorateRecords(context, model, rows) } };
