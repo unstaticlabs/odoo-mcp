@@ -27,7 +27,7 @@ Use `odoo_call_method` when a legitimate public Distribution method has no MCP s
 
 Current context helpers cover partners, record activities, project tasks, invoices, individual expenses, expense batches, Home attention, B2C orders, the rebuilt Accounting overview/reports, and the USL document archive. They return bounded high-signal context and warnings when optional linked context cannot be read.
 
-Document tools use the Distribution archive facade for search, context, bounded text, similarity, and catalogues. Link/unlink operations call one public archive method.
+Document tools use the Distribution archive facade for search, context, bounded text, similarity, and catalogues. Link/unlink operations call one public archive method. `documents_create_download_url` is a deferred consequential action that explicitly materializes one exact authorized document version as a 30–900 second HTTPS bearer URL; `documents_revoke_download_url` ends that capability early. Search and read tools report binary availability but never create or return bearer URLs.
 
 Thin domain list/get wrappers are intentionally absent where generic search/read already communicates the task cleanly.
 
@@ -40,6 +40,7 @@ Current actions cover:
 - draft expense/vendor-bill preparation and individual expense transitions;
 - expense-batch context application and submit/approve/post transitions;
 - document link/unlink;
+- explicit short-lived document materialization and revocation;
 - draft incoming vendor-receipt creation with a no-call dry run.
 
 Actions do not bypass Odoo state or permissions. The agent should read the relevant context immediately before consequential operations. Mutation failures are not automatically replayed.

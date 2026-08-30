@@ -43,6 +43,30 @@ describe("canonical capability registry", () => {
     expect(accounting).not.toContain("odoo_call_method");
     expect(accounting).not.toContain("odoo_delete_records");
 
+    const documents = registry.list("documents").map((item) => item.name);
+    expect(documents).toContain("documents_create_download_url");
+    expect(documents).toContain("documents_revoke_download_url");
+    expect(registry.search("materialize document PDF", 5).map((item) => item.name))
+      .toContain("documents_create_download_url");
+    const materialize = registry.list("documents").find(
+      (item) => item.name === "documents_create_download_url"
+    );
+    expect(materialize).toMatchObject({
+      layer: "business_action",
+      effect: "consequential",
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true
+      },
+      alwaysLoad: false
+    });
+    const revoke = registry.list("documents").find(
+      (item) => item.name === "documents_revoke_download_url"
+    );
+    expect(revoke?.annotations.idempotentHint).toBe(true);
+
     const readOnly = registry.list("read-only");
     expect(readOnly.every((item) => item.effect === "read")).toBe(true);
   });

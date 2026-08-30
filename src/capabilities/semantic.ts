@@ -18,6 +18,35 @@ const ActionOutputSchema = z.object({
   outcome: z.enum(["succeeded", "unknown"])
 }).strict();
 const DateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Expected an Odoo date in YYYY-MM-DD form");
+const DateTimeSchema = z.string()
+  .regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/, "Expected an ISO-8601 UTC timestamp");
+const RecordReferenceSchema = z.object({
+  model: z.string(),
+  id: PositiveIdSchema,
+  display_name: z.string(),
+  url: z.string().url()
+}).strict();
+const DownloadVersionSchema = z.object({
+  id: PositiveIdSchema,
+  paperless_version_id: z.string().min(1).max(200),
+  label: z.string().max(500),
+  is_current_at_issuance: z.boolean()
+}).strict();
+const DownloadGrantOutputSchema = z.object({
+  grant_id: z.string().uuid(),
+  url: z.string().url().refine((value) => value.startsWith("https://"), "Expected an HTTPS URL"),
+  expires_at: DateTimeSchema,
+  ttl_seconds: z.number().int().min(30).max(900),
+  document: RecordReferenceSchema,
+  version: DownloadVersionSchema,
+  variant: z.enum(["original", "archive"]),
+  filename: z.string().min(1).max(1024),
+  mime_type: z.string().min(1).max(255),
+  size_bytes: z.number().int().nonnegative().nullable(),
+  checksum: z.string().nullable(),
+  correlation_id: z.string(),
+  outcome: z.literal("succeeded")
+}).strict();
 
 const readAnnotations = {
   readOnlyHint: true,
@@ -623,6 +652,116 @@ export function registerBusinessActions(registry: CapabilityRegistry, client: Od
         ids: [document_id], res_model: model, res_id: id, context: rpcContext(requestedContext, context)
       }, { kind: "mutation", signal });
       return { data: { result, correlation_id: context.correlationId, outcome: "succeeded" as const } };
+    }
+  }));
+
+  registry.add(defineCapability({
+    id: "documents.download_url.create",
+    name: "documents_create_download_url",
+    title: "Create Document Download URL",
+    description:
+      "Create one short-lived HTTPS bearer URL for the exact authorized binary of a known USL document. Use only when an agent needs the PDF/image bytes; document search, metadata, and OCR text do not require materialization. The URL is a temporary secret and issuance is not retried automatically.",
+    layer: "business_action",
+    toolsets: ["documents"],
+    profiles: ["documents"],
+    effect: "consequential",
+    annotations: actionAnnotations,
+    keywords: ["download", "materialize", "PDF", "image", "binary", "short-lived URL"],
+    requiredModules: ["usl_documents"],
+    defaultVisible: false,
+    alwaysLoad: false,
+    sortOrder: 515,
+    input: z.object({
+      document_id: PositiveIdSchema,
+      document_version_id: PositiveIdSchema.optional(),
+      variant: z.enum(["original", "archive"]).default("original"),
+      ttl_seconds: z.number().int().min(30).max(900).default(300),
+      context: OdooContextSchema
+    }).strict(),
+    output: DownloadGrantOutputSchema,
+    async handler({ document_id, document_version_id, variant, ttl_seconds, context: requestedContext }, context, signal) {
+      const result = await client.call<{
+        grant_id: string;
+        url: string;
+        expires_at: string;
+        ttl_seconds: number;
+        document: { id: number; name: string };
+        version: z.infer<typeof DownloadVersionSchema>;
+        variant: "original" | "archive";
+        filename: string;
+        mime_type: string;
+        size_bytes: number | false | null;
+        checksum: string | false | null;
+      }>(context, "usl.document", "mcp_create_download_grant", {
+        document_id,
+        ...(document_version_id ? { document_version_id } : {}),
+        variant,
+        ttl_seconds,
+        context: rpcContext(requestedContext, context)
+      }, { kind: "mutation", signal });
+      return {
+        data: DownloadGrantOutputSchema.parse({
+          ...result,
+          document: ref(context, "usl.document", result.document.id, result.document.name),
+          size_bytes: result.size_bytes === false ? null : result.size_bytes,
+          checksum: result.checksum === false ? null : result.checksum,
+          correlation_id: context.correlationId,
+          outcome: "succeeded"
+        })
+      };
+    }
+  }));
+
+  registry.add(defineCapability({
+    id: "documents.download_url.revoke",
+    name: "documents_revoke_download_url",
+    title: "Revoke Document Download URL",
+    description:
+      "Immediately revoke one previously issued document download URL using its non-secret grant ID. Use after early completion or suspected disclosure; this does not delete or alter the document.",
+    layer: "business_action",
+    toolsets: ["documents"],
+    profiles: ["documents"],
+    effect: "write",
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true
+    },
+    keywords: ["revoke", "download URL", "grant", "materialization"],
+    requiredModules: ["usl_documents"],
+    defaultVisible: false,
+    alwaysLoad: false,
+    sortOrder: 516,
+    input: z.object({
+      grant_id: z.string().uuid(),
+      reason: z.string().max(500).optional(),
+      context: OdooContextSchema
+    }).strict(),
+    output: z.object({
+      grant_id: z.string().uuid(),
+      revoked: z.literal(true),
+      revoked_at: DateTimeSchema,
+      correlation_id: z.string(),
+      outcome: z.literal("succeeded")
+    }).strict(),
+    async handler({ grant_id, reason, context: requestedContext }, context, signal) {
+      const result = await client.call<{
+        grant_id: string;
+        revoked: true;
+        revoked_at: string;
+      }>(context, "usl.document", "mcp_revoke_download_grant", {
+        grant_id,
+        ...(reason ? { reason } : {}),
+        context: rpcContext(requestedContext, context)
+      }, { kind: "mutation", signal });
+      return {
+        data: {
+          ...result,
+          correlation_id: context.correlationId,
+          outcome: "succeeded" as const
+        }
+      };
     }
   }));
 

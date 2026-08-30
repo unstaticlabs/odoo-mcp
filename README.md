@@ -12,6 +12,11 @@ The interface deliberately combines:
 
 Tool visibility is context optimization, not authorization. `odoo_call_method` remains available in the `advanced` and `all` profiles as a one-shot escape hatch for any Odoo-public JSON-2 method.
 
+Documents remain metadata/text-only until an agent explicitly invokes the
+deferred `documents_create_download_url` action. Odoo then issues a revocable,
+short-lived URL for one exact version; ordinary searches and reads never create
+bearer capabilities.
+
 ## Runtime
 
 - Node 24, Express 5, MCP TypeScript SDK 2.0.

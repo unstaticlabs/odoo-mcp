@@ -51,6 +51,26 @@ The only MCP persistent state is the optional SQLite OAuth vault. Use a durable 
 
 Odoo records, authorization, and business audit history remain in Odoo and follow the Distribution's backup procedures.
 
+## Document materialization dependency
+
+The deferred `documents_create_download_url` and `documents_revoke_download_url`
+tools require the coordinated `usl_documents` backend and Paperless
+`3.0.5-usl.7`. The MCP does not proxy file bytes and does not know Paperless
+credentials. Odoo issues the opaque capability and remains the authorization
+gateway for each GET, HEAD, and Range request.
+
+Before exposing the tools, configure Odoo's frozen HTTPS `web.base.url` and the
+Distribution's `/agent-documents/<43-character-token>` ingress contract. That
+route must suppress access logs, strip spoofed `X-USL-Document-Grant` headers,
+rewrite to the private fixed Odoo controller, preserve Range/If-Range, and
+disable caching. Keep Odoo and Paperless ports private. The authoritative Nginx
+and Caddy examples live in the Distribution runbook
+`docs/operations/document-materialization.md`.
+
+Treat a returned URL as a temporary secret. MCP request telemetry must not log
+tool results. Roll back the MCP capability if the backend or ingress is absent;
+search, metadata, and OCR tools remain usable without materialization.
+
 ## Rollback
 
 Runtime/profile/capability rollback is an image change. Keep the preceding image and restore proxy traffic to it. Additive Odoo public methods may remain deployed because MCP rollback does not depend on removing them.
