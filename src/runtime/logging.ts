@@ -1,5 +1,7 @@
 export type EventName =
   | "auth.resolved"
+  | "auth.enrollment.completed"
+  | "auth.enrollment.revoked"
   | "mcp.request.started"
   | "mcp.request.completed"
   | "mcp.tools.listed"

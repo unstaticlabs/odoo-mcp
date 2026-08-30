@@ -55,4 +55,14 @@ describe("runtime target mapping", () => {
       authMode: "stdio"
     });
   });
+
+  it("requires a complete opt-in OAuth configuration", () => {
+    expect(() => loadRuntimeConfig(environment({
+      MCP_OAUTH_DATABASE: "/tmp/odoo-mcp.sqlite"
+    }))).toThrow("MCP_OAUTH_ENABLED=true");
+    expect(() => loadRuntimeConfig(environment({
+      MCP_OAUTH_ENABLED: "true",
+      MCP_OAUTH_DATABASE: "/tmp/odoo-mcp.sqlite"
+    }))).toThrow("OAuth requires");
+  });
 });

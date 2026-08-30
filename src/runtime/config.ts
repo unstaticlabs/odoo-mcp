@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { readFileSync } from "node:fs";
 import { normalizeOdooOrigin, validateOdooDatabase } from "../odoo-target.js";
 import type { OdooPrincipal } from "./context.js";
 
@@ -27,6 +28,17 @@ export interface RuntimeConfig {
   responseBytes: number;
   targetConcurrency: number;
   allowLocalHttpOdoo: boolean;
+  oauth: OAuthRuntimeConfig | null;
+}
+
+export interface OAuthRuntimeConfig {
+  databasePath: string;
+  authSecret: string;
+  encryptionKey: string;
+  trustedOrigins: string[];
+  accessTokenSeconds: number;
+  refreshTokenSeconds: number;
+  grantCeilingSeconds: number;
 }
 
 function csv(value: string | undefined): string[] {
@@ -35,6 +47,17 @@ function csv(value: string | undefined): string[] {
 
 function booleanEnv(value: string | undefined): boolean {
   return value === "1" || value?.toLowerCase() === "true";
+}
+
+function secretValue(env: NodeJS.ProcessEnv, name: string): string | undefined {
+  const direct = env[name]?.trim();
+  const file = env[`${name}_FILE`]?.trim();
+  if (direct && file) throw new Error(`Set either ${name} or ${name}_FILE, not both`);
+  if (!file) return direct || undefined;
+  if (!file.startsWith("/")) throw new Error(`${name}_FILE must be an absolute path`);
+  const value = readFileSync(file, "utf8").trim();
+  if (!value) throw new Error(`${name}_FILE is empty`);
+  return value;
 }
 
 function boundedInteger(value: string | undefined, fallback: number, minimum: number, maximum: number, name: string): number {
@@ -91,6 +114,16 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runtime
   const publicOrigin = new URL(env.MCP_PUBLIC_ORIGIN ?? `http://localhost:${port}`).origin;
   const allowedHosts = csv(env.MCP_ALLOWED_HOSTS);
   const allowedOrigins = csv(env.MCP_ALLOWED_ORIGINS);
+  const oauthEnabled = booleanEnv(env.MCP_OAUTH_ENABLED);
+  const authSecret = secretValue(env, "BETTER_AUTH_SECRET");
+  const encryptionKey = secretValue(env, "MCP_CREDENTIAL_ENCRYPTION_KEY");
+  const oauthValues = [env.MCP_OAUTH_DATABASE, authSecret, encryptionKey];
+  if (!oauthEnabled && oauthValues.some(Boolean)) {
+    throw new Error("Set MCP_OAUTH_ENABLED=true when configuring OAuth storage or secrets");
+  }
+  if (oauthEnabled && oauthValues.some((value) => !value)) {
+    throw new Error("OAuth requires MCP_OAUTH_DATABASE, BETTER_AUTH_SECRET, and MCP_CREDENTIAL_ENCRYPTION_KEY");
+  }
   return {
     host,
     port,
@@ -101,7 +134,20 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runtime
     requestBytes: boundedInteger(env.MCP_MAX_REQUEST_BYTES, 1024 * 1024, 1024, 16 * 1024 * 1024, "MCP_MAX_REQUEST_BYTES"),
     responseBytes: boundedInteger(env.MCP_MAX_RESPONSE_BYTES, 1024 * 1024, 1024, 16 * 1024 * 1024, "MCP_MAX_RESPONSE_BYTES"),
     targetConcurrency: boundedInteger(env.MCP_TARGET_CONCURRENCY, 8, 1, 64, "MCP_TARGET_CONCURRENCY"),
-    allowLocalHttpOdoo: allowLocalHttp
+    allowLocalHttpOdoo: allowLocalHttp,
+    oauth: oauthEnabled
+      ? {
+          databasePath: env.MCP_OAUTH_DATABASE!,
+          authSecret: authSecret!,
+          encryptionKey: encryptionKey!,
+          trustedOrigins: csv(env.MCP_OAUTH_TRUSTED_ORIGINS).length > 0
+            ? csv(env.MCP_OAUTH_TRUSTED_ORIGINS)
+            : [publicOrigin],
+          accessTokenSeconds: boundedInteger(env.MCP_OAUTH_ACCESS_TOKEN_SECONDS, 3600, 300, 86_400, "MCP_OAUTH_ACCESS_TOKEN_SECONDS"),
+          refreshTokenSeconds: boundedInteger(env.MCP_OAUTH_REFRESH_TOKEN_SECONDS, 180 * 24 * 3600, 3600, 365 * 24 * 3600, "MCP_OAUTH_REFRESH_TOKEN_SECONDS"),
+          grantCeilingSeconds: boundedInteger(env.MCP_OAUTH_GRANT_CEILING_SECONDS, 365 * 24 * 3600, 24 * 3600, 2 * 365 * 24 * 3600, "MCP_OAUTH_GRANT_CEILING_SECONDS")
+        }
+      : null
   };
 }
 

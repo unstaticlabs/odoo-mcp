@@ -3,6 +3,7 @@ import { createMcpExpressApp } from "@modelcontextprotocol/express";
 import { toNodeHandler } from "@modelcontextprotocol/node";
 import { createMcpHandler, type AuthInfo } from "@modelcontextprotocol/server";
 import type { NextFunction, Request, Response } from "express";
+import { createOAuthService } from "./auth/oauth.js";
 import { ProfileNameSchema, type ProfileName } from "./runtime/context.js";
 import { loadRuntimeConfig, resolveDirectConnection, type RuntimeConfig } from "./runtime/config.js";
 import { emitEvent } from "./runtime/logging.js";
@@ -44,12 +45,16 @@ export function createHttpApp(
     allowedOrigins: config.allowedOrigins,
     jsonLimit: `${config.requestBytes}b`
   });
-  const handlers = new Map<ProfileName, ReturnType<typeof toNodeHandler>>();
+  const oauth = createOAuthService(config, services);
+  app.locals.closeRuntime = () => oauth?.close();
+  const mcpHandlers = new Map<ProfileName, ReturnType<typeof createMcpHandler>>();
+  const directHandlers = new Map<ProfileName, ReturnType<typeof toNodeHandler>>();
+  const oauthHandlers = new Map<ProfileName, ReturnType<typeof toNodeHandler>>();
 
-  function handler(profile: ProfileName) {
-    let current = handlers.get(profile);
+  function mcpHandler(profile: ProfileName) {
+    let current = mcpHandlers.get(profile);
     if (!current) {
-      const mcp = createMcpHandler(createHttpServerFactory(services.registry, profile), {
+      current = createMcpHandler(createHttpServerFactory(services.registry, profile), {
         legacy: "stateless",
         responseMode: "json",
         onerror: (error) => emitEvent("mcp.request.completed", {
@@ -58,14 +63,39 @@ export function createHttpApp(
           error_name: error.name
         })
       });
-      current = toNodeHandler(mcp, {
+      mcpHandlers.set(profile, current);
+    }
+    return current;
+  }
+
+  function directHandler(profile: ProfileName) {
+    let current = directHandlers.get(profile);
+    if (!current) {
+      current = toNodeHandler(mcpHandler(profile), {
         onerror: (error) => emitEvent("mcp.request.completed", {
           profile,
           status: "adapter_error",
           error_name: error.name
         })
       });
-      handlers.set(profile, current);
+      directHandlers.set(profile, current);
+    }
+    return current;
+  }
+
+  function oauthHandler(profile: ProfileName) {
+    if (!oauth) return null;
+    let current = oauthHandlers.get(profile);
+    if (!current) {
+      current = toNodeHandler(oauth.protectMcp(profile, mcpHandler(profile)), {
+        onerror: (error) => emitEvent("mcp.request.completed", {
+          profile,
+          auth_mode: "oauth",
+          status: "adapter_error",
+          error_name: error.name
+        })
+      });
+      oauthHandlers.set(profile, current);
     }
     return current;
   }
@@ -74,10 +104,14 @@ export function createHttpApp(
     const started = Date.now();
     try {
       if (request.headers.authorization) {
-        response.status(401).json({
-          error: "oauth_not_configured",
-          message: "OAuth bearer authentication is not configured for this deployment"
-        });
+        if (!oauth) {
+          response.status(401).json({
+            error: "oauth_not_configured",
+            message: "OAuth bearer authentication is not configured for this deployment"
+          });
+          return;
+        }
+        next();
         return;
       }
       const principal = resolveDirectConnection(config, requestHeaders(request));
@@ -117,14 +151,64 @@ export function createHttpApp(
   app.get("/healthz", (_request, response) => {
     response.json({ status: "ok" });
   });
-  app.get("/readyz", (_request, response) => {
+  app.get("/readyz", async (_request, response) => {
     const budget = services.registry.profileBudget("default");
+    let oauthStatus: "disabled" | "ready" | "error" = "disabled";
+    if (oauth) {
+      try {
+        await oauth.ready;
+        oauthStatus = "ready";
+      } catch {
+        oauthStatus = "error";
+      }
+    }
+    const ready = budget.tools <= 20 && budget.schemaTokens <= 15_000 && oauthStatus !== "error";
     response.json({
-      status: budget.tools <= 20 && budget.schemaTokens <= 15_000 ? "ready" : "not_ready",
+      status: ready ? "ready" : "not_ready",
       targets: config.targets.length,
-      default_profile: budget
+      default_profile: budget,
+      oauth: oauthStatus
     });
   });
+
+  if (oauth) {
+    const authNodeHandler = toNodeHandler({ fetch: oauth.authFetch });
+    const enrollmentNodeHandler = toNodeHandler({ fetch: oauth.enrollmentFetch });
+    const consentNodeHandler = toNodeHandler({ fetch: oauth.consentFetch });
+    const revokeNodeHandler = toNodeHandler({ fetch: oauth.revokeFetch });
+    app.all(["/api/auth/{*path}", "/.well-known/{*path}"], async (request, response, next) => {
+      if (request.path === "/api/auth/sign-up/email" || request.path === "/api/auth/sign-in/email") {
+        response.status(404).json({ error: "not_found" });
+        return;
+      }
+      try {
+        await authNodeHandler(request, response, request.body);
+      } catch (error) {
+        next(error);
+      }
+    });
+    app.all("/oauth/enroll", async (request, response, next) => {
+      try {
+        await enrollmentNodeHandler(request, response, request.body);
+      } catch (error) {
+        next(error);
+      }
+    });
+    app.all("/oauth/consent", async (request, response, next) => {
+      try {
+        await consentNodeHandler(request, response, request.body);
+      } catch (error) {
+        next(error);
+      }
+    });
+    app.all("/oauth/revoke", async (request, response, next) => {
+      try {
+        await revokeNodeHandler(request, response, request.body);
+      } catch (error) {
+        next(error);
+      }
+    });
+  }
 
   app.all(["/mcp", "/mcp/:profile"], authenticate, async (request: AuthenticatedRequest, response, next) => {
     let profile: ProfileName;
@@ -152,7 +236,16 @@ export function createHttpApp(
       duration_ms: Date.now() - started
     }));
     try {
-      await handler(profile)(request, response, request.body);
+      if (request.headers.authorization) {
+        const current = oauthHandler(profile);
+        if (!current) {
+          response.status(401).json({ error: "oauth_not_configured" });
+          return;
+        }
+        await current(request, response, request.body);
+      } else {
+        await directHandler(profile)(request, response, request.body);
+      }
     } catch (error) {
       next(error);
     }
@@ -170,9 +263,19 @@ export function createHttpApp(
 
 export function startHttpServer(config: RuntimeConfig = loadRuntimeConfig()): void {
   const app = createHttpApp(config);
-  app.listen(config.port, config.host, () => {
+  const server = app.listen(config.port, config.host, () => {
     process.stderr.write(`USL Odoo MCP listening on ${config.host}:${config.port}\n`);
   });
+  let closing = false;
+  const close = () => {
+    if (closing) return;
+    closing = true;
+    server.close(() => {
+      app.locals.closeRuntime?.();
+    });
+  };
+  process.once("SIGTERM", close);
+  process.once("SIGINT", close);
 }
 
 const invokedPath = process.argv[1];

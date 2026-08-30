@@ -9,6 +9,8 @@
     "dev": "tsx watch src/http.ts",
     "start": "node dist/http.js",
     "stdio": "node dist/stdio.js",
+    "oauth:migrate": "node dist/auth/cli.js migrate",
+    "oauth:backup": "node dist/auth/cli.js backup",
     "typecheck": "tsc --noEmit",
     "test": "vitest run test/vps",
     "test:watch": "vitest test/vps",

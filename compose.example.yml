@@ -10,6 +10,16 @@ services:
       MCP_ALLOWED_ORIGINS: mcp.example.com
       ODOO_TARGETS_JSON: >-
         [{"id":"primary","publicOrigin":"https://odoo.example.com","internalOrigin":"http://odoo:8069","databases":["odoo"]}]
+      MCP_OAUTH_ENABLED: "true"
+      MCP_OAUTH_DATABASE: /data/oauth.sqlite
+      BETTER_AUTH_SECRET_FILE: /run/secrets/better_auth_secret
+      MCP_CREDENTIAL_ENCRYPTION_KEY_FILE: /run/secrets/credential_encryption_key
+      MCP_OAUTH_TRUSTED_ORIGINS: https://chatgpt.com,https://claude.ai
+    secrets:
+      - better_auth_secret
+      - credential_encryption_key
+    volumes:
+      - oauth-data:/data
     networks:
       - odoo
     ports:
@@ -18,3 +28,12 @@ services:
 networks:
   odoo:
     external: true
+
+volumes:
+  oauth-data:
+
+secrets:
+  better_auth_secret:
+    file: ./secrets/better_auth_secret
+  credential_encryption_key:
+    file: ./secrets/credential_encryption_key
