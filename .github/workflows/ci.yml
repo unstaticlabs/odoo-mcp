@@ -16,13 +16,21 @@ jobs:
 
       - uses: actions/setup-node@v5
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
 
-      # The same install the deploy workflow runs. It fails when package.json
-      # and package-lock.json disagree.
+      # A frozen install fails when package.json and package-lock.json disagree.
       - name: Install dependencies
         run: npm ci
 
       - name: Typecheck
         run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Build container
+        run: docker build -t usl-odoo-mcp:ci .

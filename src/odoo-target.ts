@@ -1,9 +1,5 @@
-export const DEFAULT_ODOO_REQUEST_BYTES = 4 * 1024 * 1024;
-export const DEFAULT_ODOO_RESPONSE_BYTES = 16 * 1024 * 1024;
-
 export interface OdooTargetOptions {
   allowLocalHttp?: boolean;
-  workerOrigin?: string;
 }
 
 export class OdooTargetError extends Error {
@@ -61,23 +57,7 @@ export function normalizeOdooOrigin(raw: string, options: OdooTargetOptions = {}
   const origin = parsed.origin;
   if (origin === "null") throw new OdooTargetError("Odoo URL must have a network origin.");
 
-  if (options.workerOrigin) {
-    let workerOrigin: string;
-    try {
-      workerOrigin = new URL(options.workerOrigin).origin;
-    } catch {
-      throw new OdooTargetError("Worker origin is malformed.");
-    }
-    if (origin === workerOrigin) {
-      throw new OdooTargetError("Odoo URL must not point to this MCP Worker.");
-    }
-  }
-
   return origin;
-}
-
-export function allowLocalHttpFromEnv(value: string | undefined): boolean {
-  return value === "1" || value?.toLowerCase() === "true";
 }
 
 export function validateOdooDatabase(value: string): string {
