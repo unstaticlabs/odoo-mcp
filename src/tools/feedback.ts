@@ -16,16 +16,16 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { TtlCache } from "../cache";
+import { zIdempotencyKey, zMutationExecution, zReason } from "../mutation";
 import type { OdooConnection } from "../odoo";
 import type { OdooQueue } from "../odoo-queue";
-import { SERVER_VERSION, type Props } from "../server";
-import { assessWriteOperation } from "../write-safety";
+import type { Props } from "../server";
+import { SERVER_VERSION } from "../version";
 import { buildRecordUrl } from "./record-urls";
 import {
   escapeHtml,
   mcpErrorFromException,
   mcpStructured,
-  mcpWriteBlockedError,
   plaintextToHtml,
   requireConnection
 } from "./shared";
@@ -142,7 +142,9 @@ export function registerFeedbackTools(
               "and exact error text if any. No credentials or sensitive data."
           ),
         category: z.enum(FEEDBACK_CATEGORIES),
-        tool_name: z.string().max(100).optional().describe("The odoo-mcp tool this feedback concerns, if any")
+        tool_name: z.string().max(100).optional().describe("The odoo-mcp tool this feedback concerns, if any"),
+        reason: zReason,
+        idempotency_key: zIdempotencyKey
       },
       outputSchema: {
         task_id: z.number().int().describe("Id of the created tracker card"),
@@ -150,10 +152,11 @@ export function registerFeedbackTools(
         marker_warning: z
           .string()
           .optional()
-          .describe("The card was created but posting the [agent-feedback] chatter marker failed")
+          .describe("The card was created but posting the [agent-feedback] chatter marker failed"),
+        execution: zMutationExecution
       }
     },
-    async ({ title, message, category, tool_name }) => {
+    async ({ title, message, category, tool_name, reason, idempotency_key }) => {
       const props = getProps();
       const client = (props?.clientName ?? server.server.getClientVersion()?.name ?? "unknown").replace(/\s+/g, "-");
 
@@ -176,45 +179,35 @@ export function registerFeedbackTools(
         tag_ids: [[6, 0, feedbackTagIds(category)]]
       };
 
-      // Same gate invariant as every connector write; project.task create with these fields always passes.
-      const verdict = assessWriteOperation({ model: "project.task", method: "create", args: { vals_list: [values] } });
-      if (!verdict.allowed) {
-        return mcpWriteBlockedError({ model: "project.task", method: "create" }, verdict);
-      }
-
-      let taskId: number;
       try {
-        const ids = (await queue.enqueue(conn, "project.task", "create", { vals_list: [values] })) as number[];
-        taskId = ids[0];
+        const mutation = await queue.runMutation(conn, { reason, idempotencyKey: idempotency_key }, async (scope) => {
+          const ids = await scope.call<number[]>("project.task", "create", { vals_list: [values] }, "feedback:create");
+          const taskId = ids[0];
+          if (!Number.isInteger(taskId) || taskId <= 0) throw new Error("Odoo create returned no feedback task id");
+          const marker = `${FEEDBACK_TITLE_PREFIX} category=${category} via=${client} server=${SERVER_VERSION}`;
+          let marker_warning: string | undefined;
+          try {
+            await scope.call(
+              "project.task",
+              "message_post",
+              { ids: [taskId], body: plaintextToHtml(marker), body_is_html: true, message_type: "comment" },
+              "feedback:marker"
+            );
+          } catch (error) {
+            marker_warning = `created task ${taskId} but failed to post the [agent-feedback] marker (${error instanceof Error ? error.message : String(error)})`;
+          }
+          return { taskId, marker_warning };
+        });
+        const { taskId, marker_warning } = mutation.result;
+        const url = buildRecordUrl(conn.url, "project.task", taskId, { project_id: FEEDBACK_PROJECT_ID }) ?? "";
+        return mcpStructured(
+          { task_id: taskId, url, ...(marker_warning ? { marker_warning } : {}), execution: mutation.execution },
+          marker_warning
+            ? `Feedback recorded as task ${taskId} (${url}). Warning: ${marker_warning}.`
+            : `Feedback recorded as task ${taskId} (${url}). Thank you — the maintainers triage these.`
+        );
       } catch (err) {
         return mcpErrorFromException(err, { model: "project.task", method: "create" });
-      }
-
-      // Same nested project route as every other task link — see src/tools/record-urls.ts.
-      const url =
-        buildRecordUrl(conn.url, "project.task", taskId, { project_id: FEEDBACK_PROJECT_ID }) ?? "";
-      // Distinct low-trust marker — see the trust-model note in the module docstring.
-      const marker = `${FEEDBACK_TITLE_PREFIX} category=${category} via=${client} server=${SERVER_VERSION}`;
-
-      try {
-        await queue.enqueue(conn, "project.task", "message_post", {
-          ids: [taskId],
-          body: plaintextToHtml(marker),
-          body_is_html: true,
-          message_type: "comment"
-        });
-        return mcpStructured(
-          { task_id: taskId, url },
-          `Feedback recorded as task ${taskId} (${url}). Thank you — the maintainers triage these.`
-        );
-      } catch (err) {
-        // Marker failure must never fail the report: the card exists either way.
-        const errMessage = err instanceof Error ? err.message : String(err);
-        const marker_warning = `created task ${taskId} but failed to post the [agent-feedback] marker (${errMessage})`;
-        return mcpStructured(
-          { task_id: taskId, url, marker_warning },
-          `Feedback recorded as task ${taskId} (${url}). Warning: ${marker_warning}.`
-        );
       }
     }
   );

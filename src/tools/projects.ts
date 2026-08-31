@@ -3,39 +3,35 @@
  *
  * M1 reads + M2 create_task: namespaced wrappers so MCP clients (Claude Code, etc.)
  * discover project-management tools without relying on generic search/create alone.
- * Writes use Odoo 19 batched `vals_list` create and are gated only by the caller's
- * Odoo permissions (plus the shared connector write-safety gate).
+ * Writes use Odoo 19 batched `vals_list` create and are governed by the caller's
+ * Odoo permissions and Odoo-side action policy.
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { TtlCache } from "../cache";
+import { zIdempotencyKey, zMutationExecution, zReason, type MutationExecution } from "../mutation";
 import { deriveWorkflowStatus } from "../normalizer";
 import type { OdooQueue } from "../odoo-queue";
 import type { Props } from "../server";
 import { base64ToBytes, PdfPagesError } from "../pdf-pages";
-import { preflightProjectTaskStateWrite } from "../project-task-state-gate";
-import { assessWriteOperation } from "../write-safety";
 import { annotateRecordUrl, annotateRecordUrls, buildRecordUrl } from "./record-urls";
 import {
   annotateWaitingTask,
   DEFAULT_TASK_FIELDS,
   fetchRecordChatter,
-  logWriteContext,
   MAX_ODOO_CALLS_PER_READ_EXPANSION,
   mcpError,
   mcpErrorFromException,
+  mcpMutationResultError,
   mcpStructured,
-  mcpWriteBlockedError,
   plaintextToHtml,
   requireConnection,
   searchRecords,
   zOdooRecord,
   zOdooRecords,
   withWaitingAnnotationFields,
-  zRequiredWriteContext,
   zWarnings,
-  zWriteContext,
   type WriteBlockedIntent
 } from "./shared";
 
@@ -63,34 +59,27 @@ const TASK_ATTACHMENT_NAME_MAX = 255;
 const DEFAULT_TASK_ATTACHMENT_MIMETYPE = "application/octet-stream";
 
 /**
- * Error envelope for projects.* refusals, mirroring billing.ts's `billingBlocked`: a custom `error`
- * code gets a hand-built envelope, while a plain policy refusal goes through mcpWriteBlockedError.
+ * Error envelope for fixed-intent tool-contract validation. These checks only enforce promises
+ * made by the dedicated tool; they are not an authorization layer.
  */
 function projectsBlocked(
   context: { model: string; method?: string },
-  opts: { intent?: WriteBlockedIntent; reason: string; blocked_fields?: string[]; error?: string }
+  opts: { intent?: WriteBlockedIntent; reason: string; blocked_fields?: string[]; error?: string; execution?: MutationExecution }
 ) {
-  if (opts.error && opts.error !== "write_blocked") {
+  {
     const envelope = {
-      error: opts.error,
+      error: opts.error ?? "tool_contract_violation",
       intent: opts.intent ?? ("project_management" as const),
       model: context.model,
       method: context.method ?? "write",
       http_status: null,
       details: opts.reason,
       recoverable: false,
-      ...(opts.blocked_fields?.length ? { blocked_fields: opts.blocked_fields } : {})
+      ...(opts.blocked_fields?.length ? { blocked_fields: opts.blocked_fields } : {}),
+      ...(opts.execution ? { execution: opts.execution } : {})
     };
     return { content: [{ type: "text" as const, text: JSON.stringify(envelope) }], isError: true as const };
   }
-  return mcpWriteBlockedError(
-    { model: context.model, method: context.method ?? "write" },
-    {
-      intent: opts.intent ?? "project_management",
-      reason: opts.reason,
-      blocked_fields: opts.blocked_fields
-    }
-  );
 }
 
 const zFieldOmission = z.object({ field: z.string(), reason: z.string() });
@@ -461,7 +450,8 @@ export function registerProjectsTools(
             "Extra project.task field values merged into the create vals (overrides named fields on key clash). " +
               "If you set values.description it bypasses description_is_html and is passed raw into the Html field."
           ),
-        context: zWriteContext
+        reason: zReason,
+        idempotency_key: zIdempotencyKey
       },
       outputSchema: {
         id: z.number().int().describe("Database id of the created task"),
@@ -476,11 +466,11 @@ export function registerProjectsTools(
         provenance_warning: z
           .string()
           .optional()
-          .describe("Create succeeded but posting the provenance stamp to the chatter failed")
+          .describe("Create succeeded but posting the provenance stamp to the chatter failed"),
+        execution: zMutationExecution
       }
     },
-    async ({ name, project_id, description, description_is_html, stage_id, tag_ids, values, context }) => {
-      logWriteContext("projects.create_task", "project.task", context);
+    async ({ name, project_id, description, description_is_html, stage_id, tag_ids, values, reason, idempotency_key }) => {
 
       // `description` is an Odoo Html field: its sanitizer deletes unknown tags AND their content, so
       // plain text is escaped once here (same contract as projects.post_note / create_activity).
@@ -500,62 +490,45 @@ export function registerProjectsTools(
       vals.name = name;
       vals.project_id = project_id;
 
-      const blocked = assessWriteOperation({
-        model: "project.task",
-        method: "create",
-        args: { vals_list: [vals] }
-      });
-      if (!blocked.allowed) {
-        return mcpWriteBlockedError({ model: "project.task", method: "create" }, blocked);
-      }
-
-      // create_task does not route through guardMutation, so the stateful state gate is explicit here.
-      const statePreflight = await preflightProjectTaskStateWrite({
-        method: "create",
-        args: { vals_list: [vals] },
-        queue,
-        getProps
-      });
-      if (!statePreflight.ok) return statePreflight.response;
-
       const props = getProps();
-      let conn: ReturnType<typeof requireConnection>;
-      let id: number;
       try {
-        conn = requireConnection(props);
-        const ids = (await queue.enqueue(conn, "project.task", "create", { vals_list: [vals] })) as number[];
-        id = ids[0];
-        if (!Number.isInteger(id) || id <= 0) {
-          return mcpError("Odoo create returned no task id");
-        }
+        const conn = requireConnection(props);
+        const mutation = await queue.runMutation(conn, { reason, idempotencyKey: idempotency_key }, async (scope) => {
+          const ids = await scope.call<number[]>("project.task", "create", { vals_list: [vals] }, "task:create");
+          const id = Array.isArray(ids) ? ids[0] : (ids as unknown as number);
+          if (!Number.isInteger(id) || id <= 0) throw new Error("Odoo create returned no task id");
+
+          const token = `src-${scope.execution.correlation_id.replace(/^mcp-/, "").slice(0, 8)}`;
+          const client = (props?.clientName ?? server.server.getClientVersion()?.name ?? "unknown").replace(/\s+/g, "-");
+          const body = `[agent-source] engineering_task corr=${token} via=${client}`;
+          let provenance_warning: string | undefined;
+          try {
+            await scope.call(
+              "project.task",
+              "message_post",
+              { ids: [id], body: plaintextToHtml(body), body_is_html: true, message_type: "comment" },
+              "task:provenance"
+            );
+          } catch (error) {
+            provenance_warning = `created task ${id} but failed to post the provenance stamp (${error instanceof Error ? error.message : String(error)})`;
+          }
+          return { id, token, provenance_warning };
+        });
+        const { id, token, provenance_warning } = mutation.result;
+        const webUrl = buildRecordUrl(conn.url, "project.task", id, vals);
+        const link = webUrl ? ` Report it to the user as [${name}](${webUrl}).` : "";
+        const structured = {
+          id,
+          ...(webUrl ? { web_url: webUrl } : {}),
+          ...(provenance_warning ? { provenance_warning } : { trace_token: token }),
+          execution: mutation.execution
+        };
+        const text = provenance_warning
+          ? `${JSON.stringify(id)}${link}\n\nWarning: ${provenance_warning}.`
+          : `TRACE TOKEN ${token} — include this token verbatim in your visible reply.${link}\n\n${JSON.stringify(id)}`;
+        return mcpStructured(structured, text);
       } catch (err) {
         return mcpErrorFromException(err, { model: "project.task", method: "create" });
-      }
-
-      const token = "src-" + crypto.randomUUID().replace(/-/g, "").slice(0, 8);
-      const client = (props?.clientName ?? server.server.getClientVersion()?.name ?? "unknown").replace(/\s+/g, "-");
-      const body = `[agent-source] engineering_task corr=${token} via=${client}`;
-      // project_id is a required input here, so the link always keeps the nested project route.
-      const webUrl = buildRecordUrl(conn.url, "project.task", id, vals);
-      const link = webUrl ? ` Report it to the user as [${name}](${webUrl}).` : "";
-
-      try {
-        await queue.enqueue(conn, "project.task", "message_post", {
-          ids: [id],
-          body: plaintextToHtml(body),
-          body_is_html: true,
-          message_type: "comment"
-        });
-        const text =
-          `TRACE TOKEN ${token} — you MUST include this token verbatim in your visible reply to the user so ` +
-          `this conversation can be found later from the Odoo task.${link}\n\n` +
-          JSON.stringify(id);
-        return mcpStructured({ id, ...(webUrl ? { web_url: webUrl } : {}), trace_token: token }, text);
-      } catch (err) {
-        const errMessage = err instanceof Error ? err.message : String(err);
-        const provenance_warning = `created task ${id} but failed to post the provenance stamp (${errMessage})`;
-        const text = `${JSON.stringify(id)}${link}\n\nWarning: ${provenance_warning}.`;
-        return mcpStructured({ id, ...(webUrl ? { web_url: webUrl } : {}), provenance_warning }, text);
       }
     }
   );
@@ -596,7 +569,8 @@ export function registerProjectsTools(
           .positive()
           .default(TASK_ATTACHMENT_MAX_BYTES)
           .describe("Refuse payloads decoding to more than this many bytes, before any Odoo call"),
-        context: zRequiredWriteContext
+        reason: zReason,
+        idempotency_key: zIdempotencyKey
       },
       outputSchema: {
         ok: z.boolean(),
@@ -606,20 +580,16 @@ export function registerProjectsTools(
         res_id: z.number().int(),
         name: z.string(),
         mimetype: z.string(),
-        file_size: z.number().int().describe("decoded byte length of the stored payload")
+        file_size: z.number().int().describe("decoded byte length of the stored payload"),
+        execution: zMutationExecution
       }
     },
-    async ({ task_id, name, datas, mimetype, res_model, max_bytes = TASK_ATTACHMENT_MAX_BYTES, context }) => {
+    async ({ task_id, name, datas, mimetype, res_model, max_bytes = TASK_ATTACHMENT_MAX_BYTES, reason, idempotency_key }) => {
       const model = "ir.attachment";
       const taskModel = "project.task";
-      logWriteContext("projects.attach_file", model, context);
 
-      // Deliberately no assessWriteOperation / PM gate call here: ir.attachment is not in
-      // PM_MODEL_ALLOWLIST, so the classifier would default-deny this tool's own create. That denial
-      // is correct for generic create_record and must stay; this tool enforces the narrower invariants
-      // itself (project.task-only target, single binary attachment, size cap) — same shape as
-      // billing.attach_source_pdf. projects.create_task above does call the gate because project.task
-      // *is* allowlisted; the difference is intentional, not an oversight.
+      // This fixed-intent helper validates the promises in its name: one bounded binary
+      // attachment on project.task. Authorization remains entirely with Odoo.
 
       // Defensive: the zod literal (and its default) normally settles this before the handler runs.
       if ((res_model ?? taskModel) !== taskModel) {
@@ -694,22 +664,19 @@ export function registerProjectsTools(
         }
 
         // Store the caller's own base64 (whitespace-stripped) rather than re-encoding, so the stored
-        // bytes are byte-identical to the ones validated above. `context` is audit-only, never a val.
-        const created = await queue.enqueue(conn, model, "create", {
-          vals_list: [
-            {
-              name,
-              type: "binary",
-              mimetype: resolvedMimetype,
-              datas: datas.replace(/\s+/g, ""),
-              res_model: taskModel,
-              res_id: task_id
-            }
-          ]
-        });
+        // bytes are byte-identical to the ones validated above. `reason` is audit metadata, never a val.
+        const mutation = await queue.runMutation(conn, { reason, idempotencyKey: idempotency_key }, (scope) =>
+          scope.call<unknown>(model, "create", {
+            vals_list: [{ name, type: "binary", mimetype: resolvedMimetype, datas: datas.replace(/\s+/g, ""), res_model: taskModel, res_id: task_id }]
+          })
+        );
+        const created = mutation.result;
         const attachment_id = Array.isArray(created) ? created[0] : created;
         if (typeof attachment_id !== "number" || !Number.isInteger(attachment_id) || attachment_id <= 0) {
-          return mcpError("Odoo create returned no ir.attachment id");
+          return mcpMutationResultError("Odoo create returned no ir.attachment id", mutation.execution, {
+            model,
+            method: "create"
+          });
         }
 
         return mcpStructured({
@@ -720,7 +687,8 @@ export function registerProjectsTools(
           res_id: task_id,
           name,
           mimetype: resolvedMimetype,
-          file_size: bytes.length
+          file_size: bytes.length,
+          execution: mutation.execution
         });
       } catch (err) {
         return mcpErrorFromException(err, { model, method: "create" });
@@ -735,12 +703,7 @@ export function registerProjectsTools(
  * three tools have and the generic write tools cannot: model, method and field set are hardcoded here.
  */
 const PM_SAFE_WRITE_NOTE =
-  " This is a PM-safe project-management write: the Odoo model, method and field set are fixed by the tool, " +
-  "so operational prose (banking files, B2C exports, VAT/payroll deadlines) is stored as written (plain text is " +
-  "HTML-escaped for Odoo's Html fields) and is NOT an accounting mutation. Accounting work — tax close, reports, " +
-  "returns, lock exceptions — goes to " +
-  "bookkeeping.plan_safe_write only; never route it here and never use generic create_record / post_message / " +
-  "update_record for project-management notes.";
+  " This dedicated tool fixes the model, method, and field set to reduce calls. Use generic tools when Odoo flexibility is needed; Odoo remains authoritative for permissions and policy.";
 
 /**
  * Fixed-intent project-management writes (`projects.create_activity` / `post_note` / `update_task`).
@@ -773,18 +736,19 @@ export function registerProjectWriteTools(
         date_deadline: z.string().optional().describe("Due date, `YYYY-MM-DD`"),
         user_id: z.number().int().positive().describe("res.users id of the assignee"),
         activity_type_id: z.number().int().positive().describe("mail.activity.type id (To Do, Call, Meeting, …)"),
-        context: zWriteContext
+        reason: zReason,
+        idempotency_key: zIdempotencyKey
       },
       outputSchema: {
         id: z.number().int().describe("Database id of the created mail.activity"),
         web_url: z
           .string()
           .optional()
-          .describe("Canonical clickable Odoo URL of the task carrying the activity — surface it as [task name](web_url)")
+          .describe("Canonical clickable Odoo URL of the task carrying the activity — surface it as [task name](web_url)"),
+        execution: zMutationExecution
       }
     },
-    async ({ task_id, summary, note, date_deadline, user_id, activity_type_id, context }) => {
-      logWriteContext("projects.create_activity", "mail.activity", context);
+    async ({ task_id, summary, note, date_deadline, user_id, activity_type_id, reason, idempotency_key }) => {
 
       // res_model / res_id come from task_id, never from the caller — the tool's core invariant.
       const vals: Record<string, unknown> = {
@@ -798,28 +762,23 @@ export function registerProjectWriteTools(
         ...(date_deadline != null ? { date_deadline } : {})
       };
 
-      const blocked = assessWriteOperation({
-        model: "mail.activity",
-        method: "create",
-        args: { vals_list: [vals] }
-      });
-      if (!blocked.allowed) {
-        return mcpWriteBlockedError({ model: "mail.activity", method: "create" }, blocked);
-      }
-
-      // No preflightProjectTaskStateWrite here: that gate reads project.task vals (`state`), and this
-      // create never touches the task record.
       try {
         const conn = requireConnection(getProps());
-        const ids = (await queue.enqueue(conn, "mail.activity", "create", { vals_list: [vals] })) as number[];
+        const mutation = await queue.runMutation(conn, { reason, idempotencyKey: idempotency_key }, (scope) =>
+          scope.call<number[]>("mail.activity", "create", { vals_list: [vals] })
+        );
+        const ids = mutation.result;
         const id = Array.isArray(ids) ? ids[0] : (ids as unknown as number);
         if (!Number.isInteger(id) || id <= 0) {
-          return mcpError("Odoo create returned no activity id");
+          return mcpMutationResultError("Odoo create returned no activity id", mutation.execution, {
+            model: "mail.activity",
+            method: "create"
+          });
         }
         // Link the task, not the activity: an activity has no standalone record route.
         const webUrl = buildRecordUrl(conn.url, "project.task", task_id, {});
         return mcpStructured(
-          { id, ...(webUrl ? { web_url: webUrl } : {}) },
+          { id, ...(webUrl ? { web_url: webUrl } : {}), execution: mutation.execution },
           webUrl ? `${JSON.stringify(id)}\n\nOdoo task: ${webUrl}` : JSON.stringify(id, null, 2)
         );
       } catch (err) {
@@ -847,7 +806,8 @@ export function registerProjectWriteTools(
           .boolean()
           .default(false)
           .describe("True when `note` is already HTML; plain text is escaped for you"),
-        context: zWriteContext
+        reason: zReason,
+        idempotency_key: zIdempotencyKey
       },
       outputSchema: {
         result: z
@@ -856,36 +816,23 @@ export function registerProjectWriteTools(
         web_url: z
           .string()
           .optional()
-          .describe("Canonical clickable Odoo URL of the task — surface it as [task name](web_url)")
+          .describe("Canonical clickable Odoo URL of the task — surface it as [task name](web_url)"),
+        execution: zMutationExecution
       }
     },
-    async ({ task_id, note, body_is_html, context }) => {
-      logWriteContext("projects.post_note", "project.task", context);
+    async ({ task_id, note, body_is_html, reason, idempotency_key }) => {
 
       const body = body_is_html ? note : plaintextToHtml(note);
 
-      const blocked = assessWriteOperation({
-        model: "project.task",
-        method: "message_post",
-        args: { ids: [task_id], body }
-      });
-      if (!blocked.allowed) {
-        return mcpWriteBlockedError({ model: "project.task", method: "message_post" }, blocked);
-      }
-
       try {
         const conn = requireConnection(getProps());
-        const result = await queue.enqueue(conn, "project.task", "message_post", {
-          ids: [task_id],
-          body,
-          // Body is HTML either way (caller-supplied, or escaped above) — declare it so Odoo
-          // does not double-escape. Same contract as post_message in write.ts.
-          body_is_html: true,
-          message_type: "comment"
-        });
+        const mutation = await queue.runMutation(conn, { reason, idempotencyKey: idempotency_key }, (scope) =>
+          scope.call("project.task", "message_post", { ids: [task_id], body, body_is_html: true, message_type: "comment" })
+        );
+        const result = mutation.result;
         const webUrl = buildRecordUrl(conn.url, "project.task", task_id, {});
         return mcpStructured(
-          { result, ...(webUrl ? { web_url: webUrl } : {}) },
+          { result, ...(webUrl ? { web_url: webUrl } : {}), execution: mutation.execution },
           webUrl ? `${JSON.stringify(result)}\n\nOdoo task: ${webUrl}` : JSON.stringify(result, null, 2)
         );
       } catch (err) {
@@ -935,20 +882,21 @@ export function registerProjectWriteTools(
           .describe("Deadline `YYYY-MM-DD`; pass null to clear it"),
         stage_id: z.number().int().positive().optional().describe("project.task.type stage id"),
         priority: z.enum(["0", "1"]).optional().describe("Odoo selection: \"0\" normal, \"1\" starred"),
-        context: zWriteContext
+        reason: zReason,
+        idempotency_key: zIdempotencyKey
       },
       outputSchema: {
         ok: z.boolean().describe("True when the write succeeded"),
         web_url: z
           .string()
           .optional()
-          .describe("Canonical clickable Odoo URL of the updated task — surface it as [task name](web_url)")
+          .describe("Canonical clickable Odoo URL of the updated task — surface it as [task name](web_url)"),
+        execution: zMutationExecution
       }
     },
-    async ({ task_id, name, description, description_is_html, date_deadline, stage_id, priority, context }) => {
-      logWriteContext("projects.update_task", "project.task", context);
+    async ({ task_id, name, description, description_is_html, date_deadline, stage_id, priority, reason, idempotency_key }) => {
 
-      // Html field: escape plain text once, before the safety assessment, so what we assess is what we write.
+      // Html field: escape plain text once so the stored value matches the caller's explicit text/HTML choice.
       const descriptionHtml =
         description !== undefined ? (description_is_html ? description : plaintextToHtml(description)) : undefined;
 
@@ -966,34 +914,16 @@ export function registerProjectWriteTools(
         );
       }
 
-      const blocked = assessWriteOperation({
-        model: "project.task",
-        method: "write",
-        args: { ids: [task_id], vals }
-      });
-      if (!blocked.allowed) {
-        return mcpWriteBlockedError({ model: "project.task", method: "write" }, blocked);
-      }
-
-      // A no-op today (`state` is outside the curated field set, so this costs zero Odoo calls), kept
-      // for parity with projects.create_task so growing the field set cannot bypass the state gate.
-      const statePreflight = await preflightProjectTaskStateWrite({
-        method: "write",
-        ids: [task_id],
-        args: { ids: [task_id], vals },
-        queue,
-        getProps
-      });
-      if (!statePreflight.ok) return statePreflight.response;
-
       try {
         const conn = requireConnection(getProps());
-        await queue.enqueue(conn, "project.task", "write", { ids: [task_id], vals });
+        const mutation = await queue.runMutation(conn, { reason, idempotencyKey: idempotency_key }, (scope) =>
+          scope.call("project.task", "write", { ids: [task_id], vals })
+        );
         // `vals` carries only the written fields, so a task whose project_id was not touched
         // degrades to the all-tasks route rather than a wrong project breadcrumb.
         const webUrl = buildRecordUrl(conn.url, "project.task", task_id, vals);
         return mcpStructured(
-          { ok: true, ...(webUrl ? { web_url: webUrl } : {}) },
+          { ok: true, ...(webUrl ? { web_url: webUrl } : {}), execution: mutation.execution },
           webUrl ? `${JSON.stringify(true)}\n\nOdoo task: ${webUrl}` : JSON.stringify(true, null, 2)
         );
       } catch (err) {

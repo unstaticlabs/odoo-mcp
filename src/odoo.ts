@@ -2,11 +2,21 @@ const ODOO_TIMEOUT_MS = 15_000;
 const ODOO_MAX_ATTEMPTS = 3;
 const ODOO_RETRY_DELAY_MS = 1_000;
 const ODOO_RETRYABLE_STATUS = new Set([429, 502, 503, 504]);
+const DEFAULT_REQUEST_BYTES = 4 * 1024 * 1024;
+const DEFAULT_RESPONSE_BYTES = 16 * 1024 * 1024;
+const ODOO_MODEL_PATTERN = /^[A-Za-z_][A-Za-z0-9_.]{0,254}$/;
+const ODOO_PUBLIC_METHOD_PATTERN = /^[A-Za-z][A-Za-z0-9_]{0,254}$/;
 
 export interface OdooConnection {
   url: string;
   db: string;
   apiKey: string;
+  authMode?: "header" | "oauth";
+}
+
+export interface OdooResponseMetadata {
+  idempotencyStatus?: "created" | "replayed";
+  idempotencyExpiresAt?: string;
 }
 
 /** Per-call resilience policy. Expensive read facades can use a longer timeout
@@ -17,16 +27,40 @@ export interface OdooCallOptions {
   retryDelayMs?: number;
   retryTimeouts?: boolean;
   retryNetworkErrors?: boolean;
+  /** Route one physical attempt. Used by the origin Durable Object facade. */
+  fetcher?: typeof fetch;
+  /** Odoo-atomic key. The same value is retained across every retry attempt. */
+  idempotencyKey?: string;
+  /** Bound buffered JSON responses before parsing. */
+  maxResponseBytes?: number;
+  maxRequestBytes?: number;
+  onResponseMetadata?: (metadata: OdooResponseMetadata) => void;
 }
 
-function normalizeCallOptions(options: number | OdooCallOptions | undefined): Required<OdooCallOptions> {
+interface NormalizedOdooCallOptions {
+  timeoutMs: number;
+  maxAttempts: number;
+  retryDelayMs: number;
+  retryTimeouts: boolean;
+  retryNetworkErrors: boolean;
+  fetcher: typeof fetch;
+  idempotencyKey?: string;
+  maxResponseBytes: number;
+  maxRequestBytes: number;
+  onResponseMetadata?: (metadata: OdooResponseMetadata) => void;
+}
+
+function normalizeCallOptions(options: number | OdooCallOptions | undefined): NormalizedOdooCallOptions {
   if (typeof options === "number") {
     return {
       timeoutMs: options,
       maxAttempts: ODOO_MAX_ATTEMPTS,
       retryDelayMs: ODOO_RETRY_DELAY_MS,
       retryTimeouts: true,
-      retryNetworkErrors: false
+      retryNetworkErrors: false,
+      fetcher: fetch,
+      maxResponseBytes: DEFAULT_RESPONSE_BYTES,
+      maxRequestBytes: DEFAULT_REQUEST_BYTES
     };
   }
   return {
@@ -34,7 +68,12 @@ function normalizeCallOptions(options: number | OdooCallOptions | undefined): Re
     maxAttempts: Math.max(1, Math.min(options?.maxAttempts ?? ODOO_MAX_ATTEMPTS, 5)),
     retryDelayMs: Math.max(0, options?.retryDelayMs ?? ODOO_RETRY_DELAY_MS),
     retryTimeouts: options?.retryTimeouts ?? true,
-    retryNetworkErrors: options?.retryNetworkErrors ?? false
+    retryNetworkErrors: options?.retryNetworkErrors ?? false,
+    fetcher: options?.fetcher ?? fetch,
+    idempotencyKey: options?.idempotencyKey,
+    maxResponseBytes: Math.max(1, options?.maxResponseBytes ?? DEFAULT_RESPONSE_BYTES),
+    maxRequestBytes: Math.max(1, options?.maxRequestBytes ?? DEFAULT_REQUEST_BYTES),
+    onResponseMetadata: options?.onResponseMetadata
   };
 }
 
@@ -53,8 +92,7 @@ function retryAfterMs(response: Response, fallbackMs: number): number {
   return Math.min(30_000, Math.max(fallbackMs, dateMs - Date.now()));
 }
 
-/** Odoo RPC context sent as the top-level `context` key of the JSON-2 request body.
- *  NOT the MCP write-audit `context` string (see tools/shared.ts zWriteContext), which is never sent to Odoo. */
+/** Odoo RPC context sent as the top-level `context` key of the JSON-2 request body. */
 export type OdooRpcContext = Record<string, unknown>;
 
 /**
@@ -84,12 +122,21 @@ export type OdooErrorCode =
   | "model_or_method_not_found"
   | "invalid_request"
   | "rate_limited"
+  | "origin_busy"
+  | "idempotency_conflict"
+  | "payload_too_large"
   | "odoo_server_error"
   | "timeout"
   | "network_error"
   | "unknown";
 
-const RECOVERABLE_CODES = new Set<OdooErrorCode>(["timeout", "rate_limited", "network_error"]);
+const RECOVERABLE_CODES = new Set<OdooErrorCode>([
+  "timeout",
+  "rate_limited",
+  "network_error",
+  "origin_busy",
+  "odoo_server_error"
+]);
 
 /** Pure classification from HTTP status / failure kind to a stable, machine-readable error code. */
 export function classifyOdooError(httpStatus: number | null, isTimeout: boolean, isNetworkError: boolean): OdooErrorCode {
@@ -100,6 +147,7 @@ export function classifyOdooError(httpStatus: number | null, isTimeout: boolean,
   if (httpStatus === 404) return "model_or_method_not_found";
   if (httpStatus === 400) return "invalid_request";
   if (httpStatus === 429) return "rate_limited";
+  if (httpStatus === 409) return "idempotency_conflict";
   if (httpStatus !== null && httpStatus >= 500 && httpStatus < 600) return "odoo_server_error";
   return "unknown";
 }
@@ -215,7 +263,12 @@ export interface OdooErrorParams {
   method: string;
   details: string;
   recoverable?: boolean;
+  denialKind?: OdooDenialKind;
+  /** Whether an attempted mutation is known not to have committed. */
+  mutationOutcome?: "not_applied" | "unknown";
 }
+
+export type OdooDenialKind = "acl" | "record_rule" | "business_validation" | "irreversible_policy";
 
 /** Thrown by callOdoo on every failure path so tool handlers can classify errors instead of pattern-matching strings. */
 export class OdooError extends Error {
@@ -225,6 +278,8 @@ export class OdooError extends Error {
   method: string;
   details: string;
   recoverable: boolean;
+  denialKind?: OdooDenialKind;
+  mutationOutcome: "not_applied" | "unknown";
 
   constructor(params: OdooErrorParams) {
     super(params.message);
@@ -235,24 +290,125 @@ export class OdooError extends Error {
     this.method = params.method;
     this.details = params.details;
     this.recoverable = params.recoverable ?? isRecoverable(params.code);
+    this.denialKind = params.denialKind;
+    this.mutationOutcome = params.mutationOutcome ?? "unknown";
   }
 }
 
-function extractOdooErrorMessage(payload: unknown): string | undefined {
-  if (!payload || typeof payload !== "object") return undefined;
+interface OdooErrorDescriptor {
+  message?: string;
+  name?: string;
+}
+
+function extractOdooErrorDescriptor(payload: unknown): OdooErrorDescriptor {
+  if (!payload || typeof payload !== "object") return {};
   const record = payload as Record<string, unknown>;
   const error = record.error;
   if (error && typeof error === "object") {
     const errorRecord = error as Record<string, unknown>;
-    if (typeof errorRecord.message === "string") return errorRecord.message;
+    const directName = typeof errorRecord.name === "string" ? errorRecord.name : undefined;
+    if (typeof errorRecord.message === "string") return { message: errorRecord.message, name: directName };
     const data = errorRecord.data;
     if (data && typeof data === "object") {
-      const message = (data as Record<string, unknown>).message;
-      if (typeof message === "string") return message;
+      const dataRecord = data as Record<string, unknown>;
+      const message = dataRecord.message;
+      const name = typeof dataRecord.name === "string" ? dataRecord.name : directName;
+      if (typeof message === "string") return { message, name };
     }
   }
-  if (typeof record.message === "string") return record.message;
+  return {
+    message: typeof record.message === "string" ? record.message : undefined,
+    name: typeof record.name === "string" ? record.name : undefined
+  };
+}
+
+function extractTransportErrorCode(payload: unknown): string | undefined {
+  if (!payload || typeof payload !== "object") return undefined;
+  const error = (payload as Record<string, unknown>).error;
+  if (!error || typeof error !== "object") return undefined;
+  const code = (error as Record<string, unknown>).code;
+  return typeof code === "string" ? code : undefined;
+}
+
+function classifyOdooDenial(descriptor: OdooErrorDescriptor): OdooDenialKind | undefined {
+  const haystack = `${descriptor.name ?? ""} ${descriptor.message ?? ""}`.toLowerCase();
+  if (haystack.includes("irreversible") || haystack.includes("usl_access_control")) return "irreversible_policy";
+  if (
+    haystack.includes("record rule") ||
+    haystack.includes("record rules") ||
+    haystack.includes("due to security restrictions")
+  ) return "record_rule";
+  if (haystack.includes("accesserror") || haystack.includes("access error") || haystack.includes("permission")) return "acl";
+  if (
+    haystack.includes("validationerror") ||
+    haystack.includes("usererror") ||
+    haystack.includes("business validation") ||
+    haystack.includes("validation error")
+  ) {
+    return "business_validation";
+  }
   return undefined;
+}
+
+export async function readBoundedText(response: Response, limit: number, model: string, method: string): Promise<string> {
+  const declared = Number(response.headers.get("Content-Length"));
+  if (Number.isFinite(declared) && declared > limit) {
+    await response.body?.cancel("response size limit exceeded");
+    throw new OdooError({
+      message: `Odoo response exceeded the ${limit}-byte limit`,
+      code: "payload_too_large",
+      httpStatus: response.status,
+      model,
+      method,
+      details: `Odoo response exceeded the ${limit}-byte limit`,
+      mutationOutcome: "unknown"
+    });
+  }
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      if (bytes > limit) {
+        await reader.cancel("response size limit exceeded");
+        throw new OdooError({
+          message: `Odoo response exceeded the ${limit}-byte limit`,
+          code: "payload_too_large",
+          httpStatus: response.status,
+          model,
+          method,
+          details: `Odoo response exceeded the ${limit}-byte limit`,
+          mutationOutcome: "unknown"
+        });
+      }
+      chunks.push(value);
+    }
+  } catch (error) {
+    if (error instanceof OdooError) throw error;
+    throw new OdooError({
+      message: `Odoo response stream for ${model}.${method} failed`,
+      code: "network_error",
+      httpStatus: response.status,
+      model,
+      method,
+      details: "Odoo response stream failed before a complete result was received.",
+      recoverable: true,
+      mutationOutcome: "unknown"
+    });
+  } finally {
+    reader.releaseLock();
+  }
+  const joined = new Uint8Array(bytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    joined.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(joined);
 }
 
 function sleep(ms: number): Promise<void> {
@@ -264,7 +420,8 @@ function sleep(ms: number): Promise<void> {
  *
  * `args` is serialized verbatim as the JSON-2 request body, so a `context` key in `args`
  * is forwarded to Odoo as the RPC context (see `companyRpcContext` for multi-company use).
- * That is unrelated to the MCP write-audit `context` argument, which never reaches Odoo.
+ * Mutation callers merge `reason` and reserved connector attribution into this
+ * Odoo context before calling this transport primitive.
  */
 export async function callOdoo(
   conn: OdooConnection,
@@ -273,8 +430,33 @@ export async function callOdoo(
   args: Record<string, unknown>,
   options?: number | OdooCallOptions
 ): Promise<unknown> {
+  if (!ODOO_MODEL_PATTERN.test(model) || !ODOO_PUBLIC_METHOD_PATTERN.test(method)) {
+    throw new OdooError({
+      message: "Odoo JSON-2 target contains an invalid model or public method identifier",
+      code: "invalid_request",
+      httpStatus: null,
+      model,
+      method,
+      details: "Model names may contain letters, digits, underscores, and dots; public method names may contain letters, digits, and underscores and cannot start with an underscore.",
+      recoverable: false,
+      mutationOutcome: "not_applied"
+    });
+  }
   const policy = normalizeCallOptions(options);
   const endpoint = `${conn.url.replace(/\/+$/, "")}/json/2/${model}/${method}`;
+  const body = JSON.stringify(args);
+  const requestBytes = new TextEncoder().encode(body).byteLength;
+  if (requestBytes > policy.maxRequestBytes) {
+    throw new OdooError({
+      message: `Odoo request exceeded the ${policy.maxRequestBytes}-byte limit`,
+      code: "payload_too_large",
+      httpStatus: null,
+      model,
+      method,
+      details: `Odoo request exceeded the ${policy.maxRequestBytes}-byte limit`,
+      mutationOutcome: "not_applied"
+    });
+  }
 
   for (let attempt = 1; attempt <= policy.maxAttempts; attempt++) {
     const controller = new AbortController();
@@ -282,16 +464,18 @@ export async function callOdoo(
 
     let response: Response;
     try {
-      response = await fetch(endpoint, {
+      response = await policy.fetcher(endpoint, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${conn.apiKey}`,
           "X-Odoo-Database": conn.db,
           "Content-Type": "application/json",
-          Accept: "application/json"
+          Accept: "application/json",
+          ...(policy.idempotencyKey ? { "Idempotency-Key": policy.idempotencyKey } : {})
         },
-        body: JSON.stringify(args),
-        signal: controller.signal
+        body,
+        signal: controller.signal,
+        redirect: "manual"
       });
     } catch (err) {
       if (err instanceof Error && err.name === "AbortError") {
@@ -307,7 +491,8 @@ export async function callOdoo(
           model,
           method,
           details: message,
-          recoverable: true
+          recoverable: true,
+          mutationOutcome: "unknown"
         });
       }
       if (policy.retryNetworkErrors && attempt < policy.maxAttempts) {
@@ -322,18 +507,20 @@ export async function callOdoo(
         model,
         method,
         details: message,
-        recoverable: true
+        recoverable: true,
+        mutationOutcome: "unknown"
       });
     } finally {
       clearTimeout(timer);
     }
 
     if (ODOO_RETRYABLE_STATUS.has(response.status) && attempt < policy.maxAttempts) {
+      await response.body?.cancel();
       await sleep(retryAfterMs(response, retryBackoffMs(policy.retryDelayMs, attempt)));
       continue;
     }
 
-    const text = await response.text();
+    const text = await readBoundedText(response, policy.maxResponseBytes, model, method);
     let payload: unknown;
     try {
       payload = text ? JSON.parse(text) : undefined;
@@ -342,26 +529,50 @@ export async function callOdoo(
     }
 
     if (!response.ok) {
-      const detail = extractOdooErrorMessage(payload) ?? response.statusText;
+      const descriptor = extractOdooErrorDescriptor(payload);
+      const transportCode = extractTransportErrorCode(payload);
+      const isRedirect = response.status >= 300 && response.status < 400;
+      const detail = isRedirect
+        ? "Credential-bearing JSON-2 redirects are refused; configure the final Odoo origin."
+        : descriptor.message ?? transportCode ?? response.statusText;
+      const code =
+        response.status === 503 && transportCode === "origin_busy"
+          ? "origin_busy"
+          : isRedirect
+            ? "invalid_request"
+            : classifyOdooError(response.status, false, false);
       throw new OdooError({
         message: `Odoo ${model}.${method} failed (${response.status}): ${detail}`,
-        code: classifyOdooError(response.status, false, false),
+        code,
         httpStatus: response.status,
         model,
         method,
-        details: detail
+        details: detail,
+        denialKind: classifyOdooDenial(descriptor),
+        mutationOutcome: code === "origin_busy" ? "not_applied" : response.status >= 500 || isRedirect ? "unknown" : "not_applied"
       });
     }
 
     if (payload && typeof payload === "object" && "error" in (payload as Record<string, unknown>)) {
-      const detail = extractOdooErrorMessage(payload) ?? "unknown error";
+      const descriptor = extractOdooErrorDescriptor(payload);
+      const detail = descriptor.message ?? "unknown error";
       throw new OdooError({
         message: `Odoo ${model}.${method} returned an error: ${detail}`,
         code: "unknown",
         httpStatus: response.status,
         model,
         method,
-        details: detail
+        details: detail,
+        denialKind: classifyOdooDenial(descriptor),
+        mutationOutcome: "not_applied"
+      });
+    }
+
+    const status = response.headers.get("Idempotency-Status");
+    if (status === "created" || status === "replayed") {
+      policy.onResponseMetadata?.({
+        idempotencyStatus: status,
+        idempotencyExpiresAt: response.headers.get("Idempotency-Expires-At") ?? undefined
       });
     }
 

@@ -74,12 +74,10 @@ export function deriveWorkflowStatus(record: Record<string, unknown>): string | 
 }
 
 /**
- * Odoo 19 `project.task.state` vocabulary for the Waiting guard.
+ * Odoo 19 `project.task.state` vocabulary for read-side Waiting explanations.
  *
  * Waiting is **computed** by Odoo from `stage_id` + open `depend_on_ids` (Blocked By) — it is not a
- * status an agent may write. The strings and the open/closed test live here because this is the one
- * pure leaf module both sides of the guard can import: the write gate
- * (`project-task-state-gate.ts`, via `safety.ts`) and the read annotation (`tools/shared.ts`).
+ * stored task status. These constants support accurate read annotations only; they do not gate writes.
  */
 export const PROJECT_TASK_WAITING_STATE = "04_waiting_normal";
 export const PROJECT_TASK_IN_PROGRESS_STATE = "01_in_progress";

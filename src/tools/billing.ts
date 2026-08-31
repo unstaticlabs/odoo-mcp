@@ -1,11 +1,10 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { deriveWorkflowStatus } from "../normalizer";
+import { zIdempotencyKey, zMutationExecution, zReason, type MutationExecution } from "../mutation";
 import { companiesRpcContext, type OdooConnection, type OdooRpcContext } from "../odoo";
-import type { OdooQueue } from "../odoo-queue";
+import type { OdooMutationScope, OdooQueue } from "../odoo-queue";
 import type { Props } from "../server";
-import { getReversibleLifecycleRule } from "../lifecycle-allowlist";
-import { runLifecycleAction } from "../lifecycle-gate";
 import {
   PdfPagesError,
   base64ToBytes,
@@ -23,17 +22,14 @@ import {
 } from "./bookkeeping";
 import { buildRecordUrl, toRecordId } from "./record-urls";
 import {
-  logWriteContext,
   mcpError,
   mcpErrorFromException,
+  mcpMutationResultError,
   mcpStructured,
-  mcpWriteBlockedError,
   plaintextToHtml,
   redactDetails,
   requireConnection,
-  zRequiredWriteContext,
   zWarnings,
-  zWriteContext,
   type WriteBlockedIntent
 } from "./shared";
 
@@ -145,7 +141,7 @@ export const EXPENSE_MOVE_READ_FIELDS = [
   "currency_id"
 ] as const;
 
-/** Fields written back on the post-write confirmation re-read. */
+/** Fields read back after a successful write to report observed values. */
 const EXPENSE_MOVE_CONFIRM_FIELDS = ["id", "state", "company_id", "employee_id"] as const;
 
 /**
@@ -546,30 +542,23 @@ function billingBlocked(
     blocked_fields?: string[];
     error?: string;
     recoverable?: boolean;
+    execution?: MutationExecution;
   }
 ) {
-  if (opts.error && opts.error !== "write_blocked") {
+  {
     const envelope = {
-      error: opts.error,
+      error: opts.error ?? "tool_contract_violation",
       intent: opts.intent ?? ("financial_mutation" as const),
       model: context.model,
       method: context.method ?? "write",
       http_status: null,
       details: opts.reason,
       recoverable: opts.recoverable ?? false,
-      ...(opts.blocked_fields?.length ? { blocked_fields: opts.blocked_fields } : {})
+      ...(opts.blocked_fields?.length ? { blocked_fields: opts.blocked_fields } : {}),
+      ...(opts.execution ? { execution: opts.execution } : {})
     };
     return { content: [{ type: "text" as const, text: JSON.stringify(envelope) }], isError: true as const };
   }
-  return mcpWriteBlockedError(
-    { model: context.model, method: context.method ?? "write" },
-    {
-      intent: opts.intent ?? "financial_mutation",
-      reason: opts.reason,
-      blocked_fields: opts.blocked_fields,
-      recoverable: opts.recoverable
-    }
-  );
 }
 
 function firstRecord(rows: unknown): Record<string, unknown> | null {
@@ -1303,13 +1292,13 @@ export function registerBillingWriteTools(
         "pay. Refuses non-draft records and lifecycle/payment fields. " +
         `${expenseReassignmentNote} ` +
         "Does not validate, post, or delete. For reset→edit→resubmit/reapprove hygiene use " +
-        "call_model_method on allowlisted methods (action_reset / action_submit / action_approve) " +
-        "with write context and a compatible record state (see list_model_actions executable:true).",
+        "the dedicated expense lifecycle tools or call_model_method; Odoo validates permissions and record state.",
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
       inputSchema: {
         record_id: z.number().int().positive(),
         values: z.record(z.string(), z.unknown()).describe(draftExpenseValuesDescribe),
-        context: zWriteContext
+        reason: zReason,
+        idempotency_key: zIdempotencyKey
       },
       outputSchema: {
         ok: z.boolean(),
@@ -1318,12 +1307,12 @@ export function registerBillingWriteTools(
         company: zCollapsedM2o.optional().describe("Company observed on the post-write re-read"),
         employee: zCollapsedM2o.optional().describe("Employee observed on the post-write re-read"),
         web_url: z.string().optional().describe("Canonical clickable Odoo URL — confirm the write as [record name](web_url)"),
-        warnings: z.array(z.string()).optional()
+        warnings: z.array(z.string()).optional(),
+        execution: zMutationExecution
       }
     },
-    async ({ record_id, values, context }) => {
+    async ({ record_id, values, reason, idempotency_key }) => {
       const model = "hr.expense";
-      logWriteContext("billing.update_draft_expense", model, context);
       try {
         const conn = requireConnection(getProps());
         const rows = await queue.enqueue(conn, model, "read", {
@@ -1351,8 +1340,7 @@ export function registerBillingWriteTools(
               reason:
                 `hr.expense ${record_id} is not draft (current state: ${current}). ` +
                 "billing.update_draft_expense only updates draft expenses. " +
-                "If the expense is submitted/approved, call_model_method action_reset (with write context) first, then retry; " +
-                "post/pay remain blocked on generic MCP tools."
+                "Use billing.reset_expense or Odoo's public action_reset method first if Odoo permits it, then retry."
             }
           );
         }
@@ -1416,11 +1404,11 @@ export function registerBillingWriteTools(
           moveContext = preflight.context;
         }
 
-        await queue.enqueue(conn, model, "write", {
-          ids: [record_id],
-          vals: allowed,
-          ...(moveContext ? { context: moveContext } : {})
-        });
+        const mutation = await queue.runMutation(
+          conn,
+          { reason, idempotencyKey: idempotency_key, odooContext: moveContext },
+          (scope) => scope.call(model, "write", { ids: [record_id], vals: allowed })
+        );
 
         // Confirm from Odoo rather than echoing the request: after a move, company/employee are the
         // whole point of the call. The write has already landed, so a re-read that comes back empty
@@ -1451,7 +1439,8 @@ export function registerBillingWriteTools(
           ...(company ? { company } : {}),
           ...(employee ? { employee } : {}),
           ...(webUrl ? { web_url: webUrl } : {}),
-          ...(warnings.length > 0 ? { warnings } : {})
+          ...(warnings.length > 0 ? { warnings } : {}),
+          execution: mutation.execution
         });
       } catch (err) {
         return mcpErrorFromException(err, { model, method: "write" });
@@ -1469,12 +1458,13 @@ export function registerBillingWriteTools(
         "Odoo's native Reviewed / To Review queue — a status flip only; it does not validate, post, reconcile, send, pay, or delete. " +
         "Refuses posted moves, other move types, and lifecycle/payment fields. " +
         "Does not validate, post, reconcile, send, or delete. To reset a posted/cancel vendor bill to draft, " +
-        "use call_model_method button_draft with write context (in_invoice / in_refund only; see list_model_actions).",
+        "use call_model_method button_draft if Odoo permits it, then retry.",
       annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
       inputSchema: {
         record_id: z.number().int().positive(),
         values: z.record(z.string(), z.unknown()),
-        context: zWriteContext
+        reason: zReason,
+        idempotency_key: zIdempotencyKey
       },
       outputSchema: {
         ok: z.boolean(),
@@ -1482,12 +1472,12 @@ export function registerBillingWriteTools(
         state: z.string(),
         move_type: z.string(),
         web_url: z.string().optional().describe("Canonical clickable Odoo URL — confirm the write as [record name](web_url)"),
-        warnings: z.array(z.string()).optional()
+        warnings: z.array(z.string()).optional(),
+        execution: zMutationExecution
       }
     },
-    async ({ record_id, values, context }) => {
+    async ({ record_id, values, reason, idempotency_key }) => {
       const model = "account.move";
-      logWriteContext("billing.configure_draft_vendor_bill", model, context);
       try {
         const conn = requireConnection(getProps());
         const rows = await queue.enqueue(conn, model, "read", {
@@ -1515,8 +1505,7 @@ export function registerBillingWriteTools(
               reason:
                 `account.move ${record_id} is not draft (current state: ${current}). ` +
                 "billing.configure_draft_vendor_bill only updates draft vendor bills. " +
-                "If the bill is posted/cancel, call_model_method button_draft (vendor bills only, with write context) first; " +
-                "post/reconcile remain blocked on generic MCP tools."
+                "If appropriate, call the public button_draft method first; Odoo decides whether it is permitted."
             }
           );
         }
@@ -1571,7 +1560,9 @@ export function registerBillingWriteTools(
           );
         }
 
-        await queue.enqueue(conn, model, "write", { ids: [record_id], vals: allowed });
+        const mutation = await queue.runMutation(conn, { reason, idempotencyKey: idempotency_key }, (scope) =>
+          scope.call(model, "write", { ids: [record_id], vals: allowed })
+        );
         const state = deriveWorkflowStatus(record) ?? "draft";
         // moveType is read live above, so the bill links to Vendor Bills rather than Journal Entries.
         const webUrl = buildRecordUrl(conn.url, model, record_id, { ...record, move_type: moveType });
@@ -1580,7 +1571,8 @@ export function registerBillingWriteTools(
           record_id,
           state,
           move_type: moveType,
-          ...(webUrl ? { web_url: webUrl } : {})
+          ...(webUrl ? { web_url: webUrl } : {}),
+          execution: mutation.execution
         });
       } catch (err) {
         return mcpErrorFromException(err, { model, method: "write" });
@@ -1627,7 +1619,8 @@ export function registerBillingWriteTools(
           .max(255)
           .optional()
           .describe("File name for the new attachment; defaults to the source name plus a page suffix"),
-        context: zRequiredWriteContext
+        reason: zReason,
+        idempotency_key: zIdempotencyKey
       },
       outputSchema: {
         ok: z.boolean(),
@@ -1645,13 +1638,13 @@ export function registerBillingWriteTools(
           .number()
           .int()
           .nullable()
-          .describe("Pages in the source PDF; null when a full copy was made from bytes that would not parse")
+          .describe("Pages in the source PDF; null when a full copy was made from bytes that would not parse"),
+        execution: zMutationExecution
       }
     },
-    async ({ bill_id, source_attachment_id, page_from, page_to, max_bytes = SOURCE_PDF_MAX_BYTES, name, context }) => {
+    async ({ bill_id, source_attachment_id, page_from, page_to, max_bytes = SOURCE_PDF_MAX_BYTES, name, reason, idempotency_key }) => {
       const model = "ir.attachment";
       const billModel = "account.move";
-      logWriteContext("billing.attach_source_pdf", model, context);
 
       // Page args are self-contained — check them before spending an Odoo round-trip.
       if ((page_from === undefined) !== (page_to === undefined)) {
@@ -1700,8 +1693,7 @@ export function registerBillingWriteTools(
               reason:
                 `account.move ${bill_id} is not draft (current state: ${current}). ` +
                 "billing.attach_source_pdf only attaches to draft vendor bills. " +
-                "If the bill is posted/cancel, call_model_method button_draft (vendor bills only, with write context) first; " +
-                "post/reconcile remain blocked on generic MCP tools."
+                "If appropriate, call the public button_draft method first; Odoo decides whether it is permitted."
             }
           );
         }
@@ -1838,21 +1830,18 @@ export function registerBillingWriteTools(
 
         // 4. Link the result. Odoo may auto-adopt it as message_main_attachment_id; we never write the move.
         const attachmentName = name ?? deriveSourcePdfName(meta.name, source_attachment_id, range);
-        const created = await queue.enqueue(conn, model, "create", {
-          vals_list: [
-            {
-              name: attachmentName,
-              type: "binary",
-              mimetype: "application/pdf",
-              datas: bytesToBase64(outputBytes),
-              res_model: billModel,
-              res_id: bill_id
-            }
-          ]
-        });
+        const mutation = await queue.runMutation(conn, { reason, idempotencyKey: idempotency_key }, (scope) =>
+          scope.call<unknown>(model, "create", {
+            vals_list: [{ name: attachmentName, type: "binary", mimetype: "application/pdf", datas: bytesToBase64(outputBytes), res_model: billModel, res_id: bill_id }]
+          })
+        );
+        const created = mutation.result;
         const attachment_id = Array.isArray(created) ? created[0] : created;
         if (typeof attachment_id !== "number" || !Number.isInteger(attachment_id) || attachment_id <= 0) {
-          return mcpError("Odoo create returned no ir.attachment id");
+          return mcpMutationResultError("Odoo create returned no ir.attachment id", mutation.execution, {
+            model,
+            method: "create"
+          });
         }
 
         return mcpStructured({
@@ -1867,7 +1856,8 @@ export function registerBillingWriteTools(
           page_from: range?.page_from ?? null,
           page_to: range?.page_to ?? null,
           source_attachment_id,
-          source_page_count: sourcePageCount
+          source_page_count: sourcePageCount,
+          execution: mutation.execution
         });
       } catch (err) {
         return mcpErrorFromException(err, { model, method: "create" });
@@ -1927,7 +1917,8 @@ export function registerBillingWriteTools(
           .positive()
           .default(SOURCE_PDF_MAX_BYTES)
           .describe("Refuse sources larger than this, before decoding into Worker memory (copy mode)"),
-        context: zRequiredWriteContext
+        reason: zReason,
+        idempotency_key: zIdempotencyKey
       },
       outputSchema: {
         ok: z.boolean(),
@@ -1963,7 +1954,8 @@ export function registerBillingWriteTools(
           .optional()
           .describe("The write succeeded but stamping the bill's chatter failed"),
         warnings: zWarnings,
-        metadata: zCallMetadata
+        metadata: zCallMetadata,
+        execution: zMutationExecution
       }
     },
     async ({
@@ -1974,16 +1966,11 @@ export function registerBillingWriteTools(
       mode = "copy",
       name,
       max_bytes = SOURCE_PDF_MAX_BYTES,
-      context
+      reason,
+      idempotency_key
     }) => {
       const model = "ir.attachment";
       const billModel = "account.move";
-      logWriteContext("billing.copy_or_relink_source_attachment", model, context);
-
-      // Deliberately no assessWriteOperation call: ir.attachment / documents.document creates and
-      // writes are default-denied by the generic classifier, which is correct for create_record and
-      // must stay. This tool enforces the narrower invariants itself (one draft in_invoice target,
-      // one source, size cap, no byte mutation of the source) — same shape as billing.attach_source_pdf.
 
       const before = queue.snapshot();
       const warnings: string[] = [];
@@ -2146,23 +2133,25 @@ export function registerBillingWriteTools(
           // 5. Create the copy. The source is never modified; the bill is never written.
           const copyName = name ?? scalarOrNull(meta.name) ?? `attachment-${attachmentId}`;
           const copyMimetype = scalarOrNull(meta.mimetype) ?? DEFAULT_COPY_MIMETYPE;
-          const created = await queue.enqueue(conn, model, "create", {
-            vals_list: [
-              {
-                name: copyName,
-                type: "binary",
-                mimetype: copyMimetype,
-                // The source's own base64, not a re-encode — the copy is byte-identical by construction.
-                datas: compact,
-                res_model: billModel,
-                res_id: target_id
-              }
-            ]
+          const mutation = await queue.runMutation(conn, { reason, idempotencyKey: idempotency_key }, async (scope) => {
+            const created = await scope.call<unknown>(model, "create", {
+              vals_list: [{ name: copyName, type: "binary", mimetype: copyMimetype, datas: compact, res_model: billModel, res_id: target_id }]
+            }, "attachment:copy");
+            const attachment_id = Array.isArray(created) ? created[0] : created;
+            if (typeof attachment_id !== "number" || !Number.isInteger(attachment_id) || attachment_id <= 0) {
+              throw new Error("Odoo create returned no ir.attachment id");
+            }
+            const provenance = await postAttachmentProvenance(scope, billModel, target_id, [
+              "mode=copy",
+              `source_attachment=${attachmentId}`,
+              `source_document=${source_document_id ?? "none"}`,
+              `new_attachment=${attachment_id}`,
+              `name=${copyName}`,
+              `reason=${reason ?? "none"}`
+            ], "attachment:copy:provenance");
+            return { attachment_id, provenance };
           });
-          const attachment_id = Array.isArray(created) ? created[0] : created;
-          if (typeof attachment_id !== "number" || !Number.isInteger(attachment_id) || attachment_id <= 0) {
-            return mcpError("Odoo create returned no ir.attachment id");
-          }
+          const { attachment_id, provenance } = mutation.result;
 
           // 6. Read back checksum/size — re-readable proof the copy matches the source.
           const copyRow = firstRecord(
@@ -2202,16 +2191,7 @@ export function registerBillingWriteTools(
             ...(attachment_web_url ? { attachment_web_url } : {})
           };
 
-          const provenance = await postAttachmentProvenance(queue, conn, billModel, target_id, [
-            "mode=copy",
-            `source_attachment=${attachmentId}`,
-            `source_document=${source_document_id ?? "none"}`,
-            `new_attachment=${attachment_id}`,
-            `checksum=${checksum ?? "unreported"}`,
-            `name=${success.name}`,
-            `context=${context}`
-          ]);
-          return mcpStructured({ ...success, ...provenance, warnings, metadata: metadata() });
+          return mcpStructured({ ...success, ...provenance, warnings, metadata: metadata(), execution: mutation.execution });
         }
 
         // ---- mode: relink (destructive to the document's previous filing) ----
@@ -2223,8 +2203,8 @@ export function registerBillingWriteTools(
           res_model: scalarOrNull(document.res_model),
           res_id: numberOrNull(document.res_id)
         };
-        let changed = false;
-        if (previous_link.res_model === billModel && previous_link.res_id === target_id) {
+        const shouldWrite = previous_link.res_model !== billModel || previous_link.res_id !== target_id;
+        if (!shouldWrite) {
           warnings.push(
             `documents.document ${source_document_id} was already linked to ${billModel},${target_id}; no write was issued.`
           );
@@ -2236,17 +2216,28 @@ export function registerBillingWriteTools(
                 "old record must keep its own evidence."
             );
           }
-          try {
-            await queue.enqueue(conn, "documents.document", "write", {
+        }
+
+        let mutation;
+        try {
+          mutation = await queue.runMutation(conn, { reason, idempotencyKey: idempotency_key }, async (scope) => {
+            if (!shouldWrite) return {};
+            await scope.call("documents.document", "write", {
               ids: [source_document_id],
               vals: { res_model: billModel, res_id: target_id }
-            });
-          } catch (err) {
-            if (isDocumentsUnavailableError(err)) return documentsPreconditionError(err);
-            return mcpErrorFromException(err, { model: "documents.document", method: "write" });
-          }
-          changed = true;
+            }, "document:relink");
+            return postAttachmentProvenance(scope, billModel, target_id, [
+              "mode=relink",
+              `source_document=${source_document_id}`,
+              `previous_link=${previous_link.res_model ?? "none"},${previous_link.res_id ?? "none"}`,
+              `reason=${reason ?? "none"}`
+            ], "document:relink:provenance");
+          });
+        } catch (err) {
+          if (isDocumentsUnavailableError(err)) return documentsPreconditionError(err);
+          return mcpErrorFromException(err, { model: "documents.document", method: "write" });
         }
+        const changed = shouldWrite;
 
         // Read-back evidence — a fresh call, not the pre-read row.
         let readBackRows: unknown;
@@ -2256,7 +2247,7 @@ export function registerBillingWriteTools(
             fields: DOCUMENT_SEARCH_FIELDS
           });
         } catch (err) {
-          if (isDocumentsUnavailableError(err)) return documentsPreconditionError(err);
+          if (isDocumentsUnavailableError(err)) return documentsPreconditionError(err, mutation.execution);
           throw err;
         }
         const readBackRow = firstRecord(readBackRows);
@@ -2265,7 +2256,8 @@ export function registerBillingWriteTools(
             { model: "documents.document", method: "read" },
             {
               error: "not_found",
-              reason: `documents.document id ${source_document_id} was not found after the write (or record rules hide it).`
+              reason: `documents.document id ${source_document_id} was not found after the write (or record rules hide it).`,
+              execution: mutation.execution
             }
           );
         }
@@ -2284,15 +2276,7 @@ export function registerBillingWriteTools(
           ...(target_web_url ? { target_web_url } : {})
         };
 
-        const provenance = changed
-          ? await postAttachmentProvenance(queue, conn, billModel, target_id, [
-              "mode=relink",
-              `source_document=${source_document_id}`,
-              `previous_link=${previous_link.res_model ?? "none"},${previous_link.res_id ?? "none"}`,
-              `context=${context}`
-            ])
-          : {};
-        return mcpStructured({ ...relinked, ...provenance, warnings, metadata: metadata() });
+        return mcpStructured({ ...relinked, ...mutation.result, warnings, metadata: metadata(), execution: mutation.execution });
       } catch (err) {
         return mcpErrorFromException(err, { model, method: mode === "relink" ? "write" : "create" });
       }
@@ -2333,8 +2317,7 @@ async function readDraftVendorBill(
           reason:
             `account.move ${bill_id} is not draft (current state: ${current}). ` +
             "This tool only files evidence onto draft vendor bills. " +
-            "If the bill is posted/cancel, call_model_method button_draft (vendor bills only, with write context) first; " +
-            "post/reconcile remain blocked on generic MCP tools."
+            "If appropriate, call the public button_draft method first; Odoo decides whether it is permitted."
         }
       )
     };
@@ -2362,21 +2345,21 @@ async function readDraftVendorBill(
  * `projects.create_task`).
  */
 async function postAttachmentProvenance(
-  queue: OdooQueue,
-  conn: OdooConnection,
+  scope: OdooMutationScope,
   billModel: string,
   bill_id: number,
-  parts: string[]
+  parts: string[],
+  stableStep: string
 ): Promise<{ trace_token?: string; provenance_warning?: string }> {
-  const trace_token = "src-" + crypto.randomUUID().replace(/-/g, "").slice(0, 8);
+  const trace_token = `src-${scope.execution.correlation_id.replace(/^mcp-/, "").slice(0, 8)}`;
   const body = `[agent-source] billing.copy_or_relink_source_attachment corr=${trace_token} ${parts.join(" ")}`;
   try {
-    await queue.enqueue(conn, billModel, "message_post", {
-      ids: [bill_id],
-      body: plaintextToHtml(body),
-      body_is_html: true,
-      message_type: "comment"
-    });
+    await scope.call(
+      billModel,
+      "message_post",
+      { ids: [bill_id], body: plaintextToHtml(body), body_is_html: true, message_type: "comment" },
+      stableStep
+    );
     return { trace_token };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -2386,13 +2369,11 @@ async function postAttachmentProvenance(
   }
 }
 
-// ---- Expense lifecycle (dedicated tools over the shared lifecycle gate) ----
+// ---- Expense lifecycle (dedicated ergonomic tools; Odoo remains authoritative) ----
 
 /**
- * The reversible expense transitions, exposed as named tools so the accounting-only surface
- * (`/accounting/mcp`) can drive reset -> edit -> submit -> approve without shipping the generic
- * `call_model_method` escape hatch. Policy, state checks and audit all come from the shared gate —
- * these are thin, self-describing front doors onto the same rules.
+ * Named front doors for common expense transitions on the accounting-only surface.
+ * They read state for reporting, but never use it as connector authorization: Odoo decides.
  */
 const EXPENSE_LIFECYCLE_TOOLS = [
   {
@@ -2414,7 +2395,7 @@ const EXPENSE_LIFECYCLE_TOOLS = [
     title: "Approve Expense",
     method: "action_approve",
     summary: "Approve submitted expenses.",
-    follow_up: "Posting the journal entry and paying stay human-only — do those in the Odoo UI."
+    follow_up: "Continue with the next Odoo-permitted workflow action as appropriate."
   }
 ] as const;
 
@@ -2432,46 +2413,52 @@ export function registerExpenseLifecycleTools(
   const model = "hr.expense";
 
   for (const spec of EXPENSE_LIFECYCLE_TOOLS) {
-    const rule = getReversibleLifecycleRule(model, spec.method);
-    // A tool without a backing allowlist rule would be refused by the gate on every call.
-    if (!rule) throw new Error(`${spec.name}: no lifecycle rule for ${model}.${spec.method}`);
-
     server.registerTool(
       spec.name,
       {
         title: spec.title,
         description:
-          `Write: ${spec.summary} Requires state in (${rule.from_states.join(", ")}) on every requested record; ` +
-          `the whole call is refused if any record is in another state, is missing, or Odoo withholds the action. ` +
-          `${spec.follow_up} Never posts, pays, reconciles or deletes.`,
+          `Write: ${spec.summary} ${spec.follow_up} The tool reports before/after state, while Odoo ACLs, record rules, workflow validation, and irreversible-action policy decide whether the public method may run.`,
         annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
         inputSchema: {
           record_ids: z
             .array(z.number().int().positive())
             .min(1)
             .max(50)
-            .describe("hr.expense ids to transition; all-or-nothing, validated against live state first"),
-          context: zRequiredWriteContext
+            .describe("hr.expense ids passed together to one Odoo public method call"),
+          reason: zReason,
+          idempotency_key: zIdempotencyKey
         },
         outputSchema: {
           ok: z.boolean(),
           model: z.string(),
           method: z.string(),
-          records: z.array(zLifecycleRecord)
+          records: z.array(zLifecycleRecord),
+          execution: zMutationExecution
         }
       },
-      async ({ record_ids, context }) => {
-        logWriteContext(spec.name, model, context);
-        const outcome = await runLifecycleAction({
-          model,
-          method: spec.method,
-          ids: record_ids,
-          context,
-          queue,
-          getProps
-        });
-        if (!outcome.ok) return outcome.response;
-        return mcpStructured({ ok: true, model, method: spec.method, records: outcome.records });
+      async ({ record_ids, reason, idempotency_key }) => {
+        try {
+          const conn = requireConnection(getProps());
+          const beforeRows = recordList(await queue.enqueue(conn, model, "read", { ids: record_ids, fields: ["id", "state"] }));
+          const beforeById = new Map(beforeRows.map((row) => [Number(row.id), scalarOrNull(row.state)]));
+          const mutation = await queue.runMutation(conn, { reason, idempotencyKey: idempotency_key }, (scope) =>
+            scope.call(model, spec.method, { ids: record_ids })
+          );
+          const afterRows = await queue
+            .enqueue(conn, model, "read", { ids: record_ids, fields: ["id", "state"] })
+            .then(recordList)
+            .catch(() => []);
+          const afterById = new Map(afterRows.map((row) => [Number(row.id), scalarOrNull(row.state)]));
+          const records = record_ids.map((id) => ({
+            id,
+            state_before: beforeById.get(id) ?? null,
+            state_after: afterById.get(id) ?? null
+          }));
+          return mcpStructured({ ok: true, model, method: spec.method, records, execution: mutation.execution });
+        } catch (error) {
+          return mcpErrorFromException(error, { model, method: spec.method, record_ids });
+        }
       }
     );
   }

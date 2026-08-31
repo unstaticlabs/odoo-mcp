@@ -1,232 +1,98 @@
-# Auth: bring-your-own-key (BYO-key)
+# Authentication and Odoo authority
 
-**v1 has no OAuth.** Authentication and authorization are both delegated to
-Odoo: each user supplies their **own Odoo instance URL + Odoo API key**, and the
-server calls Odoo **as that user**. Odoo's per-user permissions and record-rules
-*are* the authorization layer.
+Every MCP call ultimately uses one Odoo user's API key. Odoo authentication,
+ACLs, record rules, field access, company scope, workflow checks, and action
+policy are authoritative. The Worker has no shared Odoo service account and no
+parallel scope/permission model.
 
-## The core idea
+## Two ingress paths, one identity
 
-There is no shared service account, no scope system, no user store, and no
-per-user config in `odoo-mcp`. The server is **stateless and configless**.
+### Header/BYO-key path
 
-- A user's Odoo API key already encodes exactly what that user may do in Odoo.
-- When `odoo-mcp` calls Odoo with that key, Odoo applies the user's groups,
-  access-control lists, and record-rules automatically.
-- Therefore: **if a user can't do it in Odoo, they can't do it through
-  `odoo-mcp`.** A read-only Odoo user cannot write even when a write tool exists;
-  a user who can't see a project simply gets nothing back for it.
-
-This makes authorization Odoo's problem, which is exactly where the source of
-truth already lives.
-
-## The two auth paths at a glance
-
-```mermaid
-flowchart TB
-    claude["Claude clients<br/>(Claude Code, Desktop, web)"]
-    chatgpt["ChatGPT connector"]
-
-    subgraph worker["Cloudflare Worker — public MCP endpoints"]
-        header["BYO-key header path<br/>credentials on every request,<br/>nothing stored"]
-        oauth["OAuth token path<br/>bearer token resolves to<br/>encrypted grant in KV"]
-        props["Same Props object<br/>odooBaseUrl + odooDb + odooApiKey"]
-        agent["Endpoint agents (Durable Objects)<br/>/mcp — full surface<br/>/accounting/mcp — bookkeeping + billing<br/>/projects/mcp — projects<br/>/documents/mcp — governed retrieval"]
-    end
-
-    odoo["User's Odoo instance<br/>called as that user —<br/>Odoo permissions are the entire authz layer"]
-
-    claude -->|"Authorization: Bearer odoo-key<br/>X-Odoo-Url / X-Odoo-Db"| header
-    chatgpt -->|"Authorization: Bearer access-token"| oauth
-    header --> props
-    oauth --> props
-    props --> agent
-    agent -->|"POST /json/2/model/method"| odoo
-```
-
-Routing is per request: any `X-Odoo-*` header selects the BYO-key path; no
-headers means OAuth (see `src/index.ts`). Both paths build the identical `Props`
-shape, so the endpoint agents and every tool cannot tell them apart.
-
-The Worker serves four sibling MCP endpoints — `/mcp` (full tool surface),
-`/accounting/mcp`, `/projects/mcp`, and `/documents/mcp` (focused domain surfaces for clients with
-small tool budgets) — behind the **same** OAuth front door: one `/authorize`,
-one `/register`, one KV vault. Auth is identical everywhere; only the registered
-toolset differs. Tokens are not scoped to an endpoint (any grant works on any
-path), which is fine because every path resolves to the same user-supplied Odoo
-credentials and Odoo remains the authorization layer. The one per-endpoint cost:
-ChatGPT treats each path as a separate connector, so each connector runs its own
-authorize flow and stores its own grant.
-
-The Documents endpoint does not introduce a second credential plane. Its tools
-call explicit `usl.document.mcp_*` methods with the caller's Odoo key. Only Odoo
-holds the Paperless service token; Odoo record rules, selected companies,
-linked-record ACLs, and synchronized archive permissions are resolved before
-OCR or vector retrieval. The Worker receives only bounded governed results.
-
-## How the key reaches the server
-
-### Hosted HTTP (the Cloudflare Worker)
-
-The user's Odoo credentials arrive on **each request** via headers. Proposed
-contract:
-
-| Header                    | Value                              | Purpose                        |
-| ------------------------- | ---------------------------------- | ------------------------------ |
-| `Authorization`           | `Bearer <odoo-api-key>`            | The caller's Odoo API key      |
-| `X-Odoo-Url`              | `https://acme.odoo.com`            | The Odoo origin to call        |
-| `X-Odoo-Db`               | `acme-prod`                        | The Odoo database name         |
-
-The Worker reads these, builds a per-request `OdooClient`, and forwards to Odoo
-as:
-
-```
-POST https://acme.odoo.com/json/2/{model}/{method}
+```text
 Authorization: Bearer <odoo-api-key>
-X-Odoo-Database: acme-prod
+X-Odoo-Url: https://acme.odoo.com
+X-Odoo-Db: acme-prod
 ```
 
-Notes:
-- `Authorization: Bearer` is reused for the Odoo key because it is the header
-  MCP HTTP clients most reliably let you set, and it maps 1:1 onto what Odoo's
-  JSON-2 API itself expects. `X-Odoo-Url` / `X-Odoo-Db` are custom headers for
-  the two remaining pieces of connection info.
-- This contract is a **proposal** — if a target client can only set one custom
-  header, we can fold URL+db into a single structured header or into the
-  `Authorization` value. The header names above are the current default.
+Any `X-Odoo-*` header selects this path. All three values must be present and
+valid. Credentials arrive on each request, remain in memory, and are not stored
+in KV or Durable Object storage.
 
-### Local / stdio-style clients
+Before the MCP session can call arbitrary Odoo models/methods, it performs one
+fixed, bounded `res.users.fields_get` handshake through the origin coordinator.
+A successful tuple is cached for five minutes in that session. Failure returns
+a standard redacted diagnostic rather than an arbitrary internal response.
 
-For a client that launches `odoo-mcp` as a local process (stdio), the credentials
-come from the **environment / client config** (e.g. `.dev.vars` in dev, or the
-client's MCP server env block), not from an HTTP header. In this mode the key
-**never leaves the machine**.
+### OAuth compatibility shim
 
-## Security tradeoffs
+Clients unable to set static headers use authorization code + PKCE:
 
-- **Over HTTP**, the Odoo key transits the Worker **transiently** — it lives only
-  for the duration of the request, is used to construct the outbound Odoo call,
-  and is never persisted or logged. Because the Worker runs on the user's own
-  Cloudflare hosting (Unstatic Labs), this is an acceptable trust boundary: the
-  key passes through infrastructure the operator already controls, over TLS, and
-  is never written down.
-- **Over stdio**, the key never leaves the user's machine at all — strictly
-  better.
-- **Redaction:** the key (and any Odoo secrets) must be redacted from all logs
-  and error surfaces. Never echo the `Authorization` header or a raw Odoo key
-  into observability, tool output, or error messages.
-- **No persistence on the header path:** the server keeps no user store and
-  writes no credential to KV/D1/DO storage for header-authenticated requests.
-  The one exception is the ChatGPT OAuth shim below, which stores credentials
-  **encrypted** in KV because ChatGPT cannot send headers.
+1. The client discovers OAuth metadata and dynamically registers.
+2. `/authorize` shows a hosted form for Odoo origin, database, and API key.
+3. The Worker validates and normalizes the target, then performs the same fixed
+   Odoo credential call through the origin coordinator.
+4. `@cloudflare/workers-oauth-provider` stores encrypted grant props in
+   `OAUTH_KV` and issues access/refresh tokens.
+5. On MCP requests, the provider decrypts the grant into the same connection
+   props used by the header path.
 
-## The ChatGPT OAuth shim (implemented)
+Access tokens live one hour. Refresh grants live one year from initial
+authorization; client registrations live two years. Reauthorization is required
+after grant expiry or revocation.
 
-Claude clients (Claude Code, Claude desktop/web) can pass a static API-key
-header, so BYO-key works for them directly.
+## Authorization behavior
 
-ChatGPT's remote-connector UI (Settings → Apps & Connectors → Developer Mode)
-cannot set static headers — its auth model is OAuth-only. Since Odoo has no
-OAuth endpoint we can delegate to, the Worker now carries a **thin OAuth 2.1
-shim scoped to that path**: a credential vault behind an OAuth-shaped front
-door, built on
-[`@cloudflare/workers-oauth-provider`](https://github.com/cloudflare/workers-oauth-provider).
+- A read-only Odoo user remains read-only.
+- A record rule continues to hide or deny the same records.
+- An Odoo AI Agent identity remains subject to `usl_access_control` and cannot
+  perform actions classified as irreversible there.
+- A human identity with Irreversible Actions permission may exercise it through
+  the MCP.
+- An installation without the USL add-on behaves according to its own Odoo
+  policy.
 
-How it works:
+Focused endpoint membership is a usability choice, not an authorization
+boundary. Tokens are not endpoint-scoped; every endpoint calls Odoo using the
+same resolved user identity.
 
-1. ChatGPT discovers the server via `/.well-known/oauth-authorization-server`,
-   registers itself dynamically (`/register`, RFC 7591), and starts the
-   authorization-code + PKCE flow.
-2. `/authorize` is a hosted form (served by the Worker, no frontend build)
-   where the user pastes **their own** Odoo URL, database, and API key — the
-   same three values the header contract carries.
-3. The shim validates the credentials with a real lightweight Odoo call
-   (`res.users` `fields_get`) before accepting them; Odoo rejections fail the
-   flow with a clear, redacted error.
-4. On success the credentials become the grant's `props` and the standard code
-   exchange completes at `/token`. Access tokens expire after **1 hour**;
-   refresh tokens let ChatGPT renew silently for up to **1 year** after the
-   initial connect. That year is a hard wall, not a sliding window: the
-   provider fixes the grant's expiry at authorization time and never extends
-   it on refresh, so after it the client must re-run this flow. (Client
-   registrations from `/register` live 2 years so they outlast the grants
-   that reference them.)
-5. On each token-authenticated `/mcp` request, the provider resolves the token
-   back to the stored credentials and injects them as the **same `Props`
-   object** the header path builds. Everything downstream — `McpAgent`, every
-   tool — is identical and cannot tell the two auth paths apart.
+## Target validation
 
-Requests to `/mcp` that carry any `X-Odoo-*` header take the raw BYO-key path
-exactly as before; requests without them are treated as OAuth. Both paths
-coexist on the same endpoint.
+Both paths use the same validator:
 
-The one-time connect flow in full:
+- root HTTPS origin required in hosted use;
+- explicit local-development flag plus loopback required for HTTP;
+- URL credentials, paths, queries, fragments, malformed hosts, and the Worker's
+  own origin rejected;
+- database non-empty, at most 128 characters, and control-character free;
+- redirects refused for credential-bearing calls.
 
-```mermaid
-sequenceDiagram
-    participant G as ChatGPT
-    participant B as User's browser
-    participant W as Worker (OAuth shim)
-    participant O as User's Odoo
-    G->>W: /.well-known discovery, POST /register (DCR)
-    G->>B: open /authorize (code + PKCE)
-    B->>W: GET /authorize
-    W-->>B: hosted form (Odoo URL, db, API key)
-    B->>W: POST form
-    W->>O: res.users fields_get (validate credentials)
-    O-->>W: OK — on 401 the form re-renders, key never re-filled
-    W->>W: encrypt props into OAUTH_KV grant
-    W-->>B: redirect with authorization code
-    B-->>G: code returns to ChatGPT
-    G->>W: POST /token (code exchange)
-    W-->>G: access token (1 h) + refresh token (1 y, fixed at connect)
-```
+Arbitrary private/internal HTTPS origins are accepted by product decision. This
+means target risk is constrained rather than eliminated. Operators can impose a
+hostname policy or public-only Cloudflare routing if their deployment does not
+need private Odoo instances.
 
-### Stored-credential security
+## Credential storage and redaction
 
-The OAuth path is the *only* place `odoo-mcp` persists a credential, and it is
-never stored in plaintext:
+Header credentials are never persisted. OAuth grant props are encrypted by the
+provider in KV; token secrets are stored as hashes. Plaintext credentials exist
+only while processing the authorization form or an authenticated call.
 
-- **Encryption at rest:** `workers-oauth-provider` end-to-end encrypts grant
-  `props` (the Odoo URL/db/key) in the `OAUTH_KV` namespace. The AES key
-  material is wrapped by the access/refresh token itself, so the stored blob
-  can only be decrypted by a request that presents the actual token — neither
-  a KV dump nor the Worker at rest can recover the key. Token secrets
-  themselves are stored only as hashes.
-- **Scope discipline:** one grant maps to exactly one Odoo credential set.
-  There is still no user store, no scopes/permissions model, no session system
-  — Odoo's per-user permissions remain the entire authorization layer.
-- **Redaction:** the plaintext key exists only inside the `/authorize` form
-  POST → validation call → grant creation. It is never logged, echoed into
-  error pages, or re-filled into the form after a failed attempt.
-- **Revocation:** delete the grant from KV and the tokens die with it (their
-  decryption key material is gone). Manual path:
-  `npx wrangler kv key list --binding OAUTH_KV --remote --prefix grant:` then
-  `npx wrangler kv key delete --binding OAUTH_KV --remote "<grant key>"`.
-  Programmatic path: `env.OAUTH_PROVIDER.listGrants(userId)` /
-  `revokeGrant(grantId)`. Re-authorizing from ChatGPT also revokes prior
-  grants for the same user+client automatically.
+The implementation does not log authorization headers, Odoo API keys, request
+bodies, or response bodies. Error details scrub bearer tokens and Odoo-key-like
+values. The origin coordinator stores nothing and retains a `Request` only while
+it is queued or in flight.
 
-## Rejected alternative: one service account + OAuth scopes
+## Revocation
 
-The alternative we considered and rejected was:
+Revoking the Odoo API key invalidates both paths at Odoo. For OAuth, deleting the
+grant from `OAUTH_KV` also makes outstanding tokens unusable because their grant
+props can no longer be recovered. Reconnect the client to establish a new grant
+or refresh the Odoo target/database/key.
 
-- One **restricted Odoo service account** shared by all users.
-- **OAuth with scopes** in `odoo-mcp` deciding who may call which tools.
+## Rejected design: service account plus MCP scopes
 
-Why BYO-key won:
-
-- **Simpler.** No user store, no scope definitions, no consent screens, no OAuth
-  provider to run and secure for v1.
-- **Stateless.** Nothing to persist; the server is a pure pass-through.
-- **Odoo enforces per-user authz.** With a shared service account we would have
-  to *re-implement* Odoo's permission model as scopes and keep it in sync forever
-  — a second, weaker copy of authorization that would inevitably drift from
-  Odoo's real record-rules. BYO-key reuses the real thing.
-- **Least privilege for free.** Each caller acts as exactly themselves; there is
-  no over-privileged shared account whose key, if leaked, exposes everyone's
-  data.
-
-The only thing the service-account approach bought was a single credential to
-manage — which is precisely the thing that made it a weaker security and
-maintenance story. BYO-key trades that away deliberately.
+A shared Odoo service identity would require the MCP to recreate Odoo's evolving
+authorization and company rules. That duplicated policy would drift and create
+an over-privileged credential. Per-user credentials reuse the actual Odoo
+authority and preserve ordinary audit attribution.

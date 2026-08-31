@@ -2,33 +2,30 @@ export interface CuratedAction {
   method: string;
   label?: string;
   confirm?: string;
-  /** Optional hint for discovery honesty; runtime executability comes from lifecycle-allowlist. */
-  risk_hint?: "reversible_lifecycle" | "irreversible_posting" | "irreversible_payment" | "destructive";
 }
 
 /**
- * Curated action methods aligned with the connector reversible-lifecycle allowlist
- * (`src/lifecycle-allowlist.ts`) plus known high-risk methods for discovery honesty.
- * Discovery ≠ execution — see `list_model_actions` `executable` annotation.
+ * Supplementary UI workflow hints used when authenticated API documentation is
+ * absent or incomplete. Odoo decides whether every method is callable.
  */
 export const CURATED_MODEL_ACTIONS: Record<string, CuratedAction[]> = {
   "account.move": [
-    { method: "action_post", risk_hint: "irreversible_posting" },
-    { method: "button_draft", risk_hint: "reversible_lifecycle" },
-    { method: "button_cancel", risk_hint: "destructive" }
+    { method: "action_post" },
+    { method: "button_draft" },
+    { method: "button_cancel" }
   ],
   "hr.expense": [
-    { method: "action_reset", risk_hint: "reversible_lifecycle" },
-    { method: "action_submit", risk_hint: "reversible_lifecycle" },
-    { method: "action_approve", risk_hint: "reversible_lifecycle" },
-    { method: "action_post", risk_hint: "irreversible_posting" },
-    { method: "action_pay", risk_hint: "irreversible_payment" }
+    { method: "action_reset" },
+    { method: "action_submit" },
+    { method: "action_approve" },
+    { method: "action_post" },
+    { method: "action_pay" }
   ],
   "hr.expense.sheet": [
     // Pre-Odoo-19 only — sheet model removed in 19 ("Bye Bye reports").
-    { method: "action_submit_sheet", risk_hint: "reversible_lifecycle" },
-    { method: "action_approve_expense_sheets", risk_hint: "reversible_lifecycle" },
-    { method: "action_reset_expense_sheets", risk_hint: "reversible_lifecycle" }
+    { method: "action_submit_sheet" },
+    { method: "action_approve_expense_sheets" },
+    { method: "action_reset_expense_sheets" }
   ],
   "sale.order": [
     { method: "action_confirm" },
@@ -40,8 +37,8 @@ export const CURATED_MODEL_ACTIONS: Record<string, CuratedAction[]> = {
     { method: "button_draft" }
   ],
   "account.payment": [
-    { method: "action_post", risk_hint: "irreversible_payment" },
-    { method: "action_draft", risk_hint: "irreversible_payment" },
-    { method: "action_cancel", risk_hint: "destructive" }
+    { method: "action_post" },
+    { method: "action_draft" },
+    { method: "action_cancel" }
   ]
 };

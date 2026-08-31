@@ -2,7 +2,8 @@ import { describe, expect, mock, test } from "bun:test";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { TtlCache } from "../cache";
 import type { OdooQueue } from "../odoo-queue";
-import { SERVER_VERSION } from "../server";
+import { SERVER_VERSION } from "../version";
+import { withTestMutationScope } from "../test-odoo-queue";
 import {
   buildFeedbackDescriptionHtml,
   feedbackTagIds,
@@ -29,7 +30,7 @@ type ToolResult = { isError?: boolean; content: { text: string }[]; structuredCo
 
 function dispatchQueue(responder: (model: string, method: string, args: Record<string, unknown>) => unknown): OdooQueue {
   const enqueue = mock(async (...a: unknown[]) => responder(a[1] as string, a[2] as string, a[3] as Record<string, unknown>));
-  return { enqueue } as unknown as OdooQueue;
+  return withTestMutationScope({ enqueue });
 }
 
 function buildFeedbackHandler(queue: OdooQueue, cache?: TtlCache) {
@@ -161,10 +162,11 @@ describe("feedback.submit", () => {
     const result = await handler({ ...validInput, tool_name: "search_records" });
 
     expect(result.isError).toBeUndefined();
-    expect(result.structuredContent).toEqual({
+    expect(result.structuredContent).toEqual(expect.objectContaining({
       task_id: 4242,
       url: `http://example.com/odoo/project/${FEEDBACK_PROJECT_ID}/tasks/4242`
-    });
+    }));
+    expect(result.structuredContent?.execution).toEqual(expect.objectContaining({ outcome: "succeeded" }));
 
     expect(calls.length).toBe(3);
     expect(calls[0].model).toBe("project.task.type");

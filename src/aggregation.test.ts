@@ -14,7 +14,7 @@ mock.module("agents/mcp", () => {
   };
 });
 mock.module("agents", () => ({}));
-mock.module("cloudflare:workers", () => ({ WorkerEntrypoint: class WorkerEntrypoint {} }));
+mock.module("cloudflare:workers", () => ({ WorkerEntrypoint: class WorkerEntrypoint {}, DurableObject: class DurableObject {} }));
 
 import {
   parseGroupbyToken,
