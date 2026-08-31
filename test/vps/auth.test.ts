@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -75,6 +75,16 @@ describe("OAuth credential vault", () => {
     });
     vault.close();
     expect(readFileSync(config.oauth!.databasePath).includes(Buffer.from(apiKey))).toBe(false);
+  });
+
+  it("repairs restrictive modes on the vault directory and SQLite files", () => {
+    const config = oauthConfiguration();
+    chmodSync(join(config.oauth!.databasePath, ".."), 0o755);
+    writeFileSync(config.oauth!.databasePath, "", { mode: 0o644 });
+    const vault = new CredentialVault(config.oauth!, config);
+    expect(statSync(join(config.oauth!.databasePath, "..")).mode & 0o777).toBe(0o700);
+    expect(statSync(config.oauth!.databasePath).mode & 0o777).toBe(0o600);
+    vault.close();
   });
 
   it("makes enrollment revocation authoritative for existing bearer claims", () => {
