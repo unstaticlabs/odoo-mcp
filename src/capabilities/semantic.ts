@@ -111,6 +111,8 @@ async function recordMessages(
   }, { signal });
 }
 
+const DOCUMENT_LINK_MODULE = "usl_documents";
+
 async function optionalDocumentLinks(
   client: OdooClient,
   context: RequestContext,
@@ -119,6 +121,9 @@ async function optionalDocumentLinks(
   common: Record<string, unknown>,
   signal: AbortSignal
 ): Promise<{ records: unknown[]; warning?: string }> {
+  if (context.availableModules && !context.availableModules.has(DOCUMENT_LINK_MODULE)) {
+    return { records: [] };
+  }
   try {
     const records = await client.call<unknown[]>(context, "usl.document.link", "search_read", {
       domain: [["res_model", "=", model], ["res_id", "=", id], ["active", "=", true]],

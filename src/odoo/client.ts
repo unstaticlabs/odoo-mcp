@@ -207,11 +207,12 @@ export class OdooClient {
           );
           const text = await boundedText(response, responseBytes, model, method);
           let payload: unknown = null;
+          let unparsable = false;
           if (text) {
             try {
               payload = JSON.parse(text) as unknown;
             } catch {
-              throw new OdooError("Odoo returned invalid JSON", "odoo_server_error", response.status, model, method, false, kind === "mutation" ? "unknown" : "not_applied");
+              unparsable = true;
             }
           }
           if (!response.ok) {
@@ -232,6 +233,17 @@ export class OdooClient {
               retryable,
               kind === "mutation" && !structuredOdooError && response.status >= 500 ? "unknown" : "not_applied",
               detail
+            );
+          }
+          if (unparsable) {
+            throw new OdooError(
+              "Odoo returned invalid JSON",
+              "odoo_server_error",
+              response.status,
+              model,
+              method,
+              false,
+              kind === "mutation" ? "unknown" : "not_applied"
             );
           }
           emitEvent("odoo.call.completed", {

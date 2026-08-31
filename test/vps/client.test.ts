@@ -41,6 +41,40 @@ describe("JSON-2 adapter", () => {
     expect(calls).toBe(1);
   });
 
+  it("keeps the HTTP status when an error response is not JSON", async () => {
+    const fetcher = async (): Promise<Response> => new Response("<html>Not Found</html>", { status: 404 });
+    const client = new OdooClient(8, 1024, fetcher as typeof fetch);
+    await expect(client.call(requestContext(), "usl.document.link", "search_read", { domain: [] }))
+      .rejects.toMatchObject<Partial<OdooError>>({
+        code: "model_or_method_not_found",
+        httpStatus: 404
+      });
+  });
+
+  it("retries a read when a transient error page is not JSON", async () => {
+    let calls = 0;
+    const fetcher = async (): Promise<Response> => {
+      calls++;
+      return calls === 1
+        ? new Response("<html>502 Bad Gateway</html>", { status: 502 })
+        : new Response(JSON.stringify([{ id: 7 }]), { status: 200 });
+    };
+    const client = new OdooClient(8, 1024, fetcher as typeof fetch);
+    const result = await client.call(requestContext(), "res.partner", "search_read", { domain: [] });
+    expect(result).toEqual([{ id: 7 }]);
+    expect(calls).toBe(2);
+  });
+
+  it("reports invalid JSON only when the response succeeded", async () => {
+    const fetcher = async (): Promise<Response> => new Response("<html>surprise</html>", { status: 200 });
+    const client = new OdooClient(8, 1024, fetcher as typeof fetch);
+    await expect(client.call(requestContext(), "res.partner", "search_read", { domain: [] }))
+      .rejects.toMatchObject<Partial<OdooError>>({
+        code: "odoo_server_error",
+        message: "Odoo returned invalid JSON"
+      });
+  });
+
   it("rejects oversized responses before parsing them", async () => {
     const fetcher = async (): Promise<Response> => new Response("x".repeat(100), {
       status: 200,

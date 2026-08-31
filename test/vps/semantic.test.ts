@@ -263,4 +263,36 @@ describe("Distribution semantic and business capabilities", () => {
     expect(serialized).not.toContain("download_path");
     expect(serialized).not.toContain("paperless_url");
   });
+  it("skips document links when the Distribution documents module is absent", async () => {
+    const models: string[] = [];
+    const fetcher = vi.fn<typeof fetch>(async (input) => {
+      const model = decodeURIComponent(String(input).split("/json/2/")[1]!.split("/")[0]!);
+      models.push(model);
+      if (model === "project.task") return Response.json([{ id: 42, display_name: "Card 42" }]);
+      return Response.json([]);
+    });
+    const modules = new Set(["base", "api_doc", "mail", "project"]);
+    const server = createCapabilityRegistry(new OdooClient(8, 1024 * 1024, fetcher)).createServer({
+      ...requestContext(),
+      profile: "projects",
+      availableModules: modules
+    });
+    const client = new Client({ name: "task-context-test", version: "1.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    closeCallbacks.push(async () => {
+      await client.close();
+      await server.close();
+    });
+
+    const result = await client.callTool({
+      name: "projects_get_task_context",
+      arguments: { task_id: 42, context: {} }
+    });
+
+    expect(result.isError).not.toBe(true);
+    expect(models).not.toContain("usl.document.link");
+    expect(JSON.stringify(result.structuredContent)).not.toContain("Document links were unavailable");
+  });
 });
