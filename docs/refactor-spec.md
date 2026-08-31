@@ -63,7 +63,7 @@ Visibility and authorization remain independent. Profiles optimize context and t
 
 ## Capability registry and profiles
 
-Each capability declares a stable identifier, snake_case tool name, layer, multiple toolsets, profiles, effect classification, MCP annotations, strict input/output schemas, required modules, availability predicate, retrieval keywords, sort key, and schema-token estimate. The registry validates uniqueness, naming, metadata, deterministic ordering, profile budgets, and effect/annotation consistency.
+Each capability declares a stable identifier, snake_case tool name, layer, multiple toolsets, profiles, effect classification, MCP annotations, strict input/output schemas, required modules, required public methods, required runtime features, availability predicate, retrieval keywords, sort key, and schema-token estimate. Per-identity `/doc-bearer` discovery controls whether backend-dependent tools are visible; an explicit runtime feature flag additionally gates staged integrations. The registry validates uniqueness, naming, metadata, deterministic ordering, profile budgets, and effect/annotation consistency.
 
 Profiles are views over the same registry:
 
@@ -96,7 +96,7 @@ The five recommended non-deferred tools are `odoo_search_capabilities`, `odoo_se
 | `odoo_delete_records` | Advanced `unlink` in one transaction |
 | `odoo_call_method` | Advanced public JSON-2 method invocation |
 
-Every returned record includes a stable `{model, id, display_name, url}` reference. Inputs use strict schemas, bounded domains/JSON, explicit field selection, and cursor pagination. Responses provide structured content plus a concise text representation for older clients. Errors use stable codes, a redacted explanation, recoverability, and an actionable next step.
+Every returned record includes a stable `{model, id, display_name, url}` reference. Inputs use strict schemas, bounded domains/JSON, explicit field selection, and cursor pagination. Responses provide structured content plus a concise text representation for older clients. Errors use stable codes, a redacted explanation, recoverability, and an actionable next step. Mutation failures distinguish request rejection, ambiguous completion, and post-success response processing. Unknown outcomes explicitly prohibit blind retries, report request/response/result evidence as `yes`, `no`, or `unknown`, preserve sanitized known record or grant identifiers, and give a reconciliation read plus minimal-correction guidance.
 
 `odoo_call_method` is preserved intentionally. It accepts a validated model and public method, optional 1-100 IDs, named kwargs, and bounded context. The argument body is limited to 256 KiB, eight nesting levels, and 200 object keys. It has no MCP allowlist or heuristic effect classifier; `/doc-bearer` inspection is recommended but is not a prerequisite. Odoo's public dispatcher and the selected identity are authoritative. The MCP attempts the call once, never claims generic idempotency, and reports interrupted completion as `outcome: unknown`.
 

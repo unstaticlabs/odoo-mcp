@@ -54,6 +54,34 @@ describe("fixed-intent operational capabilities", () => {
     });
   });
 
+  it("returns the created receipt identity when the follow-up read fails", async () => {
+    const fetcher = vi.fn<typeof fetch>(async (url) => String(url).endsWith("/create")
+      ? Response.json(91)
+      : new Response(JSON.stringify({ error: { message: "temporarily unavailable" } }), { status: 503 }));
+    const client = await connected(fetcher);
+    const result = await client.callTool({
+      name: "inventory_create_draft_vendor_receipt",
+      arguments: {
+        partner_id: 1,
+        picking_type_id: 2,
+        location_id: 3,
+        location_dest_id: 4,
+        scheduled_date: "2026-08-30T10:15:00+02:00",
+        lines: [{ product_id: 5, product_uom_id: 6, quantity: 2 }],
+        dry_run: false,
+        context: {}
+      }
+    });
+    expect(result.isError).not.toBe(true);
+    expect(fetcher.mock.calls.filter(([url]) => String(url).endsWith("/create"))).toHaveLength(1);
+    expect(result.structuredContent).toMatchObject({
+      data: {
+        record: { model: "stock.picking", id: 91 },
+        warnings: [expect.stringContaining("do not create another receipt")]
+      }
+    });
+  });
+
   it("runs an expense transition as one non-retried Odoo method call", async () => {
     const fetcher = vi.fn<typeof fetch>(async (url) => String(url).endsWith("/action_submit")
       ? Response.json(true)

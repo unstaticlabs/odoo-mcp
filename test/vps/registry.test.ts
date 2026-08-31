@@ -74,11 +74,33 @@ describe("canonical capability registry", () => {
   it("omits capabilities whose Distribution modules are known to be unavailable", () => {
     const registry = createCapabilityRegistry(new OdooClient());
     const modules = new Set(["base", "api_doc", "mail", "project"]);
-    const names = registry.list("all", modules).map((item) => item.name);
+    const names = registry.list("all", { modules }).map((item) => item.name);
     expect(names).toContain("odoo_search_models");
     expect(names).toContain("projects_get_task_context");
     expect(names).not.toContain("documents_search");
     expect(names).not.toContain("expense_batches_post");
+  });
+
+  it("hides backend-dependent tools until their methods and feature flag are both available", () => {
+    const registry = createCapabilityRegistry(new OdooClient());
+    const modules = new Set(["base", "api_doc", "mail", "usl_documents"]);
+    const withoutMethods = registry.list("documents", { modules, publicMethods: null })
+      .map((item) => item.name);
+    expect(withoutMethods).not.toContain("documents_create_download_url");
+
+    const publicMethods = new Map([
+      ["usl.document", new Set(["mcp_create_download_grant", "mcp_revoke_download_grant"])]
+    ]);
+    expect(registry.list("documents", { modules, publicMethods, enabledFeatures: new Set() })
+      .map((item) => item.name)).not.toContain("documents_create_download_url");
+    expect(registry.list("documents", {
+      modules,
+      publicMethods,
+      enabledFeatures: new Set(["document_materialization"])
+    }).map((item) => item.name)).toEqual(expect.arrayContaining([
+      "documents_create_download_url",
+      "documents_revoke_download_url"
+    ]));
   });
 
   it("registers valid MCP v2 schemas and structured tool metadata", async () => {

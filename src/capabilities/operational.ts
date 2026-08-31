@@ -132,18 +132,29 @@ export function registerOperationalCapabilities(registry: CapabilityRegistry, cl
         ...(input.date_deadline ? { date_deadline: input.date_deadline } : {}),
         ...(input.company_id ? { company_id: input.company_id } : {})
       };
-      const result = await client.call<unknown>(context, "project.task", "create", {
+      const receipt = await client.call<unknown>(context, "project.task", "create", {
         vals_list: [values], context: rpcContext(input.context, context)
-      }, { kind: "mutation", signal });
-      const id = createdId(result);
-      return {
-        data: {
-          result,
-          correlation_id: context.correlationId,
-          outcome: "succeeded" as const,
-          record: recordRef(context, "project.task", id, input.name)
+      }, {
+        kind: "mutation",
+        signal,
+        reconciliation: {
+          targetModel: "project.task",
+          fields: ["name", "project_id", "stage_id", "user_ids", "date_deadline"],
+          suggestedTool: "odoo_search_records",
+          instructions: "Search project.task using the original project_id and task name. If exactly one matching task exists, read it and patch only missing fields; do not create another task."
         }
-      };
+      });
+      return receipt.finalize((result) => {
+        const id = createdId(result);
+        return {
+          data: {
+            result,
+            correlation_id: context.correlationId,
+            outcome: "succeeded" as const,
+            record: recordRef(context, "project.task", id, input.name)
+          }
+        };
+      }, (result) => ({ knownIds: [createdId(result)] }));
     }
   }));
 
@@ -179,19 +190,30 @@ export function registerOperationalCapabilities(registry: CapabilityRegistry, cl
         ids: [task_id], fields: ["id", "display_name"], context: common
       }, { signal });
       if (!tasks[0]) throw new Error(`project.task,${task_id} was not found or is not readable`);
-      const result = await client.call<unknown>(context, "ir.attachment", "create", {
+      const receipt = await client.call<unknown>(context, "ir.attachment", "create", {
         vals_list: [{ name, type: "binary", datas: payload.normalized, mimetype, res_model: "project.task", res_id: task_id }],
         context: common
-      }, { kind: "mutation", signal });
-      const id = createdId(result);
-      return {
-        data: {
-          result: { attachment_id: id, task_id, name, mimetype, file_size: payload.bytes },
-          correlation_id: context.correlationId,
-          outcome: "succeeded" as const,
-          record: recordRef(context, "project.task", task_id)
+      }, {
+        kind: "mutation",
+        signal,
+        reconciliation: {
+          targetModel: "ir.attachment",
+          fields: ["name", "res_model", "res_id", "mimetype", "file_size"],
+          suggestedTool: "odoo_search_records",
+          instructions: "Search ir.attachment by the original task, filename, and MIME type. Compare file_size before uploading the attachment again."
         }
-      };
+      });
+      return receipt.finalize((result) => {
+        const id = createdId(result);
+        return {
+          data: {
+            result: { attachment_id: id, task_id, name, mimetype, file_size: payload.bytes },
+            correlation_id: context.correlationId,
+            outcome: "succeeded" as const,
+            record: recordRef(context, "project.task", task_id)
+          }
+        };
+      }, (result) => ({ knownIds: [createdId(result)] }));
     }
   }));
 
@@ -224,7 +246,7 @@ export function registerOperationalCapabilities(registry: CapabilityRegistry, cl
     }).strict(),
     output: ActionOutputSchema,
     async handler(input, context, signal) {
-      const result = await client.call<unknown>(context, input.model, "activity_schedule", {
+      const receipt = await client.call<unknown>(context, input.model, "activity_schedule", {
         ids: [input.id],
         activity_type_id: input.activity_type_id,
         user_id: input.user_id,
@@ -232,15 +254,25 @@ export function registerOperationalCapabilities(registry: CapabilityRegistry, cl
         ...(input.note !== undefined ? { note: input.note_is_html ? input.note : plaintextToHtml(input.note) } : {}),
         ...(input.date_deadline ? { date_deadline: input.date_deadline } : {}),
         context: rpcContext(input.context, context)
-      }, { kind: "mutation", signal });
-      return {
+      }, {
+        kind: "mutation",
+        signal,
+        reconciliation: {
+          targetModel: input.model,
+          knownIds: [input.id],
+          fields: ["activity_ids"],
+          suggestedTool: "odoo_read_records",
+          instructions: "Read the record's activities and match the original activity type, assignee, summary, and deadline before scheduling another activity."
+        }
+      });
+      return receipt.finalize((result) => ({
         data: {
           result,
           correlation_id: context.correlationId,
           outcome: "succeeded" as const,
           record: recordRef(context, input.model, input.id)
         }
-      };
+      }));
     }
   }));
 
@@ -339,6 +371,7 @@ export function registerOperationalCapabilities(registry: CapabilityRegistry, cl
       }, { signal });
       if (!before[0]) throw new Error(`hr.expense,${input.expense_id} was not found or is not readable`);
       if (before[0].state !== "draft") throw new Error(`hr.expense,${input.expense_id} must be draft before preparatory fields can be changed`);
+      const displayName = String(before[0].display_name ?? "");
       const values = {
         ...(input.name !== undefined ? { name: input.name } : {}),
         ...(input.description !== undefined ? { description: input.description } : {}),
@@ -354,17 +387,27 @@ export function registerOperationalCapabilities(registry: CapabilityRegistry, cl
         ...(input.payment_mode !== undefined ? { payment_mode: input.payment_mode } : {})
       };
       if (Object.keys(values).length === 0) throw new Error("Supply at least one draft expense field to update");
-      const result = await client.call<unknown>(context, "hr.expense", "write", {
+      const receipt = await client.call<unknown>(context, "hr.expense", "write", {
         ids: [input.expense_id], vals: values, context: common
-      }, { kind: "mutation", signal });
-      return {
+      }, {
+        kind: "mutation",
+        signal,
+        reconciliation: {
+          targetModel: "hr.expense",
+          knownIds: [input.expense_id],
+          fields: Object.keys(values),
+          suggestedTool: "odoo_read_records",
+          instructions: "Read the changed expense fields and compare them with the original patch. Preserve matching values and patch only fields that remain different."
+        }
+      });
+      return receipt.finalize((result) => ({
         data: {
           result,
           correlation_id: context.correlationId,
           outcome: "succeeded" as const,
-          record: recordRef(context, "hr.expense", input.expense_id, String(before[0].display_name ?? ""))
+          record: recordRef(context, "hr.expense", input.expense_id, displayName)
         }
-      };
+      }));
     }
   }));
 
@@ -408,6 +451,7 @@ export function registerOperationalCapabilities(registry: CapabilityRegistry, cl
       if (before[0].state !== "draft" || !["in_invoice", "in_refund", "in_receipt"].includes(String(before[0].move_type))) {
         throw new Error(`account.move,${input.bill_id} must be a draft vendor bill, refund, or receipt`);
       }
+      const displayName = String(before[0].display_name ?? "");
       const values = {
         ...(input.partner_id !== undefined ? { partner_id: input.partner_id } : {}),
         ...(input.invoice_date !== undefined ? { invoice_date: input.invoice_date } : {}),
@@ -421,17 +465,27 @@ export function registerOperationalCapabilities(registry: CapabilityRegistry, cl
         ...(input.review_state !== undefined ? { review_state: input.review_state } : {})
       };
       if (Object.keys(values).length === 0) throw new Error("Supply at least one draft vendor bill field to update");
-      const result = await client.call<unknown>(context, "account.move", "write", {
+      const receipt = await client.call<unknown>(context, "account.move", "write", {
         ids: [input.bill_id], vals: values, context: common
-      }, { kind: "mutation", signal });
-      return {
+      }, {
+        kind: "mutation",
+        signal,
+        reconciliation: {
+          targetModel: "account.move",
+          knownIds: [input.bill_id],
+          fields: Object.keys(values),
+          suggestedTool: "odoo_read_records",
+          instructions: "Read the changed draft bill fields and compare them with the original patch. Preserve matching values and patch only fields that remain different."
+        }
+      });
+      return receipt.finalize((result) => ({
         data: {
           result,
           correlation_id: context.correlationId,
           outcome: "succeeded" as const,
-          record: recordRef(context, "account.move", input.bill_id, String(before[0].display_name ?? ""))
+          record: recordRef(context, "account.move", input.bill_id, displayName)
         }
-      };
+      }));
     }
   }));
 
@@ -461,37 +515,59 @@ export function registerOperationalCapabilities(registry: CapabilityRegistry, cl
       output: ActionOutputSchema,
       async handler({ expense_ids, context: requestedContext }, context, signal) {
         const common = rpcContext(requestedContext, context);
-        const result = await client.call<unknown>(context, "hr.expense", action.method, {
+        const receipt = await client.call<unknown>(context, "hr.expense", action.method, {
           ids: expense_ids, context: common
-        }, { kind: "mutation", signal });
-        const warnings: string[] = [];
-        let observed: Record<string, unknown>[] = [];
-        let outcome: "succeeded" | "requires_follow_up" | "unknown" = "succeeded";
-        try {
-          observed = await client.call<Record<string, unknown>[]>(context, "hr.expense", "read", {
-            ids: expense_ids, fields: ["id", "display_name", "state"], context: common
-          }, { signal });
-          const unexpected = observed.filter((record) => !action.expectedStates.includes(String(record.state)));
-          if (unexpected.length > 0) {
+        }, {
+          kind: "mutation",
+          signal,
+          reconciliation: {
+            targetModel: "hr.expense",
+            knownIds: expense_ids,
+            fields: ["state"],
+            suggestedTool: "odoo_read_records",
+            instructions: `Read each expense state. Repeat ${action.method} only for records whose current state proves the transition did not apply; otherwise continue from the observed state.`
+          }
+        });
+        return receipt.finalize(async (result) => {
+          const warnings: string[] = [];
+          let observed: Record<string, unknown>[] = [];
+          let outcome: "succeeded" | "requires_follow_up" | "unknown" = "succeeded";
+          const methodResult = result && typeof result === "object" && !Array.isArray(result)
+            ? result as Record<string, unknown>
+            : null;
+          const requiresWizard = methodResult?.type === "ir.actions.act_window";
+          if (requiresWizard) {
             outcome = "requires_follow_up";
             warnings.push(
-              `Odoo completed ${action.method}, but ${unexpected.map((record) => `hr.expense,${String(record.id)}=${String(record.state)}`).join(", ")} did not reach ${action.expectedStates.join(" or ")}. Inspect the returned method result; Odoo may require a follow-up wizard or validation decision.`
+              `Odoo returned a follow-up wizard for ${action.method}. Inspect the method result and current expense states; do not assume the transition completed or repeat it blindly.`
             );
           }
-        } catch (error) {
-          outcome = "unknown";
-          warnings.push(
-            `Odoo completed ${action.method}, but the resulting expense states could not be read: ${error instanceof Error ? error.message : String(error)}`
-          );
-        }
-        return {
-          data: {
-            result: { method_result: result, observed },
-            correlation_id: context.correlationId,
-            outcome
-          },
-          ...(warnings.length ? { warnings } : {})
-        };
+          try {
+            observed = await client.call<Record<string, unknown>[]>(context, "hr.expense", "read", {
+              ids: expense_ids, fields: ["id", "display_name", "state"], context: common
+            }, { signal });
+            const unexpected = observed.filter((record) => !action.expectedStates.includes(String(record.state)));
+            if (unexpected.length > 0 && !requiresWizard) {
+              outcome = "requires_follow_up";
+              warnings.push(
+                `Odoo returned success for ${action.method}, but ${unexpected.map((record) => `hr.expense,${String(record.id)}=${String(record.state)}`).join(", ")} did not reach ${action.expectedStates.join(" or ")}. Inspect these current states and the method result before deciding the next transition.`
+              );
+            }
+          } catch (error) {
+            outcome = "unknown";
+            warnings.push(
+              `Odoo returned success for ${action.method}, but the final expense states could not be read: ${error instanceof Error ? error.message : String(error)}. Read these expense IDs before retrying; keep applied transitions and retry only records proven unchanged.`
+            );
+          }
+          return {
+            data: {
+              result: { method_result: result, observed },
+              correlation_id: context.correlationId,
+              outcome
+            },
+            ...(warnings.length ? { warnings } : {})
+          };
+        });
       }
     }));
   }
@@ -563,28 +639,48 @@ export function registerOperationalCapabilities(registry: CapabilityRegistry, cl
         return { data: { dry_run: true, planned_values: plannedValues, warnings: [], correlation_id: context.correlationId } };
       }
       const common = rpcContext(input.context, context);
-      const result = await client.call<unknown>(context, "stock.picking", "create", {
+      const receipt = await client.call<unknown>(context, "stock.picking", "create", {
         vals_list: [plannedValues], context: common
-      }, { kind: "mutation", signal });
-      const id = createdId(result);
-      const rows = await client.call<Record<string, unknown>[]>(context, "stock.picking", "read", {
-        ids: [id], fields: ["id", "display_name", "state", "picking_type_code", "move_ids"], context: common
-      }, { signal });
-      const state = typeof rows[0]?.state === "string" ? rows[0].state : undefined;
-      const warnings = state && !["draft", "waiting", "confirmed", "assigned"].includes(state)
-        ? [`The receipt was created but Odoo reports state=${state}; inspect it before continuing.`]
-        : [];
-      return {
-        data: {
-          dry_run: false,
-          planned_values: plannedValues,
-          result,
-          record: recordRef(context, "stock.picking", id, String(rows[0]?.display_name ?? "")),
-          ...(state ? { observed_state: state } : {}),
-          warnings,
-          correlation_id: context.correlationId
+      }, {
+        kind: "mutation",
+        signal,
+        reconciliation: {
+          targetModel: "stock.picking",
+          fields: ["partner_id", "picking_type_id", "location_id", "location_dest_id", "scheduled_date", "origin", "state", "move_ids"],
+          suggestedTool: "odoo_search_records",
+          instructions: "Search incoming pickings with the original partner, operation type, locations, scheduled date, and origin. If a matching picking exists, read its moves and continue with that record instead of creating another receipt."
         }
-      };
+      });
+      return receipt.finalize(async (result) => {
+        const id = createdId(result);
+        let rows: Record<string, unknown>[] = [];
+        const warnings: string[] = [];
+        try {
+          rows = await client.call<Record<string, unknown>[]>(context, "stock.picking", "read", {
+            ids: [id], fields: ["id", "display_name", "state", "picking_type_code", "move_ids"], context: common
+          }, { signal });
+          if (!rows[0]) {
+            warnings.push(`Odoo created stock.picking,${id}, but the follow-up read returned no row. Fetch that exact picking before any further action; do not create another receipt.`);
+          }
+        } catch (error) {
+          warnings.push(`Odoo created stock.picking,${id}, but its current state could not be read: ${error instanceof Error ? error.message : String(error)}. Fetch that exact picking before any further action; do not create another receipt.`);
+        }
+        const state = typeof rows[0]?.state === "string" ? rows[0].state : undefined;
+        if (state && !["draft", "waiting", "confirmed", "assigned"].includes(state)) {
+          warnings.push(`The receipt was created, but Odoo reports state=${state}; inspect it before continuing.`);
+        }
+        return {
+          data: {
+            dry_run: false,
+            planned_values: plannedValues,
+            result,
+            record: recordRef(context, "stock.picking", id, String(rows[0]?.display_name ?? "")),
+            ...(state ? { observed_state: state } : {}),
+            warnings,
+            correlation_id: context.correlationId
+          }
+        };
+      }, (result) => ({ knownIds: [createdId(result)] }));
     }
   }));
 }

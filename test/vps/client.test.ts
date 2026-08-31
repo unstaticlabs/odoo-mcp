@@ -33,12 +33,90 @@ describe("JSON-2 adapter", () => {
     const call = client.call(requestContext(), "project.task", "write", {
       ids: [1],
       vals: { name: "Changed" }
-    }, { kind: "mutation" });
+    }, {
+      kind: "mutation",
+      reconciliation: {
+        suggestedTool: "odoo_read_records",
+        targetModel: "project.task",
+        knownIds: [1],
+        fields: ["name"],
+        instructions: "Read task 1 and compare its name before deciding whether to retry."
+      }
+    });
     await expect(call).rejects.toMatchObject<Partial<OdooError>>({
       code: "odoo_server_error",
       mutationOutcome: "unknown"
     });
     expect(calls).toBe(1);
+  });
+
+  it("preserves successful mutation evidence when result validation fails", async () => {
+    const fetcher = async (): Promise<Response> => Response.json({ id: 91 });
+    const client = new OdooClient(8, 1024, fetcher as typeof fetch);
+    const receipt = await client.call<{ id: number }>(requestContext(), "stock.picking", "create", {
+      vals_list: [{}]
+    }, {
+      kind: "mutation",
+      reconciliation: {
+        suggestedTool: "odoo_read_records",
+        targetModel: "stock.picking",
+        instructions: "Read the returned picking before creating another receipt."
+      }
+    });
+
+    await expect(receipt.finalize(() => {
+      throw new Error("invalid projected result");
+    }, (result) => ({ knownIds: [result.id] }))).rejects.toMatchObject<Partial<OdooError>>({
+      mutationOutcome: "unknown",
+      mutationStage: "response_processing",
+      known: {
+        requestSent: "yes",
+        responseReceived: "yes",
+        resultReceived: "yes",
+        targetModel: "stock.picking",
+        knownIds: [91]
+      }
+    });
+  });
+
+  it("bounds successful API discovery identities and never caches failures", async () => {
+    let calls = 0;
+    const fetcher = async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      calls++;
+      return new Headers(init?.headers).get("Authorization") === "Bearer rejected"
+        ? new Response("no", { status: 401 })
+        : Response.json({ modules: ["base"] });
+    };
+    const client = new OdooClient(8, 1024, fetcher as typeof fetch);
+    const context = requestContext();
+    for (let index = 0; index < 1_000; index++) {
+      await expect(client.fetchApiDocument({
+        ...context,
+        principal: { ...context.principal, apiKey: "rejected", database: `bad-${index}` }
+      })).rejects.toMatchObject({ code: "unauthorized" });
+    }
+    expect((client as unknown as { apiDocumentCache: Map<string, unknown> }).apiDocumentCache.size).toBe(0);
+
+    for (let index = 0; index < 60; index++) {
+      await client.fetchApiDocument({
+        ...context,
+        principal: { ...context.principal, apiKey: `key-${index}` }
+      });
+    }
+    expect((client as unknown as { apiDocumentCache: Map<string, unknown> }).apiDocumentCache.size).toBe(50);
+    expect(calls).toBe(1_060);
+  });
+
+  it("discovers installed modules and published methods from the API document", async () => {
+    const client = new OdooClient(8, 1024, (async () => Response.json({
+      modules: ["base", "usl_documents"],
+      models: [{ model: "usl.document", methods: ["mcp_get", "mcp_create_download_grant"] }]
+    })) as typeof fetch);
+    const surface = await client.discoverSurface(requestContext());
+    expect(surface?.modules).toEqual(new Set(["base", "usl_documents"]));
+    expect(surface?.publicMethods.get("usl.document")).toEqual(
+      new Set(["mcp_get", "mcp_create_download_grant"])
+    );
   });
 
   it("keeps the HTTP status when an error response is not JSON", async () => {
