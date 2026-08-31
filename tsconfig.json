@@ -13,8 +13,18 @@
     "outDir": "dist",
     "declaration": true,
     "sourceMap": true,
-    "types": ["node"]
+    "types": ["node"],
+    "noUncheckedIndexedAccess": true
   },
-  "include": ["src/**/*.ts"],
-  "exclude": ["src/**/*.test.ts", "src/bun-test.d.ts"]
+  "include": [
+    "src/http.ts",
+    "src/stdio.ts",
+    "src/version.ts",
+    "src/odoo-target.ts",
+    "src/runtime/**/*.ts",
+    "src/odoo/**/*.ts",
+    "src/capabilities/**/*.ts",
+    "src/auth/**/*.ts",
+    "src/evals/**/*.ts"
+  ]
 }

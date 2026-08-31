@@ -1,0 +1,11 @@
+.git
+.agents
+.ai
+.claude
+.dev.vars
+.wrangler
+dist
+docs
+node_modules
+test
+*.log

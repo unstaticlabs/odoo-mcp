@@ -8,16 +8,12 @@ export const ResultMetaSchema = z.object({
   capability_version: z.string(),
   profile: z.string(),
   target_id: z.string()
-});
+}).strict();
 
 export const WarningSchema = z.array(z.string());
 
-export function envelopeSchema<T extends z.ZodType>(data: T): z.ZodObject<{
-  data: T;
-  warnings: z.ZodArray<z.ZodString>;
-  meta: typeof ResultMetaSchema;
-}> {
-  return z.object({ data, warnings: WarningSchema, meta: ResultMetaSchema });
+export function envelopeSchema<T extends z.ZodType>(data: T) {
+  return z.object({ data, warnings: WarningSchema, meta: ResultMetaSchema }).strict();
 }
 
 export function resultEnvelope<T>(
@@ -25,7 +21,7 @@ export function resultEnvelope<T>(
   capabilityId: string,
   data: T,
   warnings: string[] = []
-): { data: T; warnings: string[]; meta: z.infer<typeof ResultMetaSchema> } {
+) {
   return {
     data,
     warnings,
@@ -47,14 +43,22 @@ export function toolResult(value: Record<string, unknown>) {
   };
 }
 
-export function toolError(code: string, message: string, recovery: string | undefined, context: RequestContext) {
+export interface ToolFailure {
+  code: string;
+  message: string;
+  retryable?: boolean;
+  outcome?: "succeeded" | "not_applied" | "unknown";
+  recovery?: string;
+}
+
+export function toolError(failure: ToolFailure, context: RequestContext) {
   const value = {
     error: {
-      code,
-      message,
-      retryable: false,
-      outcome: "not_applied",
-      ...(recovery ? { recovery } : {}),
+      code: failure.code,
+      message: failure.message,
+      retryable: failure.retryable ?? false,
+      outcome: failure.outcome ?? "not_applied",
+      ...(failure.recovery ? { recovery: failure.recovery } : {}),
       request_id: context.requestId,
       correlation_id: context.correlationId
     }

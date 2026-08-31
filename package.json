@@ -9,8 +9,15 @@
     "dev": "tsx watch src/http.ts",
     "start": "node dist/http.js",
     "stdio": "node dist/stdio.js",
+    "oauth:migrate": "node dist/auth/cli.js migrate",
+    "oauth:backup": "node dist/auth/cli.js backup",
+    "eval:validate": "npm run build && node dist/evals/cli.js validate",
+    "eval:surfaces": "npm run build && node dist/evals/cli.js surfaces",
     "typecheck": "tsc --noEmit",
-    "test": "bun test"
+    "test": "vitest run test/vps test/evals",
+    "test:integration": "vitest run test/integration",
+    "test:watch": "vitest test/vps test/evals",
+    "check": "npm run typecheck && npm test && npm run build"
   },
   "dependencies": {
     "@better-auth/cimd": "1.7.2",
@@ -21,7 +28,6 @@
     "better-auth": "1.7.2",
     "better-sqlite3": "^12.2.0",
     "express": "^5.1.0",
-    "pdf-lib": "^1.17.1",
     "zod": "^4.4.3"
   },
   "devDependencies": {
@@ -32,6 +38,7 @@
     "fast-check": "^4.3.0",
     "tsx": "^4.20.0",
     "typescript": "^7.0.0",
+    "vitest": "^4.0.0",
     "yaml": "^2.8.1"
   },
   "engines": {
