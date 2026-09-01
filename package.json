@@ -5,6 +5,7 @@
   "type": "module",
   "main": "dist/http.js",
   "scripts": {
+    "postinstall": "node scripts/patch-better-auth-loopback.mjs",
     "build": "tsc",
     "dev": "tsx watch src/http.ts",
     "start": "node dist/http.js",

@@ -2,6 +2,9 @@ FROM node:24-bookworm-slim AS build
 
 WORKDIR /app
 COPY package.json package-lock.json ./
+# scripts/ must exist before npm ci: the postinstall hook patches
+# @better-auth/oauth-provider (see scripts/patch-better-auth-loopback.mjs).
+COPY scripts ./scripts
 RUN npm ci
 COPY tsconfig.json ./
 COPY src ./src
