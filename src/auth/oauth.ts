@@ -66,7 +66,11 @@ function html(document: string, nonce: string): Response {
     headers: {
       "Content-Type": "text/html; charset=utf-8",
       "Cache-Control": "no-store",
-      "Content-Security-Policy": `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'`,
+      // connect-src covers the pages' own same-origin fetch submissions
+      // (enroll, consent, revoke). Without it the browser falls back to
+      // default-src 'none' and blocks the submit, so hosted enrollment
+      // cannot complete at all.
+      "Content-Security-Policy": `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'`,
       "Referrer-Policy": "no-referrer",
       "X-Content-Type-Options": "nosniff"
     }
