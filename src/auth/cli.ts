@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { chmodSync, existsSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { createOAuthService } from "./oauth.js";
 import { loadRuntimeConfig } from "../runtime/config.js";
@@ -22,7 +22,13 @@ async function main(): Promise<void> {
       if (!isAbsolute(submitted)) throw new Error("The OAuth backup destination must be an absolute path");
       if (destination === config.oauth!.databasePath) throw new Error("The backup destination must differ from the live database");
       if (existsSync(destination)) throw new Error("The OAuth backup destination already exists");
-      await oauth.vault.database.backup(destination);
+      const priorUmask = process.umask(0o077);
+      try {
+        await oauth.vault.database.backup(destination);
+        chmodSync(destination, 0o600);
+      } finally {
+        process.umask(priorUmask);
+      }
       process.stdout.write(`OAuth vault backed up to ${destination}\n`);
       return;
     }

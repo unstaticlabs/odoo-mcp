@@ -6,6 +6,29 @@ import { assertBoundedJson, ModelNameSchema, MethodNameSchema } from "./schemas.
 
 export type OdooCallKind = "read" | "mutation";
 export type MutationOutcome = "not_applied" | "unknown";
+export type MutationStage = "request_rejected" | "completion_ambiguous" | "response_processing";
+
+export interface MutationReconciliation {
+  targetModel: string;
+  suggestedTool: string;
+  instructions: string;
+  knownIds?: readonly number[];
+  fields?: readonly string[];
+}
+
+export interface MutationResultEvidence {
+  knownIds?: readonly number[];
+  grantId?: string;
+}
+
+export interface MutationKnownFacts {
+  requestSent: "yes" | "no" | "unknown";
+  responseReceived: "yes" | "no" | "unknown";
+  resultReceived: "yes" | "no" | "unknown";
+  targetModel: string;
+  knownIds?: readonly number[];
+  grantId?: string;
+}
 
 export type OdooErrorCode =
   | "unauthorized"
@@ -29,19 +52,33 @@ export class OdooError extends Error {
     readonly method: string,
     readonly retryable: boolean,
     readonly mutationOutcome: MutationOutcome,
-    readonly details?: string
+    readonly details?: string,
+    readonly callKind: OdooCallKind = "read",
+    readonly mutationStage?: MutationStage,
+    readonly reconciliation?: MutationReconciliation,
+    readonly known?: MutationKnownFacts
   ) {
     super(message);
     this.name = "OdooError";
   }
 }
 
-interface CallOptions {
-  kind?: OdooCallKind;
+interface SharedCallOptions {
   signal?: AbortSignal;
   timeoutMs?: number;
   responseBytes?: number;
 }
+
+interface ReadCallOptions extends SharedCallOptions {
+  kind?: "read";
+}
+
+interface MutationCallOptions extends SharedCallOptions {
+  kind: "mutation";
+  reconciliation: MutationReconciliation;
+}
+
+type CallOptions = ReadCallOptions | MutationCallOptions;
 
 interface ApiDocumentCacheEntry {
   etag?: string;
@@ -49,7 +86,127 @@ interface ApiDocumentCacheEntry {
   value: unknown;
 }
 
+export interface OdooSurface {
+  modules: ReadonlySet<string>;
+  publicMethods: ReadonlyMap<string, ReadonlySet<string>>;
+}
+
 const RETRYABLE_STATUS = new Set([429, 502, 503, 504]);
+const API_DOCUMENT_CACHE_TTL_MS = 5 * 60_000;
+const API_DOCUMENT_CACHE_MAX_ENTRIES = 50;
+
+function sanitizeKnownIds(values: readonly number[] | undefined): number[] | undefined {
+  if (!values) return undefined;
+  const ids = [...new Set(values.filter((value) => Number.isInteger(value) && value > 0))].slice(0, 100);
+  return ids.length > 0 ? ids : undefined;
+}
+
+function knownFacts(
+  reconciliation: MutationReconciliation,
+  facts: Pick<MutationKnownFacts, "requestSent" | "responseReceived" | "resultReceived">,
+  observed?: MutationResultEvidence
+): MutationKnownFacts {
+  const knownIds = sanitizeKnownIds(observed?.knownIds ?? reconciliation.knownIds);
+  const grantId = typeof observed?.grantId === "string" && /^[0-9a-f-]{36}$/i.test(observed.grantId)
+    ? observed.grantId
+    : undefined;
+  return {
+    ...facts,
+    targetModel: reconciliation.targetModel,
+    ...(knownIds ? { knownIds } : {}),
+    ...(grantId ? { grantId } : {})
+  };
+}
+
+export class MutationReceipt<T> {
+  constructor(
+    private readonly value: T,
+    private readonly model: string,
+    private readonly method: string,
+    private readonly reconciliation: MutationReconciliation
+  ) {}
+
+  async finalize<R>(
+    project: (value: T) => R | Promise<R>,
+    observe?: (value: T) => MutationResultEvidence
+  ): Promise<FinalizedMutation<R>> {
+    let observed: MutationResultEvidence | undefined;
+    try {
+      observed = observe?.(this.value);
+      return new FinalizedMutation(
+        await project(this.value),
+        this.model,
+        this.method,
+        this.reconciliation,
+        observed
+      );
+    } catch (error) {
+      throw mutationProcessingError(this.model, this.method, this.reconciliation, observed, error);
+    }
+  }
+}
+
+const finalizedMutationBrand = Symbol("FinalizedMutation");
+
+export class FinalizedMutation<T> {
+  readonly [finalizedMutationBrand] = true;
+
+  constructor(
+    private readonly value: T,
+    private readonly model: string,
+    private readonly method: string,
+    private readonly reconciliation: MutationReconciliation,
+    private readonly observed?: MutationResultEvidence
+  ) {}
+
+  async guard<R>(consume: (value: T) => R | Promise<R>): Promise<R> {
+    try {
+      return await consume(this.value);
+    } catch (error) {
+      throw mutationProcessingError(
+        this.model,
+        this.method,
+        this.reconciliation,
+        this.observed,
+        error
+      );
+    }
+  }
+}
+
+export function isFinalizedMutation<T>(
+  value: T | FinalizedMutation<T>
+): value is FinalizedMutation<T> {
+  return value instanceof FinalizedMutation;
+}
+
+function mutationProcessingError(
+  model: string,
+  method: string,
+  reconciliation: MutationReconciliation,
+  observed: MutationResultEvidence | undefined,
+  error: unknown
+): OdooError {
+  const detail = redactDetails(error instanceof Error ? error.message : String(error));
+  return new OdooError(
+    `Odoo returned success for ${model}.${method}, but the MCP could not validate the result: ${detail}`,
+    "unknown",
+    200,
+    model,
+    method,
+    false,
+    "unknown",
+    detail,
+    "mutation",
+    "response_processing",
+    reconciliation,
+    knownFacts(reconciliation, {
+      requestSent: "yes",
+      responseReceived: "yes",
+      resultReceived: "yes"
+    }, observed)
+  );
+}
 
 function statusCode(status: number): OdooErrorCode {
   if (status === 401) return "unauthorized";
@@ -92,11 +249,21 @@ function errorMessage(payload: unknown): string | undefined {
   return typeof record.message === "string" ? record.message : undefined;
 }
 
-async function boundedText(response: Response, maximum: number, model: string, method: string): Promise<string> {
+async function boundedText(
+  response: Response,
+  maximum: number,
+  model: string,
+  method: string,
+  kind: OdooCallKind = "read",
+  reconciliation?: MutationReconciliation
+): Promise<string> {
+  const mutationKnown = kind === "mutation" && reconciliation
+    ? knownFacts(reconciliation, { requestSent: "yes", responseReceived: "yes", resultReceived: "no" })
+    : undefined;
   const declared = Number(response.headers.get("Content-Length"));
   if (Number.isFinite(declared) && declared > maximum) {
     await response.body?.cancel();
-    throw new OdooError("Odoo response exceeded its size limit", "payload_too_large", response.status, model, method, false, "unknown");
+    throw new OdooError("Odoo response exceeded its size limit", "payload_too_large", response.status, model, method, false, kind === "mutation" ? "unknown" : "not_applied", undefined, kind, kind === "mutation" ? "response_processing" : undefined, reconciliation, mutationKnown);
   }
   if (!response.body) return "";
   const reader = response.body.getReader();
@@ -109,13 +276,13 @@ async function boundedText(response: Response, maximum: number, model: string, m
       size += value.byteLength;
       if (size > maximum) {
         await reader.cancel();
-        throw new OdooError("Odoo response exceeded its size limit", "payload_too_large", response.status, model, method, false, "unknown");
+        throw new OdooError("Odoo response exceeded its size limit", "payload_too_large", response.status, model, method, false, kind === "mutation" ? "unknown" : "not_applied", undefined, kind, kind === "mutation" ? "response_processing" : undefined, reconciliation, mutationKnown);
       }
       chunks.push(value);
     }
   } catch (error) {
     if (error instanceof OdooError) throw error;
-    throw new OdooError("Odoo response ended before completion", "network_error", response.status, model, method, true, "unknown");
+    throw new OdooError("Odoo response ended before completion", "network_error", response.status, model, method, true, kind === "mutation" ? "unknown" : "not_applied", undefined, kind, kind === "mutation" ? "completion_ambiguous" : undefined, reconciliation, mutationKnown);
   } finally {
     reader.releaseLock();
   }
@@ -141,7 +308,6 @@ function delay(milliseconds: number, signal?: AbortSignal): Promise<void> {
 export class OdooClient {
   private readonly semaphores = new Map<string, Semaphore>();
   private readonly apiDocumentCache = new Map<string, ApiDocumentCacheEntry>();
-  private readonly moduleCache = new Map<string, { expiresAt: number; modules: ReadonlySet<string> | null }>();
 
   constructor(
     private readonly concurrency = 8,
@@ -163,12 +329,27 @@ export class OdooClient {
     model: string,
     method: string,
     kwargs: Record<string, unknown>,
+    options: MutationCallOptions
+  ): Promise<MutationReceipt<T>>;
+  async call<T>(
+    context: RequestContext,
+    model: string,
+    method: string,
+    kwargs: Record<string, unknown>,
+    options?: ReadCallOptions
+  ): Promise<T>;
+  async call<T>(
+    context: RequestContext,
+    model: string,
+    method: string,
+    kwargs: Record<string, unknown>,
     options: CallOptions = {}
-  ): Promise<T> {
+  ): Promise<T | MutationReceipt<T>> {
     ModelNameSchema.parse(model);
     MethodNameSchema.parse(method);
     assertBoundedJson(kwargs);
-    const kind = options.kind ?? "read";
+    const mutationOptions = options.kind === "mutation" ? options : undefined;
+    const kind = mutationOptions ? "mutation" : "read";
     const maximumAttempts = kind === "read" ? 3 : 1;
     const responseBytes = options.responseBytes ?? this.defaultResponseBytes;
     const body = JSON.stringify(kwargs);
@@ -205,7 +386,8 @@ export class OdooClient {
               signal
             }
           );
-          const text = await boundedText(response, responseBytes, model, method);
+          const reconciliation = mutationOptions?.reconciliation;
+          const text = await boundedText(response, responseBytes, model, method, kind, reconciliation);
           let payload: unknown = null;
           let unparsable = false;
           if (text) {
@@ -232,7 +414,15 @@ export class OdooClient {
               method,
               retryable,
               kind === "mutation" && !structuredOdooError && response.status >= 500 ? "unknown" : "not_applied",
-              detail
+              detail,
+              kind,
+              kind === "mutation"
+                ? structuredOdooError || response.status < 500 ? "request_rejected" : "completion_ambiguous"
+                : undefined,
+              reconciliation,
+              kind === "mutation" && reconciliation
+                ? knownFacts(reconciliation, { requestSent: "yes", responseReceived: "yes", resultReceived: "no" })
+                : undefined
             );
           }
           if (unparsable) {
@@ -243,7 +433,14 @@ export class OdooClient {
               model,
               method,
               false,
-              kind === "mutation" ? "unknown" : "not_applied"
+              kind === "mutation" ? "unknown" : "not_applied",
+              undefined,
+              kind,
+              kind === "mutation" ? "response_processing" : undefined,
+              reconciliation,
+              kind === "mutation" && reconciliation
+                ? knownFacts(reconciliation, { requestSent: "yes", responseReceived: "yes", resultReceived: "no" })
+                : undefined
             );
           }
           emitEvent("odoo.call.completed", {
@@ -258,7 +455,9 @@ export class OdooClient {
             duration_ms: Date.now() - started,
             response_bytes: Buffer.byteLength(text)
           });
-          return payload as T;
+          return kind === "mutation"
+            ? new MutationReceipt(payload as T, model, method, mutationOptions!.reconciliation)
+            : payload as T;
         } catch (error) {
           const cancelled = options.signal?.aborted === true;
           const typed = error instanceof OdooError
@@ -270,7 +469,14 @@ export class OdooClient {
                 model,
                 method,
                 !cancelled,
-                kind === "mutation" ? "unknown" : "not_applied"
+                kind === "mutation" ? "unknown" : "not_applied",
+                undefined,
+                kind,
+                kind === "mutation" ? "completion_ambiguous" : undefined,
+                mutationOptions?.reconciliation,
+                mutationOptions
+                  ? knownFacts(mutationOptions.reconciliation, { requestSent: "unknown", responseReceived: "no", resultReceived: "no" })
+                  : undefined
               );
           emitEvent("odoo.call.completed", {
             request_id: context.requestId,
@@ -290,7 +496,22 @@ export class OdooClient {
           throw typed;
         }
       }
-      throw new OdooError("Odoo request exhausted its retry budget", "unknown", null, model, method, false, kind === "mutation" ? "unknown" : "not_applied");
+      throw new OdooError(
+        "Odoo request exhausted its retry budget",
+        "unknown",
+        null,
+        model,
+        method,
+        false,
+        kind === "mutation" ? "unknown" : "not_applied",
+        undefined,
+        kind,
+        kind === "mutation" ? "completion_ambiguous" : undefined,
+        mutationOptions?.reconciliation,
+        mutationOptions
+          ? knownFacts(mutationOptions.reconciliation, { requestSent: "unknown", responseReceived: "no", resultReceived: "no" })
+          : undefined
+      );
     }, options.signal);
   }
 
@@ -301,7 +522,12 @@ export class OdooClient {
       .digest("base64url");
     const cacheKey = `${identity}:${path}`;
     const cached = this.apiDocumentCache.get(cacheKey);
-    if (cached && cached.expiresAt > Date.now()) return cached.value as T;
+    if (cached && cached.expiresAt > Date.now()) {
+      this.apiDocumentCache.delete(cacheKey);
+      this.apiDocumentCache.set(cacheKey, cached);
+      return cached.value as T;
+    }
+    if (cached) this.apiDocumentCache.delete(cacheKey);
     const headers: Record<string, string> = {
       Authorization: `Bearer ${context.principal.apiKey}`,
       "X-Odoo-Database": context.principal.database,
@@ -314,7 +540,9 @@ export class OdooClient {
       signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(8_000)]) : AbortSignal.timeout(8_000)
     });
     if (response.status === 304 && cached) {
-      cached.expiresAt = Date.now() + 5 * 60_000;
+      cached.expiresAt = Date.now() + API_DOCUMENT_CACHE_TTL_MS;
+      this.apiDocumentCache.delete(cacheKey);
+      this.apiDocumentCache.set(cacheKey, cached);
       return cached.value as T;
     }
     if (!response.ok) {
@@ -332,47 +560,92 @@ export class OdooClient {
     const value = JSON.parse(text) as T;
     this.apiDocumentCache.set(cacheKey, {
       ...(response.headers.get("ETag") ? { etag: response.headers.get("ETag") ?? undefined } : {}),
-      expiresAt: Date.now() + 5 * 60_000,
+      expiresAt: Date.now() + API_DOCUMENT_CACHE_TTL_MS,
       value
     });
-    if (this.apiDocumentCache.size > 50) {
+    for (const [key, entry] of this.apiDocumentCache) {
+      if (entry.expiresAt <= Date.now()) this.apiDocumentCache.delete(key);
+    }
+    while (this.apiDocumentCache.size > API_DOCUMENT_CACHE_MAX_ENTRIES) {
       const oldest = this.apiDocumentCache.keys().next().value as string | undefined;
       if (oldest) this.apiDocumentCache.delete(oldest);
+      else break;
     }
     return value;
   }
 
-  async installedModules(context: RequestContext, signal?: AbortSignal): Promise<ReadonlySet<string> | null> {
-    const identity = createHash("sha256")
-      .update(`${context.principal.targetId}\0${context.principal.database}\0${context.principal.apiKey}`)
-      .digest("base64url");
-    const cached = this.moduleCache.get(identity);
-    if (cached && cached.expiresAt > Date.now()) return cached.modules;
+  async discoverSurface(context: RequestContext, signal?: AbortSignal): Promise<OdooSurface | null> {
     try {
-      const document = await this.fetchApiDocument<{ modules?: unknown }>(context, undefined, signal);
+      const document = await this.fetchApiDocument<{ modules?: unknown; models?: unknown }>(context, undefined, signal);
       const modules = new Set(
         Array.isArray(document.modules)
           ? document.modules.filter((item): item is string => typeof item === "string")
           : []
       );
-      this.moduleCache.set(identity, { expiresAt: Date.now() + 5 * 60_000, modules });
-      return modules;
+      const publicMethods = new Map<string, ReadonlySet<string>>();
+      if (Array.isArray(document.models)) {
+        for (const item of document.models) {
+          if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+          const candidate = item as Record<string, unknown>;
+          if (typeof candidate.model !== "string" || !Array.isArray(candidate.methods)) continue;
+          publicMethods.set(candidate.model, new Set(
+            candidate.methods.filter((method): method is string => typeof method === "string")
+          ));
+        }
+      }
+      return { modules, publicMethods };
     } catch {
-      this.moduleCache.set(identity, { expiresAt: Date.now() + 60_000, modules: null });
       return null;
     }
+  }
+
+  async installedModules(context: RequestContext, signal?: AbortSignal): Promise<ReadonlySet<string> | null> {
+    return (await this.discoverSurface(context, signal))?.modules ?? null;
   }
 }
 
 export function toolFailureFromError(error: unknown) {
   if (error instanceof OdooError) {
+    const unknownMutation = error.callKind === "mutation" && error.mutationOutcome === "unknown";
+    const retryGuidance = unknownMutation
+      ? "reconcile_first"
+      : error.code === "permission_denied" || error.code === "invalid_request"
+        ? "after_correction"
+        : error.retryable
+          ? "safe"
+          : "never";
     return {
       code: `ODOO_${error.code.toUpperCase()}`,
       message: error.message,
-      retryable: error.retryable,
+      retryable: unknownMutation ? false : error.retryable,
+      condition_retryable: error.retryable,
       outcome: error.mutationOutcome,
+      retry_guidance: retryGuidance,
+      ...(error.mutationStage ? { stage: error.mutationStage } : {}),
+      ...(error.known ? {
+        known: {
+          request_sent: error.known.requestSent,
+          response_received: error.known.responseReceived,
+          result_received: error.known.resultReceived,
+          target_model: error.known.targetModel,
+          ...(error.known.knownIds ? { record_ids: [...error.known.knownIds] } : {}),
+          ...(error.known.grantId ? { grant_id: error.known.grantId } : {})
+        }
+      } : {}),
+      ...(unknownMutation && error.reconciliation ? {
+        reconciliation: {
+          required: true as const,
+          suggested_tool: error.reconciliation.suggestedTool,
+          target_model: error.reconciliation.targetModel,
+          ...(error.known?.knownIds ? { record_ids: [...error.known.knownIds] } : {}),
+          ...(error.reconciliation.fields ? { fields: [...error.reconciliation.fields] } : {}),
+          instructions: error.reconciliation.instructions
+        }
+      } : {}),
       recovery:
-        error.code === "permission_denied"
+        unknownMutation
+          ? "Do not repeat the mutation yet. Run the reconciliation read, compare current Odoo state with the intended change, then either stop, retry only if absent, or send a minimal corrective patch."
+          : error.code === "permission_denied"
           ? "Use an Odoo identity with the required access or narrow the requested records."
           : error.code === "model_or_method_not_found"
             ? "Inspect the model and public method metadata, then correct the request."
@@ -385,7 +658,15 @@ export function toolFailureFromError(error: unknown) {
     code: "ODOO_TOOL_ERROR",
     message: error instanceof Error ? error.message : String(error),
     retryable: false,
+    condition_retryable: false,
     outcome: "not_applied" as const,
+    retry_guidance: "after_correction" as const,
+    stage: "preflight" as const,
+    known: {
+      request_sent: "no" as const,
+      response_received: "no" as const,
+      result_received: "no" as const
+    },
     recovery: "Inspect the capability and model metadata, correct the request, then retry."
   };
 }
