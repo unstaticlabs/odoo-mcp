@@ -1,286 +1,92 @@
-# Testing the odoo-mcp server
+# Testing
 
-How to run and exercise the server **locally** and against a **deployed Cloudflare Worker**.
-Header-authenticated requests to `/mcp` need the three BYO-key headers (see the README):
-`Authorization: Bearer <odoo-api-key>`, `X-Odoo-Url`, `X-Odoo-Db`. Requests without any
-`X-Odoo-*` header go through the ChatGPT OAuth shim instead (section 3).
+## Default gate
 
----
-
-## 1. Local (`wrangler dev`)
+Use Node 24 and npm:
 
 ```bash
 npm ci
-npx wrangler dev            # → Ready on http://localhost:8787
+npm run check
+npm run eval:validate
+docker build -t usl-odoo-mcp:test .
 ```
 
-> **Note on local dev:** Miniflare's outbound `fetch` to an external Odoo host can be slow or
-> intermittently hang on the *first* call (cold start). The server wraps Odoo calls in a
-> timeout + retry, so a stuck request fails fast and retries rather than hanging forever.
-> For fully reliable end-to-end runs against real Odoo, prefer a deployed Worker (section 2).
+`npm run check` runs strict TypeScript checking, all `test/vps` unit/protocol tests, all `test/evals` corpus/interface tests, and a production build. CI performs the same checks and builds the container.
 
-### a) MCP Inspector (fastest smoke test)
+The default suite covers:
+
+- strict schemas, bounded JSON/domain/context values, cursor behavior, canonical URLs, and serialization;
+- target normalization/mapping, secret file handling, request size, CORS/host controls, semaphores, retries, cancellation, and error translation;
+- direct auth, OAuth enrollment/vault/revocation, HTTP Streamable MCP, legacy stateless compatibility, and stdio;
+- deterministic profiles, module availability, schema-token budgets, deferred metadata, and structured tool outputs;
+- generic substrate behavior, one-shot mutation outcomes, document facade calls, semantic context, rebuilt Accounting views, and fixed-intent actions;
+- property-based cursor/domain/JSON/context invariants;
+- the 60-task evaluation corpus and A/B/C/D/E surface generator.
+
+## Live Distribution smoke suite
+
+Run against a non-production or read-only Distribution identity:
 
 ```bash
-npx @modelcontextprotocol/inspector
+export ODOO_INTEGRATION_ORIGIN=https://odoo-test.example.com
+export ODOO_INTEGRATION_INTERNAL_ORIGIN=http://odoo-test:8069
+export ODOO_INTEGRATION_DATABASE=usl_mcp_eval_v1
+export ODOO_INTEGRATION_API_KEY=...
+npm run test:integration
 ```
 
-In the Inspector UI: transport **Streamable HTTP**, URL `http://localhost:8787/mcp`, and add the
-three headers above. Then **List Tools** — confirm `projects.list_projects`, `projects.list_tasks`,
-`projects.get_task`, `projects.create_task` (and the generic `search_records` / `create_record`)
-appear, not solely `feedback.submit`. Try `projects.list_tasks` with
-`domain: [["project_id","=",4]]`, or `projects.create_task` with `name` + `project_id: 4`.
+Without all required variables, the suite reports three skipped tests. A skip is not a pass. The current smoke suite verifies authenticated `/doc-bearer`, a bounded generic MCP read, and one-shot `odoo_call_method` with the public `res.users.context_get` method.
 
-### b) Claude Code
+## Fixture database gate
 
-```bash
-claude mcp add --transport http odoo http://localhost:8787/mcp \
-  --header "Authorization: Bearer $ODOO_API_KEY" \
-  --header "X-Odoo-Url: https://your-org.odoo.com" \
-  --header "X-Odoo-Db: your-db"
-# then, in a claude session:
-#   "list the odoo tools"
-#   "create a task named Smoke test in project 4 via projects.create_task"
-#   "search project.task where project_id = 4"
-```
+Before production, instantiate a disposable database from `evals/fixtures/usl-eval-v1.json` using stable Odoo external IDs. Verify the installed module set and then add/run fixture-backed cases for:
 
-### c) Raw HTTP (auth check)
+- generic create/write/archive/delete and x2many values;
+- field ACLs, record rules, restricted identities, and two-company contexts;
+- document facade search/content/link/unlink;
+- expense/batch state transitions and validation failures;
+- vendor receipt creation and rollback on nested-line failure;
+- one Odoo-side transaction for every multi-step business action;
+- stale state and concurrent updates;
+- a forced connection loss after mutation dispatch, producing unknown outcome with no replay.
 
-Missing headers must return `401`:
+Use separate identities for broad read, normal agent write, accounting approval, and irreversible-action denial. Never point mutating fixtures at production data.
 
-```bash
-curl -s -o /dev/null -w "%{http_code}\n" -X POST http://localhost:8787/mcp \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'      # → 401
-```
+## Protocol/client qualification
 
-### d) Node client (list tools + call one)
+Qualify the built image with MCP Inspector or an equivalent protocol client:
 
-```js
-// smoke.mjs  —  run from the repo root (uses the installed @modelcontextprotocol/sdk)
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+1. initialize `/mcp`, `/mcp/all`, and each profile;
+2. verify deterministic `tools/list`, strict input/output schemas, and `_meta.defer_loading`;
+3. submit invalid inputs, an unknown profile, cancelled requests, and response-overflow fixtures;
+4. run at least eight concurrent reads against one target and two independent target mappings;
+5. start `dist/stdio.js` as a subprocess and execute discovery/read;
+6. connect current Codex and Claude Code/Desktop clients;
+7. complete hosted ChatGPT and Claude OAuth enrollment, refresh, reconnect, and revoke flows.
 
-const headers = {
-  Authorization: `Bearer ${process.env.ODOO_API_KEY}`,
-  "X-Odoo-Url": process.env.ODOO_URL,   // e.g. https://your-org.odoo.com
-  "X-Odoo-Db": process.env.ODOO_DB,
-};
-const transport = new StreamableHTTPClientTransport(
-  new URL("http://localhost:8787/mcp"), { requestInit: { headers } });
-const client = new Client({ name: "smoke", version: "0.0.1" }, { capabilities: {} });
-await client.connect(transport);
+Record client versions, MCP protocol negotiation, model IDs, date, image SHA, Distribution SHA, profile URL, and whether native tool search was enabled.
 
-console.log("tools:", (await client.listTools()).tools.map(t => t.name));
-// Expect projects.list_projects / list_tasks / get_task / create_task among the names.
-const created = await client.callTool({
-  name: "projects.create_task",
-  arguments: { name: "MCP smoke task", project_id: 4, description: "lodged via projects.create_task" },
-});
-console.log("create:", created.content.map(c => c.text).join("\n"));
-const res = await client.callTool({
-  name: "projects.list_tasks",
-  arguments: { domain: [["project_id", "=", 4]], fields: ["id", "name"], limit: 5 },
-});
-console.log(res.content.map(c => c.text).join("\n"));
-// Schema-aware clients also get structuredContent with field reporting:
-// returned_fields, omitted_fields (with reason), and warnings[] on read tools.
+## Security and failure cases
 
-const browse = await client.callTool({
-  name: "browse_records",
-  arguments: {
-    model: "project.task",
-    domain: [],
-    field_preset: "tracking_minimal",
-    limit: 25,
-    offset: 0,
-    order: "id asc"
-  }
-});
-console.log("browse page 1:", browse.content.map(c => c.text).join("\n"));
-await client.close();
-```
+Tests must assert behavior rather than treating annotations as controls:
 
-```bash
-ODOO_API_KEY=… ODOO_URL=https://your-org.odoo.com ODOO_DB=your-db node smoke.mjs
-```
+- unauthorized tool execution reaches Odoo and is denied by the intended ACL/rule/policy;
+- private or `@api.private` methods cannot pass the Odoo JSON-2 dispatcher;
+- permanent deletion remains absent from default/thematic profiles;
+- record-content prompt injection is returned as untrusted data and never executed;
+- searches, fields, relations, attachments, arguments, depth, keys, bodies, and outputs stay bounded;
+- credentials and sensitive Odoo values do not appear in structured logs;
+- read retries occur only for classified transient failures;
+- mutations and arbitrary public methods never retry automatically;
+- actionable Odoo rejections say `not_applied`; ambiguous delivery says `unknown`.
 
-### e) `search_records_compact` hermetic coverage
+## Release evidence
 
-`bun test` exercises `search_records_compact` without a live Odoo instance:
+Attach the following to a release/PR:
 
-- **Single-page happy path** — `CompactReadEnvelope` schema validation (nested `fields` manifest
-  and `page` metadata).
-- **Empty page** — success envelope with `records: []` and `page.count: 0` (not `isError`).
-- **Two-page pagination stability** — `offset` + stable `order`; asserts `has_more`, `count`,
-  and no duplicate ids across pages.
-- **Field presets** — `minimal`, `tracking_minimal`, and `financial_minimal` on known models
-  plus unknown-model fallback (`resolveCompactFields` in `shared.test.ts`).
-- **Explicit fields** — non-empty `fields` override `field_preset`; `fields.resolution.source`
-  is `explicit` and `fields.resolution.preset` is `null`.
-- **`search_count: false`** — single `search_read` Odoo call; warning about skipped count;
-  heuristic `page.has_more` when the page is full.
-
-### f) `browse_records` hermetic coverage
-
-
-`bun test` exercises `browse_records` without a live Odoo instance:
-
-- **Single-page happy path** — structured output schema validation (including
-  `returned_fields`, `omitted_fields`, `warnings`, and `page` metadata).
-- **Empty page** — success envelope with `records: []` and `page.count: 0` (not
-  `isError`).
-- **Two-page pagination stability** — `offset` + stable `order`; asserts `has_more`,
-  `count`, and no duplicate ids across pages.
-- **Field presets** — `minimal`, `tracking_minimal`, and `financial_minimal` on known
-  models plus unknown-model fallback (`resolveNamedFieldPreset` in `shared.test.ts`).
-- **Cursor paging** — `cursor` input and `page.next_cursor` / `page.next_offset`
-  continuation across calls with stable `order`.
-- **Explicit fields** — non-empty `fields` override `field_preset`;
-  `fields_resolution.source` is `explicit` and `field_preset` is `null`.
-- **Oversized-payload safeguard** — halves `limit` (min 5) on first oversize, then
-  downgrades any non-`minimal` preset directly to `minimal`; successful adjustments set
-  `safeguard_applied`; after one retry, still oversize → `isError`.
-- **`shared.test.ts`** — `resolveNamedFieldPreset`, `buildBrowsePageMeta`, and
-  `applyBrowseSafeguard` unit coverage.
-
-### g) `projects.list_chatter` hermetic coverage
-
-`bun test` exercises `projects.list_chatter` without a live Odoo instance:
-
-- **Happy path (2 tasks)** — per-task `chatter_by_task_id` keys, normalized bodies,
-  `metadata.odoo_calls === 2`.
-- **Per-task error isolation** — one task's Odoo error becomes `{ error }` for that key;
-  other tasks still succeed.
-- **Call budget truncation** — 10 `task_ids` with an 8-call cap → `truncated_task_ids`
-  and a budget warning.
-- **Query shape** — domain uses `res_id = <id>` (not `in`); fields exclude `preview`.
-- **Registration** — `projects.list_chatter` is present on the tool surface.
-
-**PM chatter workflow:** triage with `projects.list_tasks` / compact browse →
-`projects.list_chatter({ task_ids })` for notes across tasks (paginate across calls when
-needed).
-
-**Anti-pattern** — do not bulk-query `mail.message` with `search_records` / `browse_records`
-using a domain like `[["model","=","project.task"],["res_id","in",[990,954,991,...]]]` and
-`fields` including `body`, `preview`, or `email_body`. Reasons:
-
-1. Some MCP hosts block bulk message-body fetches as high-risk.
-2. Odoo rate limit (~1 req/s via `OdooQueue`) makes wide scans slow.
-3. Message bodies inflate token usage.
-
-**Single-task fallback** — when you only need one task's chatter, call `expand_record` with
-`include_chatter: true` (a scoped `mail.message` `search_read` for one `res_id`, see
-`src/tools/read.ts` ~L658) — the supported per-record path.
-
----
-
-## 2. Deployed Cloudflare Worker
-
-### Deploy
-
-```bash
-npx wrangler deploy         # to the target Cloudflare account
-```
-
-Notes:
-- `wrangler.jsonc` declares the `McpAgent` Durable Object; the first deploy provisions it.
-- Choose the account with `--account-id <id>` or by setting `account_id` in `wrangler.jsonc` /
-  `CLOUDFLARE_ACCOUNT_ID` (run `npx wrangler whoami` to see which accounts your login can reach).
-- The public URL is `https://<worker-name>.<subdomain>.workers.dev/mcp`.
-
-### Connect Claude (remote)
-
-```bash
-claude mcp add --transport http odoo https://<worker>.workers.dev/mcp \
-  --header "Authorization: Bearer $ODOO_API_KEY" \
-  --header "X-Odoo-Url: https://your-org.odoo.com" \
-  --header "X-Odoo-Db: your-db"
-```
-
-### Verify the deploy
-
-Reuse the Node client from section 1(d) with the deployed URL — the outbound Odoo fetch is
-reliable on the real Cloudflare edge (unlike local Miniflare), so calls return promptly.
-
----
-
-## 3. The ChatGPT OAuth shim
-
-ChatGPT can't send custom headers, so it authenticates through the Worker's OAuth 2.1 shim
-(`/authorize`, `/token`, `/register`, `/.well-known/*`). See `docs/product/auth.md` for the
-design; `wrangler.jsonc` must have the `OAUTH_KV` binding.
-
-### a) MCP Inspector (test the OAuth flow without ChatGPT)
-
-```bash
-npx @modelcontextprotocol/inspector
-```
-
-In the Inspector UI: transport **Streamable HTTP**, URL `http://localhost:8787/mcp` (or the
-deployed URL), **no headers**, and click **Open Auth Settings → Quick OAuth Flow** (or just
-Connect — the Inspector detects the `401` + discovery metadata). A browser tab opens the
-Worker's `/authorize` page: paste your Odoo URL, database, and API key. The shim validates
-them against Odoo, redirects back, and the Inspector completes the token exchange. Then
-**List Tools** and try `browse_records` (e.g. `project.task`, `field_preset: "tracking_minimal"`, `limit: 25`, then page with `offset: 25`).
-
-### b) Connect ChatGPT (Developer Mode)
-
-1. ChatGPT → **Settings → Apps & Connectors → Advanced settings → enable Developer Mode**.
-2. **Create connector**: name it, set the MCP server URL to
-   `https://<worker>.workers.dev/mcp`, authentication **OAuth**.
-3. ChatGPT registers itself dynamically and sends you to the `/authorize` form: enter your
-   Odoo URL, database, and API key.
-4. After the redirect the connector lists the tools. Verify with a read, e.g. ask ChatGPT to
-   "search project.task, limit 3" with the connector enabled.
-
-### c) Raw curl checks
-
-```bash
-# discovery metadata:
-curl -s https://<worker>.workers.dev/.well-known/oauth-authorization-server | jq .
-
-# /mcp without headers or token → 401 (OAuth challenge, not the header-path error):
-curl -s -o /dev/null -w "%{http_code}\n" -X POST https://<worker>.workers.dev/mcp \
-  -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
-
-# GET /mcp → 405: the optional standalone SSE (server-push) stream is deliberately
-# not offered — this server never sends server-initiated messages, and agents@0.17.3
-# stalls subsequent POSTs in production while a standalone stream is open.
-curl -s -o /dev/null -w "%{http_code}\n" https://<worker>.workers.dev/mcp \
-  -H "Accept: text/event-stream"
-```
-
-### d) Revoke a stored credential
-
-```bash
-npx wrangler kv key list --binding OAUTH_KV --remote --prefix grant: | jq -r '.[].name'
-npx wrangler kv key delete --binding OAUTH_KV --remote "grant:<userId>:<grantId>"
-```
-
-Deleting the grant destroys the wrapped encryption key, so outstanding access/refresh tokens
-become useless immediately.
-
-### e) Point a connector at a moved/rebuilt Odoo instance (re-auth)
-
-You never need to delete a ChatGPT connector to change its Odoo URL, database, or API key —
-those live in the OAuth grant, not in the connector. When an (ephemeral) test instance moves:
-
-1. Revoke its grant as in (d). The grant's `userId` is `"<odoo-host>/<db>"`, so the key name
-   tells you which connection is which.
-2. Use the connector in ChatGPT again. The next call fails auth, ChatGPT prompts you to
-   reconnect, and the same `/authorize` form comes up — enter the new URL/db/key there.
-3. The connector, its name, and its settings all survive; only the grant is replaced. This
-   also covers a rebuilt instance whose API key changed.
-
----
-
-## Security notes
-
-- Header-path credentials arrive per request and are never logged, persisted, or echoed in
-  errors.
-- OAuth-path credentials are validated against Odoo once at `/authorize`, then stored
-  end-to-end encrypted in `OAUTH_KV` (decryptable only by presenting the issued token).
-- Auth failures return `401` with a generic message (no header values, no token echoes).
-- Writes (`create`/`update`/`delete`) are limited by the caller's own Odoo permissions on
-  both paths.
+- `npm ci`, `npm run check`, evaluation validation, and image-build results;
+- live smoke and fixture integration results, including skipped counts;
+- default/all tool counts and schema-token snapshots;
+- pinned Codex/Claude evaluation artifacts and acceptance-threshold summary;
+- OAuth migration/backup/revoke check when enabled;
+- migration and rollback confirmation.

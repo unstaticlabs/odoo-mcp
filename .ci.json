@@ -3,7 +3,7 @@
   "steps": [
     {
       "name": "install",
-      "cmd": "SHARP_IGNORE_GLOBAL_LIBVIPS=1 npm ci",
+      "cmd": "npm ci",
       "cwd": ".",
       "timeout": 600,
       "gate": true
@@ -17,14 +17,21 @@
     },
     {
       "name": "test",
-      "cmd": "bun test",
+      "cmd": "npm test",
       "cwd": ".",
       "timeout": 300,
       "gate": true
     },
     {
-      "name": "deploy-dry-run",
-      "cmd": "npx wrangler deploy --dry-run",
+      "name": "build",
+      "cmd": "npm run build",
+      "cwd": ".",
+      "timeout": 300,
+      "gate": true
+    },
+    {
+      "name": "eval-validate",
+      "cmd": "node dist/evals/cli.js validate",
       "cwd": ".",
       "timeout": 300,
       "gate": true

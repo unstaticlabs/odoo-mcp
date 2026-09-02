@@ -1,0 +1,19 @@
+# Third-party Agent Skills
+
+The skill directories in this folder are vendored from their upstream repositories.
+The `.claude/skills/` entries are relative symlinks to these canonical copies so Codex
+and Claude Code use the same files.
+
+| Skill | Upstream | License |
+| --- | --- | --- |
+| `mcp-builder` | `anthropics/skills` | See `mcp-builder/LICENSE.txt` |
+| `differential-review` | `trailofbits/skills` | CC-BY-SA-4.0; see `LICENSES/trailofbits-skills-CC-BY-SA-4.0.txt` |
+| `property-based-testing` | `trailofbits/skills` | CC-BY-SA-4.0; see `LICENSES/trailofbits-skills-CC-BY-SA-4.0.txt` |
+| `supply-chain-risk-auditor` | `trailofbits/skills` | CC-BY-SA-4.0; see `LICENSES/trailofbits-skills-CC-BY-SA-4.0.txt` |
+| `commit-work` | `softaworks/agent-toolkit` | MIT; see `commit-work/LICENSE.txt` |
+
+`differential-review` is adapted for `odoo-mcp`; its `SKILL.md` records the upstream
+source and adaptation date.
+
+`commit-work` is adapted for `odoo-mcp` from the Softaworks workflow; its `SKILL.md`
+records the upstream inspiration.

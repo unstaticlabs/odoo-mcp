@@ -1,32 +1,48 @@
 {
   "name": "odoo-mcp",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
+  "main": "dist/http.js",
   "scripts": {
-    "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
+    "postinstall": "node scripts/patch-better-auth-loopback.mjs",
+    "build": "tsc",
+    "dev": "tsx watch src/http.ts",
+    "start": "node dist/http.js",
+    "stdio": "node dist/stdio.js",
+    "oauth:migrate": "node dist/auth/cli.js migrate",
+    "oauth:backup": "node dist/auth/cli.js backup",
+    "eval:validate": "npm run build && node dist/evals/cli.js validate",
+    "eval:surfaces": "npm run build && node dist/evals/cli.js surfaces",
     "typecheck": "tsc --noEmit",
-    "cf-typegen": "wrangler types",
-    "test": "bun test"
+    "test": "vitest run test/vps test/evals",
+    "test:integration": "vitest run test/integration",
+    "test:watch": "vitest test/vps test/evals",
+    "check": "npm run typecheck && npm test && npm run build"
   },
   "dependencies": {
-    "@cloudflare/workers-oauth-provider": "^0.8.1",
-    "@modelcontextprotocol/sdk": "^1.29.0",
-    "agents": "^0.17.3",
-    "pdf-lib": "^1.17.1",
+    "@better-auth/cimd": "1.7.2",
+    "@better-auth/mcp": "1.7.2",
+    "@modelcontextprotocol/express": "2.0.0",
+    "@modelcontextprotocol/node": "2.0.0",
+    "@modelcontextprotocol/server": "2.0.0",
+    "better-auth": "1.7.2",
+    "better-sqlite3": "^12.2.0",
+    "express": "^5.1.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^5.20260704.1",
+    "@modelcontextprotocol/client": "2.0.0",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/express": "^5.0.3",
+    "@types/node": "^24.0.0",
+    "fast-check": "^4.3.0",
+    "tsx": "^4.20.0",
     "typescript": "^7.0.0",
-    "wrangler": "^4.108.0"
+    "vitest": "^4.0.0",
+    "yaml": "^2.8.1"
   },
-  "allowScripts": {
-    "esbuild@0.28.1": true,
-    "workerd@1.20260721.1": true,
-    "sharp@0.34.5": true,
-    "fsevents@2.3.3": true,
-    "core-js-pure@3.49.0": true
+  "engines": {
+    "node": ">=24 <25"
   }
 }
