@@ -60,7 +60,7 @@ describe("stdio entrypoint", () => {
     try {
       await client.connect(transport);
       const tools = await client.listTools();
-      expect(tools.tools).toHaveLength(20);
+      expect(tools.tools).toHaveLength(18);
       expect(tools.tools.map((tool) => tool.name)).toEqual(expect.arrayContaining([
         "odoo_search_capabilities",
         "odoo_search_models",
@@ -69,6 +69,7 @@ describe("stdio entrypoint", () => {
         "odoo_read_records"
       ]));
       expect(tools.tools.map((tool) => tool.name)).not.toContain("odoo_call_method");
+      expect(tools.tools.map((tool) => tool.name)).not.toContain("home_get_attention");
     } finally {
       await client.close();
       await new Promise<void>((resolve, reject) => {

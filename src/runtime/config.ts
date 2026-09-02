@@ -28,6 +28,7 @@ export interface RuntimeConfig {
   responseBytes: number;
   targetConcurrency: number;
   allowLocalHttpOdoo: boolean;
+  documentMaterializationEnabled: boolean;
   oauth: OAuthRuntimeConfig | null;
 }
 
@@ -112,8 +113,9 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runtime
   const host = env.MCP_HOST ?? "127.0.0.1";
   const port = boundedInteger(env.MCP_PORT, 3000, 1, 65535, "MCP_PORT");
   const publicOrigin = new URL(env.MCP_PUBLIC_ORIGIN ?? `http://localhost:${port}`).origin;
+  const publicHostname = new URL(publicOrigin).hostname;
   const allowedHosts = csv(env.MCP_ALLOWED_HOSTS);
-  const allowedOrigins = csv(env.MCP_ALLOWED_ORIGINS);
+  const allowedOrigins = [...new Set([publicHostname, ...csv(env.MCP_ALLOWED_ORIGINS)])];
   const oauthEnabled = booleanEnv(env.MCP_OAUTH_ENABLED);
   const authSecret = secretValue(env, "BETTER_AUTH_SECRET");
   const encryptionKey = secretValue(env, "MCP_CREDENTIAL_ENCRYPTION_KEY");
@@ -128,13 +130,14 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runtime
     host,
     port,
     publicOrigin,
-    allowedHosts: allowedHosts.length > 0 ? allowedHosts : [new URL(publicOrigin).hostname],
-    allowedOrigins: allowedOrigins.length > 0 ? allowedOrigins : [new URL(publicOrigin).hostname],
+    allowedHosts: allowedHosts.length > 0 ? allowedHosts : [publicHostname],
+    allowedOrigins,
     targets,
     requestBytes: boundedInteger(env.MCP_MAX_REQUEST_BYTES, 1024 * 1024, 1024, 16 * 1024 * 1024, "MCP_MAX_REQUEST_BYTES"),
     responseBytes: boundedInteger(env.MCP_MAX_RESPONSE_BYTES, 1024 * 1024, 1024, 16 * 1024 * 1024, "MCP_MAX_RESPONSE_BYTES"),
     targetConcurrency: boundedInteger(env.MCP_TARGET_CONCURRENCY, 8, 1, 64, "MCP_TARGET_CONCURRENCY"),
     allowLocalHttpOdoo: allowLocalHttp,
+    documentMaterializationEnabled: booleanEnv(env.MCP_DOCUMENT_MATERIALIZATION_ENABLED),
     oauth: oauthEnabled
       ? {
           databasePath: env.MCP_OAUTH_DATABASE!,

@@ -1,7 +1,18 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createOAuthService, redirectFromAuthPayload } from "../../src/auth/oauth.js";
 import { CredentialVault } from "../../src/auth/vault.js";
 import { createCapabilityRegistry } from "../../src/capabilities/index.js";
@@ -14,16 +25,20 @@ afterEach(() => {
   for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 
-function oauthConfiguration() {
-  const directory = mkdtempSync(join(tmpdir(), "odoo-mcp-auth-"));
-  directories.push(directory);
+function oauthConfiguration(databasePath?: string) {
+  let resolvedDatabasePath = databasePath;
+  if (!resolvedDatabasePath) {
+    const directory = mkdtempSync(join(tmpdir(), "odoo-mcp-auth-"));
+    directories.push(directory);
+    resolvedDatabasePath = join(directory, "oauth.sqlite");
+  }
   return loadRuntimeConfig({
     ODOO_PUBLIC_ORIGIN: "https://odoo.example",
     ODOO_INTERNAL_ORIGIN: "http://odoo:8069",
     ODOO_DATABASE: "usl",
     MCP_PUBLIC_ORIGIN: "http://127.0.0.1:3000",
     MCP_OAUTH_ENABLED: "true",
-    MCP_OAUTH_DATABASE: join(directory, "oauth.sqlite"),
+    MCP_OAUTH_DATABASE: resolvedDatabasePath,
     BETTER_AUTH_SECRET: "a-development-secret-that-is-long-enough-for-tests",
     MCP_CREDENTIAL_ENCRYPTION_KEY: Buffer.alloc(32, 7).toString("base64")
   });
@@ -75,6 +90,69 @@ describe("OAuth credential vault", () => {
     });
     vault.close();
     expect(readFileSync(config.oauth!.databasePath).includes(Buffer.from(apiKey))).toBe(false);
+  });
+
+  it("creates a missing private directory and secures SQLite files", () => {
+    const root = mkdtempSync(join(tmpdir(), "odoo-mcp-auth-parent-"));
+    directories.push(root);
+    const databaseDirectory = join(root, "vault");
+    const config = oauthConfiguration(join(databaseDirectory, "oauth.sqlite"));
+    const vault = new CredentialVault(config.oauth!, config);
+    vault.database.exec("INSERT INTO odoo_enrollment (enrollment_id, internal_email, target_id, public_origin, database_name, encrypted_api_key, odoo_user_id, display_name, created_at, updated_at, grant_expires_at) VALUES ('test', 'test@mcp.invalid', 'default', 'https://odoo.example', 'usl', 'encrypted', 1, 'Test', 1, 1, 2)");
+
+    expect(statSync(databaseDirectory).mode & 0o777).toBe(0o700);
+    for (const path of [config.oauth!.databasePath, `${config.oauth!.databasePath}-wal`, `${config.oauth!.databasePath}-shm`]) {
+      expect(existsSync(path)).toBe(true);
+      expect(statSync(path).mode & 0o777).toBe(0o600);
+    }
+    vault.close();
+  });
+
+  it("rejects permissive vault directories without changing them", () => {
+    const config = oauthConfiguration();
+    chmodSync(join(config.oauth!.databasePath, ".."), 0o755);
+    writeFileSync(config.oauth!.databasePath, "", { mode: 0o644 });
+    expect(() => new CredentialVault(config.oauth!, config)).toThrow(/must use mode 700/);
+    expect(statSync(join(config.oauth!.databasePath, "..")).mode & 0o777).toBe(0o755);
+    expect(statSync(config.oauth!.databasePath).mode & 0o777).toBe(0o644);
+  });
+
+  it("secures an existing SQLite file without modifying its private parent", () => {
+    const config = oauthConfiguration();
+    const databaseDirectory = join(config.oauth!.databasePath, "..");
+    writeFileSync(config.oauth!.databasePath, "", { mode: 0o644 });
+    const vault = new CredentialVault(config.oauth!, config);
+    expect(statSync(databaseDirectory).mode & 0o777).toBe(0o700);
+    expect(statSync(config.oauth!.databasePath).mode & 0o777).toBe(0o600);
+    vault.close();
+  });
+
+  it("rejects the shared temporary directory without modifying it", () => {
+    const databasePath = join(tmpdir(), `odoo-mcp-shared-parent-${randomUUID()}.sqlite`);
+    const before = statSync(tmpdir()).mode & 0o777;
+    const config = oauthConfiguration(databasePath);
+    expect(() => new CredentialVault(config.oauth!, config)).toThrow(/temporary directory/);
+    expect(statSync(tmpdir()).mode & 0o777).toBe(before);
+    expect(existsSync(databasePath)).toBe(false);
+  });
+
+  it("rejects symlinked and differently owned vault directories", () => {
+    const root = mkdtempSync(join(tmpdir(), "odoo-mcp-auth-links-"));
+    directories.push(root);
+    const target = join(root, "target");
+    const link = join(root, "link");
+    mkdirSync(target, { mode: 0o700 });
+    symlinkSync(target, link);
+    const linked = oauthConfiguration(join(link, "oauth.sqlite"));
+    expect(() => new CredentialVault(linked.oauth!, linked)).toThrow(/regular directory/);
+
+    const owned = oauthConfiguration(join(target, "oauth.sqlite"));
+    const getuid = vi.spyOn(process, "getuid").mockReturnValue(process.getuid() + 1);
+    try {
+      expect(() => new CredentialVault(owned.oauth!, owned)).toThrow(/owned by the MCP process user/);
+    } finally {
+      getuid.mockRestore();
+    }
   });
 
   it("makes enrollment revocation authoritative for existing bearer claims", () => {

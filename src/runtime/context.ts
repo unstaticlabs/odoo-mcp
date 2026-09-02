@@ -33,6 +33,8 @@ export interface RequestContext {
   availableModules?: ReadonlySet<string> | null;
   agentIdentity?: AgentIdentity;
   validateAgentIdentity?: (signal?: AbortSignal) => Promise<AgentIdentity>;
+  availablePublicMethods?: ReadonlyMap<string, ReadonlySet<string>> | null;
+  enabledFeatures?: ReadonlySet<string>;
   authInfo?: AuthInfo;
 }
 
