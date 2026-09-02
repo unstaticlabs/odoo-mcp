@@ -22,9 +22,10 @@ bearer capabilities.
 - Node 24, Express 5, MCP TypeScript SDK 2.0.
 - Streamable HTTP at `/mcp` and `/mcp/:profile`.
 - `stdio` for local Codex and Claude clients.
-- `/healthz` for process health and `/readyz` for registry/OAuth readiness.
+- `/healthz` for process health and `/readyz` for registry, OAuth, and analytics status.
 - JSON-2 calls to `/json/2/{model}/{method}` and API discovery through authenticated `/doc-bearer`.
 - Stateless MCP requests; no application-level MCP session store.
+- Optional, fail-open, privacy-filtered PostHog MCP Analytics.
 
 The default surface currently contains 19 tools and remains below the 15,000 estimated schema-token budget. Dynamic clients should use `/mcp/all`; only these tools are marked for immediate loading:
 
@@ -79,8 +80,9 @@ docker build -t usl-odoo-mcp .
 - [Authentication and credential operations](docs/authentication.md)
 - [Tool catalogue and profiles](docs/tool-catalogue.md)
 - [VPS deployment and rollback](docs/deployment.md)
+- [MCP observability and privacy](docs/observability.md)
 - [Testing](docs/testing.md)
 - [Agent-interface evaluation](docs/evaluation.md)
 - [Breaking migration guide](docs/migration.md)
 - [Authoritative refactor specification](docs/refactor-spec.md)
-- [Future usage-analytics issue](docs/issues/mcp-usage-analytics.md)
+- [Fulfilled usage-analytics workstream](docs/issues/mcp-usage-analytics.md)

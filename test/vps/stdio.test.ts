@@ -18,7 +18,8 @@ describe("stdio entrypoint", () => {
         ODOO_DATABASE: "test",
         ODOO_URL: "https://odoo.example",
         ODOO_API_KEY: "stdio-test-key",
-        MCP_OAUTH_ENABLED: "false"
+        MCP_OAUTH_ENABLED: "false",
+        MCP_ANALYTICS_ENABLED: "false"
       },
       stderr: "pipe"
     });
