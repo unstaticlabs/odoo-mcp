@@ -9,6 +9,7 @@ The interface deliberately combines:
 - deferred semantic context tools and fixed-intent business actions;
 - thematic profiles generated from one capability registry;
 - Odoo-authoritative permissions, record rules, company scope, and transactions.
+- a governed autonomous Agent identity for every connection.
 
 Tool visibility is context optimization, not authorization. `odoo_call_method` remains available in the `advanced` and `all` profiles as a one-shot escape hatch for any Odoo-public JSON-2 method.
 
@@ -53,6 +54,10 @@ X-Odoo-Url: https://odoo.example.com
 X-Odoo-Database: production
 X-Odoo-Api-Key: <odoo-api-key>
 ```
+
+The key must belong to an active Agent created in Odoo **My Agents**. Human API
+keys are rejected. The Agent remains the Odoo actor while the Agent's owner is
+the accountable human and the upper bound on delegated authority.
 
 The URL/database pair must match configured targets. The MCP maps the public URL to the private VPS/Compose origin and never forwards the credential through redirects. `Authorization` is reserved for MCP OAuth bearer tokens.
 

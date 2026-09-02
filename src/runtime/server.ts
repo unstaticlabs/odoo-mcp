@@ -1,5 +1,6 @@
 import type { AuthInfo, McpRequestContext } from "@modelcontextprotocol/server";
 import { OdooClient } from "../odoo/client.js";
+import { loadAgentIdentity } from "../odoo/agent_identity.js";
 import { createCapabilityRegistry } from "../capabilities/index.js";
 import type { CapabilityRegistry } from "../capabilities/registry.js";
 import type { RuntimeConfig } from "./config.js";
@@ -47,6 +48,12 @@ export function createHttpServerFactory(services: RuntimeServices, profile: Prof
     context.eventObserver = services.observability;
     context.analyticsPrincipalId = services.observability.principalId(principal);
     context.trace = traceContextFromHttp(mcpContext.requestInfo?.headers);
+    context.validateAgentIdentity = async (signal) => {
+      const identity = await loadAgentIdentity(services.client, context, signal);
+      context.agentIdentity = identity;
+      return identity;
+    };
+    await context.validateAgentIdentity(mcpContext.requestInfo?.signal);
     const surface = await services.client.discoverSurface(context, mcpContext.requestInfo?.signal);
     context.availableModules = surface?.modules ?? null;
     context.availablePublicMethods = surface?.publicMethods ?? null;
@@ -58,7 +65,8 @@ export function createHttpServerFactory(services: RuntimeServices, profile: Prof
       services.registry.list(profile, {
         modules: context.availableModules,
         publicMethods: context.availablePublicMethods,
-        enabledFeatures: context.enabledFeatures
+        enabledFeatures: context.enabledFeatures,
+        accessMode: context.agentIdentity?.agent.access_mode
       })
     );
     return server;
@@ -74,6 +82,12 @@ export function createStdioServerFactory(
     const context = createRequestContext(profile, principal);
     context.eventObserver = services.observability;
     context.analyticsPrincipalId = services.observability.principalId(principal);
+    context.validateAgentIdentity = async (signal) => {
+      const identity = await loadAgentIdentity(services.client, context, signal);
+      context.agentIdentity = identity;
+      return identity;
+    };
+    await context.validateAgentIdentity();
     const surface = await services.client.discoverSurface(context);
     context.availableModules = surface?.modules ?? null;
     context.availablePublicMethods = surface?.publicMethods ?? null;
@@ -85,7 +99,8 @@ export function createStdioServerFactory(
       services.registry.list(profile, {
         modules: context.availableModules,
         publicMethods: context.availablePublicMethods,
-        enabledFeatures: context.enabledFeatures
+        enabledFeatures: context.enabledFeatures,
+        accessMode: context.agentIdentity?.agent.access_mode
       })
     );
     return server;

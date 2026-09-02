@@ -55,11 +55,11 @@ HTTP or stdio
 
 The Node server uses Express 5 and MCP SDK 2.0. `/mcp` serves the broad default profile, `/mcp/:profile` serves registry-generated views, and `/healthz` and `/readyz` expose process and dependency readiness. `stdio` supports local development and local Codex/Claude clients. The server has no MCP session store, Worker state, Durable Objects, or standalone SSE transport.
 
-Direct clients submit `X-Odoo-Url`, `X-Odoo-Database`, and `X-Odoo-Api-Key`. `Authorization` is reserved for MCP OAuth. The submitted public origin and database must match a configured target; the adapter uses that target's internal VPS/Compose origin.
+Direct clients submit `X-Odoo-Url`, `X-Odoo-Database`, and `X-Odoo-Api-Key`. `Authorization` is reserved for MCP OAuth. The submitted public origin and database must match a configured target; the adapter uses that target's internal VPS/Compose origin. The key must identify an active governed Odoo Agent; human keys are rejected.
 
-Hosted clients enroll an Odoo connection through Better Auth. The API key is AES-GCM encrypted in a mounted SQLite credential vault. Access tokens last one hour; rotating refresh tokens last 180 days with a one-year grant ceiling. Cloudflare grants are not migrated.
+Hosted clients enroll a governed Odoo Agent through Better Auth. The human authorizes the connector, while the Agent remains the execution identity. The Agent key is AES-GCM encrypted in a mounted SQLite credential vault. Access tokens last one hour; rotating refresh tokens last 180 days with a one-year grant ceiling. Cloudflare grants are not migrated.
 
-Visibility and authorization remain independent. Profiles optimize context and tool selection. Odoo authentication, ACLs, record rules, field access, company context, public method publication, validation, and irreversible-action policy decide actual authority.
+Visibility and authorization remain independent. Profiles optimize context and tool selection. Before every capability, the MCP revalidates `usl.agent.current_identity`. Odoo authentication, the owner/delegation intersection, ACLs, record rules, field access, company context, public method publication, validation, and irreversible-action policy decide actual authority.
 
 ## Capability registry and profiles
 

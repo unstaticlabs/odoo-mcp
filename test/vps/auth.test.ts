@@ -13,7 +13,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createOAuthService } from "../../src/auth/oauth.js";
+import { createOAuthService, redirectFromAuthPayload } from "../../src/auth/oauth.js";
 import { CredentialVault } from "../../src/auth/vault.js";
 import { createCapabilityRegistry } from "../../src/capabilities/index.js";
 import { OdooClient } from "../../src/odoo/client.js";
@@ -175,6 +175,23 @@ describe("OAuth credential vault", () => {
   });
 });
 
+describe("OAuth continuation", () => {
+  it.each([
+    [{ url: "https://client.example/callback" }, "https://client.example/callback"],
+    [{ redirect_uri: "https://client.example/callback" }, "https://client.example/callback"],
+    [{ redirectUri: "https://client.example/callback" }, "https://client.example/callback"]
+  ])("accepts every supported continuation field", (payload, expected) => {
+    expect(redirectFromAuthPayload(payload)).toBe(expected);
+  });
+
+  it("rejects a missing or invalid continuation", () => {
+    expect(redirectFromAuthPayload({})).toBeNull();
+    expect(redirectFromAuthPayload({ url: 42 })).toBeNull();
+    expect(redirectFromAuthPayload({ url: "javascript:alert(1)" })).toBeNull();
+    expect(redirectFromAuthPayload({ url: "//untrusted.example" })).toBeNull();
+  });
+});
+
 describe("Better Auth MCP provider", () => {
   it("migrates its SQLite schema and publishes authorization metadata", async () => {
     const config = oauthConfiguration();
@@ -199,6 +216,22 @@ describe("Better Auth MCP provider", () => {
     );
     expect(resource.status).toBe(200);
     expect(await resource.json()).toMatchObject({ resource: "http://127.0.0.1:3000/mcp" });
+    service!.close();
+  });
+
+  it("uses normalized continuation fields on the consent page", async () => {
+    const config = oauthConfiguration();
+    const client = new OdooClient();
+    const service = createOAuthService(config, {
+      client,
+      registry: createCapabilityRegistry(client)
+    });
+    await service!.ready;
+    const response = await service!.consentFetch(new Request("http://127.0.0.1:3000/oauth/consent"));
+    const body = await response.text();
+    expect(body).toContain("data.url || data.redirect_uri || data.redirectUri");
+    expect(body).toContain("new URL(candidate, location.origin)");
+    expect(body).not.toContain("location.assign(data.redirect_uri)");
     service!.close();
   });
 });

@@ -128,6 +128,7 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
       }).strict())
     }).strict(),
     async handler({ query, limit }, context) {
+      const accessMode = context.agentIdentity?.agent.access_mode ?? "read_write";
       emitEvent("mcp.capabilities.searched", {
         request_id: context.requestId,
         correlation_id: context.correlationId,
@@ -136,7 +137,8 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
         result_count: registry.search(query, limit, {
           modules: context.availableModules,
           publicMethods: context.availablePublicMethods,
-          enabledFeatures: context.enabledFeatures
+          enabledFeatures: context.enabledFeatures,
+          accessMode
         }).length
       }, context.eventObserver);
       return {
@@ -144,7 +146,8 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
           capabilities: registry.search(query, limit, {
             modules: context.availableModules,
             publicMethods: context.availablePublicMethods,
-            enabledFeatures: context.enabledFeatures
+            enabledFeatures: context.enabledFeatures,
+            accessMode
           }).map(capabilitySummary)
         }
       };
@@ -552,7 +555,7 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
     effect: "read",
     annotations: readAnnotations,
     keywords: ["user", "companies", "multi-company", "modules", "locale", "timezone"],
-    requiredModules: [],
+    requiredModules: ["usl_access_control"],
     defaultVisible: true,
     alwaysLoad: false,
     sortOrder: 70,
@@ -561,9 +564,34 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
       user: RecordSchema,
       companies: RecordsSchema,
       modules: z.array(z.string()),
-      locale: z.object({ lang: z.string().optional(), tz: z.string().optional() }).strict()
+      locale: z.object({ lang: z.string().optional(), tz: z.string().optional() }).strict(),
+      principal_kind: z.literal("agent"),
+      agent: z.object({
+        id: z.number().int().positive(),
+        name: z.string(),
+        purpose: z.string(),
+        access_mode: z.enum(["read_only", "read_write", "mixed"]),
+        authority_reduced: z.boolean()
+      }).strict(),
+      owner: z.object({
+        id: z.number().int().positive(),
+        name: z.string()
+      }).strict(),
+      credential: z.object({
+        id: z.number().int().positive(),
+        name: z.string(),
+        expires_at: z.string()
+      }).strict(),
+      effective_company_ids: z.array(z.number().int().positive()),
+      effective_applications: z.array(z.object({
+        id: z.union([z.number().int().positive(), z.literal("settings")]),
+        name: z.string(),
+        access: z.enum(["read_only", "read_write"])
+      }).strict())
     }).strict(),
     async handler(_input, context, signal) {
+      const identity = context.agentIdentity;
+      if (!identity) throw new Error("The governed Agent identity was not resolved");
       const userContext = await client.call<Record<string, unknown>>(context, "res.users", "context_get", {}, { signal });
       const userId = userContext.uid;
       if (!Number.isInteger(userId) || (userId as number) <= 0) throw new Error("Odoo did not return the authenticated user id");
@@ -597,7 +625,19 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
           locale: {
             ...(typeof userContext.lang === "string" ? { lang: userContext.lang } : {}),
             ...(typeof userContext.tz === "string" ? { tz: userContext.tz } : {})
-          }
+          },
+          principal_kind: identity.principal_kind,
+          agent: {
+            id: identity.agent.id,
+            name: identity.agent.name,
+            purpose: identity.agent.purpose,
+            access_mode: identity.agent.access_mode,
+            authority_reduced: identity.agent.authority_reduced
+          },
+          owner: identity.owner,
+          credential: identity.credential,
+          effective_company_ids: identity.company_ids,
+          effective_applications: identity.effective_applications
         },
         ...(modules.length === 0 ? { warnings: ["Installed module metadata was unavailable for this identity."] } : {})
       };
@@ -761,7 +801,7 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
       model: ModelNameSchema,
       id: PositiveIdSchema,
       body: z.string().min(1).max(50_000),
-      subtype: z.string().min(1).max(255).default("mail.mt_note"),
+      subtype: z.enum(["mail.mt_note", "mail.mt_comment"]).default("mail.mt_note"),
       body_is_html: z.boolean().default(false),
       context: OdooContextSchema
     }).strict(),
@@ -788,6 +828,67 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
         }
       });
       return receipt.finalize((result) => ({ data: { result, execution: { correlation_id: context.correlationId, outcome: "succeeded" as const } } }));
+    }
+  }));
+
+  registry.add(defineCapability({
+    id: "core.following.self",
+    name: "odoo_set_self_following",
+    title: "Follow or Unfollow Odoo Record",
+    description:
+      "Follow or unfollow the authenticated Agent on one readable Chatter record. This cannot add or remove any other follower.",
+    layer: "generic",
+    toolsets: ["core", "activities"],
+    profiles: [],
+    effect: "write",
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true
+    },
+    keywords: ["follow", "unfollow", "follower", "chatter", "subscribe"],
+    requiredModules: ["mail"],
+    defaultVisible: true,
+    alwaysLoad: false,
+    sortOrder: 115,
+    input: z.object({
+      model: ModelNameSchema,
+      id: PositiveIdSchema,
+      following: z.boolean(),
+      context: OdooContextSchema
+    }).strict(),
+    output: z.object({ following: z.boolean(), execution: ExecutionSchema }).strict(),
+    async handler({ model, id, following, context: requestedContext }, context, signal) {
+      const partnerId = context.agentIdentity?.agent.partner_id;
+      if (!partnerId) throw new Error("The governed Agent partner identity was not resolved");
+      const receipt = await client.call<unknown>(
+        context,
+        model,
+        following ? "message_subscribe" : "message_unsubscribe",
+        {
+          ids: [id],
+          partner_ids: [partnerId],
+          context: attributedContext(requestedContext, context.correlationId)
+        },
+        {
+          kind: "mutation",
+          signal,
+          reconciliation: {
+            targetModel: model,
+            knownIds: [id],
+            fields: ["message_partner_ids"],
+            suggestedTool: "odoo_read_records",
+            instructions: "Read the record's followers before repeating the subscription change."
+          }
+        }
+      );
+      return receipt.finalize(() => ({
+        data: {
+          following,
+          execution: { correlation_id: context.correlationId, outcome: "succeeded" as const }
+        }
+      }));
     }
   }));
 

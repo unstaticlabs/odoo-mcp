@@ -57,7 +57,8 @@ export class OdooError extends Error {
     readonly callKind: OdooCallKind = "read",
     readonly mutationStage?: MutationStage,
     readonly reconciliation?: MutationReconciliation,
-    readonly known?: MutationKnownFacts
+    readonly known?: MutationKnownFacts,
+    readonly policyCode?: string
   ) {
     super(message);
     this.name = "OdooError";
@@ -248,6 +249,25 @@ function errorMessage(payload: unknown): string | undefined {
     }
   }
   return typeof record.message === "string" ? record.message : undefined;
+}
+
+function policyCode(payload: unknown): string | undefined {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return undefined;
+  const record = payload as Record<string, unknown>;
+  const candidates: unknown[] = [record.context];
+  if (record.error && typeof record.error === "object" && !Array.isArray(record.error)) {
+    const error = record.error as Record<string, unknown>;
+    candidates.push(error.context);
+    if (error.data && typeof error.data === "object" && !Array.isArray(error.data)) {
+      candidates.push((error.data as Record<string, unknown>).context);
+    }
+  }
+  for (const candidate of candidates) {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
+    const code = (candidate as Record<string, unknown>).usl_code;
+    if (typeof code === "string" && /^[a-z][a-z0-9_]{2,63}$/.test(code)) return code;
+  }
+  return undefined;
 }
 
 async function boundedText(
@@ -448,7 +468,8 @@ export class OdooClient {
               reconciliation,
               kind === "mutation" && reconciliation
                 ? knownFacts(reconciliation, { requestSent: "yes", responseReceived: "yes", resultReceived: "no" })
-                : undefined
+                : undefined,
+              policyCode(payload)
             );
           }
           if (unparsable) {
@@ -648,6 +669,22 @@ export class OdooClient {
 
 export function toolFailureFromError(error: unknown) {
   if (error instanceof OdooError) {
+    if (error.policyCode) {
+      return {
+        code: error.policyCode,
+        message: error.message,
+        retryable: false,
+        outcome: error.mutationOutcome,
+        recovery:
+          error.policyCode === "agent_suspended"
+            ? "Ask the Agent owner to review and reactivate the Agent."
+            : error.policyCode === "agent_authority_reduced"
+              ? "Ask the Agent owner to review its reduced companies and application access."
+              : error.policyCode === "agent_read_only_action_denied"
+                ? "Use a read or approved collaboration capability, or ask the owner to grant read/write access for this application."
+              : "Use a permitted recoverable workflow or ask the accountable human to perform the operation."
+      } as const;
+    }
     const unknownMutation = error.callKind === "mutation" && error.mutationOutcome === "unknown";
     const retryGuidance = unknownMutation
       ? "reconcile_first"

@@ -96,6 +96,61 @@ describe("canonical capability registry", () => {
     expect(names).not.toContain("expense_batches_post");
   });
 
+  it("limits read-only Agents to reads and the explicit collaboration corridor", () => {
+    const registry = createCapabilityRegistry(new OdooClient());
+    const names = registry.list("all", { accessMode: "read_only" }).map((item) => item.name);
+    expect(names).toContain("odoo_search_records");
+    expect(names).toContain("odoo_post_message");
+    expect(names).toContain("odoo_set_self_following");
+    expect(names).toContain("activities_schedule");
+    expect(names).toContain("documents_create_download_url");
+    expect(names).toContain("documents_revoke_download_url");
+    expect(names).not.toContain("expense_batches_get_context");
+    expect(names).not.toContain("odoo_create_records");
+    expect(names).not.toContain("odoo_update_records");
+    expect(names).not.toContain("odoo_archive_records");
+    expect(names).not.toContain("odoo_delete_records");
+    expect(names).not.toContain("odoo_call_method");
+    const searched = registry.search("create update delete", 20, { accessMode: "read_only" });
+    expect(searched.map((item) => item.name)).not.toEqual(expect.arrayContaining([
+      "odoo_create_records",
+      "odoo_update_records",
+      "odoo_delete_records"
+    ]));
+  });
+
+  it("keeps write tools available for mixed Agents while Odoo enforces each application", () => {
+    const registry = createCapabilityRegistry(new OdooClient());
+    const names = registry.list("all", { accessMode: "mixed" }).map((item) => item.name);
+    expect(names).toContain("odoo_search_records");
+    expect(names).toContain("odoo_create_records");
+    expect(names).toContain("odoo_update_records");
+  });
+
+  it("publishes the read-only Agent catalogue from the authenticated identity", async () => {
+    const registry = createCapabilityRegistry(new OdooClient());
+    const server = registry.createServer(requestContext("read_only"));
+    const client = new Client({ name: "readonly-registry-test", version: "1.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    connections.push(async () => {
+      await client.close();
+      await server.close();
+    });
+    const tools = await client.listTools();
+    const names = tools.tools.map((tool) => tool.name);
+    expect(names).toEqual(expect.arrayContaining([
+      "activities_schedule",
+      "documents_create_download_url",
+      "documents_revoke_download_url",
+      "odoo_post_message",
+      "odoo_set_self_following"
+    ]));
+    expect(names).not.toContain("expense_batches_get_context");
+    expect(names).not.toContain("odoo_create_records");
+  });
+
   it("hides backend-dependent tools until their methods and feature flag are both available", () => {
     const registry = createCapabilityRegistry(new OdooClient());
     const modules = new Set(["base", "api_doc", "mail", "usl_documents"]);
@@ -223,7 +278,6 @@ describe("canonical capability registry", () => {
       await client.close();
       await server.close();
     });
-
     const result = await client.callTool({ name: "test_invalid_mutation_output", arguments: {} });
     expect(fetcher).toHaveBeenCalledTimes(1);
     expect(result.isError).toBe(true);
