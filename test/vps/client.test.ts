@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { OdooClient, OdooError } from "../../src/odoo/client.js";
 import { requestContext } from "./fixtures.js";
 
@@ -110,13 +110,42 @@ describe("JSON-2 adapter", () => {
   it("discovers installed modules and published methods from the API document", async () => {
     const client = new OdooClient(8, 1024, (async () => Response.json({
       modules: ["base", "usl_documents"],
-      models: [{ model: "usl.document", methods: ["mcp_get", "mcp_create_download_grant"] }]
+      models: [{
+        model: "usl.document",
+        methods: ["mcp_get", "mcp_create_download_grant"],
+        access: { read: true, create: false, write: false, unlink: false }
+      }]
     })) as typeof fetch);
     const surface = await client.discoverSurface(requestContext());
     expect(surface?.modules).toEqual(new Set(["base", "usl_documents"]));
     expect(surface?.publicMethods.get("usl.document")).toEqual(
       new Set(["mcp_get", "mcp_create_download_grant"])
     );
+    expect(surface?.modelAccess.get("usl.document")).toEqual({
+      read: true,
+      create: false,
+      write: false,
+      unlink: false
+    });
+  });
+
+  it("force-revalidates API discovery conditionally even inside the local cache TTL", async () => {
+    const requests: RequestInit[] = [];
+    const fetcher = vi.fn<typeof fetch>(async (_input, init) => {
+      requests.push(init ?? {});
+      if (new Headers(init?.headers).get("If-None-Match") === '\"surface-v1\"') {
+        return new Response(null, { status: 304 });
+      }
+      return Response.json({ modules: ["base"], models: [] }, { headers: { ETag: '\"surface-v1\"' } });
+    });
+    const client = new OdooClient(8, 1024, fetcher);
+    const context = requestContext();
+    const first = await client.fetchApiDocument(context);
+    expect(await client.fetchApiDocument(context)).toBe(first);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(await client.fetchApiDocument(context, undefined, undefined, { forceRevalidate: true })).toBe(first);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(new Headers(requests[1]?.headers).get("If-None-Match")).toBe('\"surface-v1\"');
   });
 
   it("keeps the HTTP status when an error response is not JSON", async () => {

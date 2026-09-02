@@ -43,9 +43,17 @@ export type AgentIdentity = z.infer<typeof AgentIdentitySchema>;
 export async function loadAgentIdentity(
   client: OdooClient,
   context: RequestContext,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  options: { background?: boolean } = {}
 ): Promise<AgentIdentity> {
-  const identity = await client.call<unknown>(context, "usl.agent", "current_identity", {}, { signal });
+  const identity = await client.call<unknown>(context, "usl.agent", "current_identity", {}, {
+    signal,
+    ...(options.background ? {
+      priority: "background" as const,
+      maxAttempts: 1 as const,
+      timeoutMs: 4_000
+    } : {})
+  });
   const parsed = AgentIdentitySchema.safeParse(identity);
   if (!parsed.success) {
     throw new Error(

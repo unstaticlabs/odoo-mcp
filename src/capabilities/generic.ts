@@ -86,6 +86,11 @@ function capabilitySummary(metadata: CapabilityMetadata) {
     always_load: metadata.alwaysLoad,
     required_modules: [...metadata.requiredModules],
     required_public_methods: metadata.requiredPublicMethods.map(({ model, method }) => ({ model, method })),
+    required_any_public_methods: [...metadata.requiredAnyPublicMethods],
+    required_model_access: metadata.requiredModelAccess.map(({ model, operation }) => ({
+      ...(model ? { model } : {}),
+      operation
+    })),
     required_features: [...metadata.requiredFeatures]
   };
 }
@@ -124,11 +129,15 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
         always_load: z.boolean(),
         required_modules: z.array(z.string()),
         required_public_methods: z.array(z.object({ model: z.string(), method: z.string() }).strict()),
+        required_any_public_methods: z.array(z.string()),
+        required_model_access: z.array(z.object({
+          model: z.string().optional(),
+          operation: z.enum(["read", "create", "write", "unlink"])
+        }).strict()),
         required_features: z.array(z.string())
       }).strict())
     }).strict(),
     async handler({ query, limit }, context) {
-      const accessMode = context.agentIdentity?.agent.access_mode ?? "read_write";
       emitEvent("mcp.capabilities.searched", {
         request_id: context.requestId,
         correlation_id: context.correlationId,
@@ -137,8 +146,8 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
         result_count: registry.search(query, limit, {
           modules: context.availableModules,
           publicMethods: context.availablePublicMethods,
-          enabledFeatures: context.enabledFeatures,
-          accessMode
+          modelAccess: context.availableModelAccess,
+          enabledFeatures: context.enabledFeatures
         }).length
       }, context.eventObserver);
       return {
@@ -146,8 +155,8 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
           capabilities: registry.search(query, limit, {
             modules: context.availableModules,
             publicMethods: context.availablePublicMethods,
-            enabledFeatures: context.enabledFeatures,
-            accessMode
+            modelAccess: context.availableModelAccess,
+            enabledFeatures: context.enabledFeatures
           }).map(capabilitySummary)
         }
       };
@@ -610,13 +619,7 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
             ids: companyIds,
             fields: ["display_name", "parent_id", "currency_id"]
           }, { signal });
-      let modules: string[] = [];
-      try {
-        const document = await client.fetchApiDocument<{ modules?: unknown[] }>(context, undefined, signal);
-        modules = (Array.isArray(document.modules) ? document.modules : []).filter((value): value is string => typeof value === "string");
-      } catch {
-        // Environment description remains useful when api_doc access is not granted.
-      }
+      const modules = [...(context.availableModules ?? [])];
       return {
         data: {
           user,
@@ -657,6 +660,7 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
     annotations: writeAnnotations,
     keywords: ["create", "insert", "new record"],
     requiredModules: [],
+    requiredModelAccess: [{ operation: "create" }],
     defaultVisible: true,
     alwaysLoad: false,
     sortOrder: 80,
@@ -711,6 +715,7 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
     annotations: writeAnnotations,
     keywords: ["write", "update", "edit", "change fields"],
     requiredModules: [],
+    requiredModelAccess: [{ operation: "write" }],
     defaultVisible: true,
     alwaysLoad: false,
     sortOrder: 90,
@@ -756,6 +761,7 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
     annotations: writeAnnotations,
     keywords: ["archive", "deactivate", "reversible removal"],
     requiredModules: [],
+    requiredAnyPublicMethods: ["action_archive"],
     defaultVisible: true,
     alwaysLoad: false,
     sortOrder: 100,
@@ -794,6 +800,7 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
     annotations: writeAnnotations,
     keywords: ["chatter", "note", "comment", "message_post"],
     requiredModules: ["mail"],
+    requiredAnyPublicMethods: ["message_post"],
     defaultVisible: true,
     alwaysLoad: false,
     sortOrder: 110,
@@ -849,6 +856,7 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
     },
     keywords: ["follow", "unfollow", "follower", "chatter", "subscribe"],
     requiredModules: ["mail"],
+    requiredAnyPublicMethods: ["message_subscribe", "message_unsubscribe"],
     defaultVisible: true,
     alwaysLoad: false,
     sortOrder: 115,
@@ -905,6 +913,7 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     keywords: ["delete", "unlink", "permanent", "irreversible"],
     requiredModules: [],
+    requiredModelAccess: [{ operation: "unlink" }],
     defaultVisible: false,
     alwaysLoad: false,
     sortOrder: 900,

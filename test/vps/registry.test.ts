@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createCapabilityRegistry } from "../../src/capabilities/index.js";
 import { CapabilityRegistry, defineCapability } from "../../src/capabilities/registry.js";
 import { OdooClient } from "../../src/odoo/client.js";
+import type { AgentAccessState } from "../../src/runtime/agent_access_cache.js";
 import { requestContext } from "./fixtures.js";
 
 const connections: Array<() => Promise<void>> = [];
@@ -96,22 +97,27 @@ describe("canonical capability registry", () => {
     expect(names).not.toContain("expense_batches_post");
   });
 
-  it("limits read-only Agents to reads and the explicit collaboration corridor", () => {
+  it("uses Odoo's read-only access document while preserving advertised collaboration methods", () => {
     const registry = createCapabilityRegistry(new OdooClient());
-    const names = registry.list("all", { accessMode: "read_only" }).map((item) => item.name);
+    const context = requestContext("read_only");
+    const availability = {
+      modelAccess: context.availableModelAccess,
+      publicMethods: context.availablePublicMethods,
+      enabledFeatures: context.enabledFeatures
+    };
+    const names = registry.list("all", availability).map((item) => item.name);
     expect(names).toContain("odoo_search_records");
     expect(names).toContain("odoo_post_message");
     expect(names).toContain("odoo_set_self_following");
     expect(names).toContain("activities_schedule");
     expect(names).toContain("documents_create_download_url");
     expect(names).toContain("documents_revoke_download_url");
-    expect(names).not.toContain("expense_batches_get_context");
+    expect(names).toContain("expense_batches_get_context");
     expect(names).not.toContain("odoo_create_records");
     expect(names).not.toContain("odoo_update_records");
-    expect(names).not.toContain("odoo_archive_records");
     expect(names).not.toContain("odoo_delete_records");
-    expect(names).not.toContain("odoo_call_method");
-    const searched = registry.search("create update delete", 20, { accessMode: "read_only" });
+    expect(names).toContain("odoo_call_method");
+    const searched = registry.search("create update delete", 20, availability);
     expect(searched.map((item) => item.name)).not.toEqual(expect.arrayContaining([
       "odoo_create_records",
       "odoo_update_records",
@@ -119,17 +125,27 @@ describe("canonical capability registry", () => {
     ]));
   });
 
-  it("keeps write tools available for mixed Agents while Odoo enforces each application", () => {
+  it("filters fixed tools per application while keeping generic writes for mixed access", () => {
     const registry = createCapabilityRegistry(new OdooClient());
-    const names = registry.list("all", { accessMode: "mixed" }).map((item) => item.name);
+    const modelAccess = new Map([
+      ["account.move", { read: true, create: false, write: false, unlink: false }],
+      ["project.task", { read: true, create: true, write: true, unlink: false }]
+    ]);
+    const names = registry.list("all", {
+      modelAccess,
+      publicMethods: new Map()
+    }).map((item) => item.name);
     expect(names).toContain("odoo_search_records");
     expect(names).toContain("odoo_create_records");
     expect(names).toContain("odoo_update_records");
+    expect(names).toContain("projects_create_task");
+    expect(names).not.toContain("expenses_configure_draft_vendor_bill");
+    expect(names).not.toContain("odoo_delete_records");
   });
 
   it("publishes the read-only Agent catalogue from the authenticated identity", async () => {
     const registry = createCapabilityRegistry(new OdooClient());
-    const server = registry.createServer(requestContext("read_only"));
+    const server = registry.createServer({ ...requestContext("read_only"), profile: "all" });
     const client = new Client({ name: "readonly-registry-test", version: "1.0.0" });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     await server.connect(serverTransport);
@@ -147,7 +163,7 @@ describe("canonical capability registry", () => {
       "odoo_post_message",
       "odoo_set_self_following"
     ]));
-    expect(names).not.toContain("expense_batches_get_context");
+    expect(names).toContain("expense_batches_get_context");
     expect(names).not.toContain("odoo_create_records");
   });
 
@@ -226,6 +242,73 @@ describe("canonical capability registry", () => {
       "documents_create_download_url",
       "documents_revoke_download_url"
     ]));
+  });
+
+  it("updates a dynamic stdio catalogue and notifies only when visible names change", async () => {
+    const registry = createCapabilityRegistry(new OdooClient());
+    const context = requestContext();
+    let refresh!: (state: AgentAccessState) => boolean | void;
+    const server = registry.createServer(context, {
+      dynamic: true,
+      subscribe(listener) {
+        refresh = listener;
+      }
+    });
+    const client = new Client({ name: "dynamic-registry-test", version: "1.0.0" });
+    let notifications = 0;
+    client.setNotificationHandler("notifications/tools/list_changed", () => { notifications++; });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    connections.push(async () => {
+      await client.close();
+      await server.close();
+    });
+    expect((await client.listTools()).tools.map((tool) => tool.name)).toContain("odoo_create_records");
+
+    const readOnlyAccess = new Map(
+      [...context.availableModelAccess!].map(([model]) => [model, {
+        read: true,
+        create: false,
+        write: false,
+        unlink: false
+      }] as const)
+    );
+    const contracted: AgentAccessState = {
+      available: true,
+      snapshot: {
+        identity: context.agentIdentity!,
+        surface: {
+          modules: new Set(),
+          publicMethods: context.availablePublicMethods!,
+          modelAccess: readOnlyAccess
+        },
+        refreshedAt: Date.now()
+      }
+    };
+    expect(refresh(contracted)).toBe(true);
+    await vi.waitFor(() => expect(notifications).toBe(1));
+    expect((await client.listTools()).tools.map((tool) => tool.name)).not.toContain("odoo_create_records");
+
+    expect(refresh(contracted)).toBe(false);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(notifications).toBe(1);
+
+    const expanded: AgentAccessState = {
+      available: true,
+      snapshot: {
+        identity: context.agentIdentity!,
+        surface: {
+          modules: new Set(),
+          publicMethods: context.availablePublicMethods!,
+          modelAccess: requestContext().availableModelAccess!
+        },
+        refreshedAt: Date.now()
+      }
+    };
+    expect(refresh(expanded)).toBe(true);
+    await vi.waitFor(() => expect(notifications).toBe(2));
+    expect((await client.listTools()).tools.map((tool) => tool.name)).toContain("odoo_create_records");
   });
 
   it("keeps output validation after a successful mutation inside the receipt boundary", async () => {

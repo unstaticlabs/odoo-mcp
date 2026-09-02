@@ -22,6 +22,7 @@ const close = async () => {
   if (closing) return;
   closing = true;
   await handle.close();
+  await services.accessCache.close();
   await services.observability.close();
 };
 process.stdin.once("end", () => void close());

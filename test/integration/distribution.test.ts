@@ -1,8 +1,8 @@
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { afterEach, describe, expect, it } from "vitest";
 import { createCapabilityRegistry } from "../../src/capabilities/index.js";
-import { loadAgentIdentity } from "../../src/odoo/agent_identity.js";
 import { OdooClient } from "../../src/odoo/client.js";
+import { AgentAccessSnapshotCache } from "../../src/runtime/agent_access_cache.js";
 import type { RequestContext } from "../../src/runtime/context.js";
 
 const origin = process.env.ODOO_INTEGRATION_ORIGIN;
@@ -35,13 +35,14 @@ function context(profile: "default" | "advanced" = "default"): RequestContext {
 async function connected(profile: "default" | "advanced") {
   const odoo = new OdooClient();
   const requestContext = context(profile);
-  requestContext.validateAgentIdentity = async (signal) => {
-    const identity = await loadAgentIdentity(odoo, requestContext, signal);
-    requestContext.agentIdentity = identity;
-    return identity;
-  };
-  await requestContext.validateAgentIdentity();
-  requestContext.availableModules = await odoo.installedModules(requestContext);
+  const accessCache = new AgentAccessSnapshotCache(odoo);
+  const snapshot = await accessCache.initialize(requestContext);
+  requestContext.agentIdentity = snapshot.identity;
+  requestContext.availableModules = snapshot.surface?.modules ?? null;
+  requestContext.availablePublicMethods = snapshot.surface?.publicMethods ?? null;
+  requestContext.availableModelAccess = snapshot.surface?.modelAccess ?? null;
+  requestContext.touchAgentAccess = () => accessCache.touch(requestContext);
+  requestContext.noteAgentAccessFailure = (error) => accessCache.noteAccessFailure(requestContext, error);
   const server = createCapabilityRegistry(odoo).createServer(requestContext);
   const client = new Client({ name: "distribution-integration-test", version: "1.0.0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -50,17 +51,18 @@ async function connected(profile: "default" | "advanced") {
   closeCallbacks.push(async () => {
     await client.close();
     await server.close();
+    await accessCache.close();
   });
   return client;
 }
 
-describe.skipIf(!live)("live USL Odoo Distribution", () => {
+describe.skipIf(!live).sequential("live USL Odoo Distribution", () => {
   it("authenticates to doc-bearer and exposes installed module metadata", async () => {
     const request = context();
     const document = await new OdooClient().fetchApiDocument<Record<string, unknown>>(request);
     expect(document).toBeTypeOf("object");
     expect(Array.isArray(document.modules)).toBe(true);
-  });
+  }, 60_000);
 
   it("executes a bounded generic company read through MCP", async () => {
     const client = await connected("default");
@@ -76,7 +78,7 @@ describe.skipIf(!live)("live USL Odoo Distribution", () => {
     });
     expect(result.isError).not.toBe(true);
     expect(result.structuredContent).toMatchObject({ data: { records: expect.any(Array) } });
-  });
+  }, 60_000);
 
   it("keeps the public-method substrate functional as a one-shot advanced tool", async () => {
     const client = await connected("advanced");
@@ -91,5 +93,5 @@ describe.skipIf(!live)("live USL Odoo Distribution", () => {
         result: { uid: expect.any(Number) }
       }
     });
-  });
+  }, 60_000);
 });

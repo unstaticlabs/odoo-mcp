@@ -432,4 +432,43 @@ describe("privacy-safe PostHog MCP analytics", () => {
     expect(serialized).not.toContain("Sensitive partner");
     expect(serialized).not.toContain("test-key");
   });
+
+  it("keeps access-cache telemetry content-free", () => {
+    const { posthog, events } = capturingPostHog();
+    const observability = createObservability(readyConfiguration(), { posthog });
+    closeCallbacks.push(async () => observability.close());
+    observability.captureRuntimeEvent("agent.snapshot.refresh", {
+      principal_id: "a".repeat(64),
+      reason: "access_denied",
+      status: "ok",
+      queue_delay_ms: 4,
+      duration_ms: 12,
+      snapshot_age_ms: 60_000,
+      visibility_changed: true,
+      identity: "Agent Secret Identity",
+      rights_document: "private rights",
+      model_list: "res.partner",
+      credential: "secret-api-key",
+      business_data: "Sensitive partner"
+    });
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      event: "usl_agent_snapshot_refresh",
+      properties: {
+        usl_reason: "access_denied",
+        usl_status: "ok",
+        usl_queue_delay_ms: 4,
+        usl_duration_ms: 12,
+        usl_snapshot_age_ms: 60_000,
+        usl_visibility_changed: true
+      }
+    });
+    const serialized = JSON.stringify(events);
+    expect(serialized).not.toContain("Agent Secret Identity");
+    expect(serialized).not.toContain("private rights");
+    expect(serialized).not.toContain("res.partner");
+    expect(serialized).not.toContain("secret-api-key");
+    expect(serialized).not.toContain("Sensitive partner");
+  });
 });

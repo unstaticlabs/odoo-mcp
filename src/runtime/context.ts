@@ -2,6 +2,7 @@ import type { AuthInfo } from "@modelcontextprotocol/server";
 import type { Context as OpenTelemetryContext } from "@opentelemetry/api";
 import { z } from "zod";
 import type { AgentIdentity } from "../odoo/agent_identity.js";
+import type { OdooModelAccess } from "../odoo/client.js";
 import type { RuntimeEventObserver } from "./logging.js";
 
 export const ProfileNameSchema = z.enum([
@@ -34,8 +35,10 @@ export interface RequestContext {
   principal: OdooPrincipal;
   availableModules?: ReadonlySet<string> | null;
   agentIdentity?: AgentIdentity;
-  validateAgentIdentity?: (signal?: AbortSignal) => Promise<AgentIdentity>;
   availablePublicMethods?: ReadonlyMap<string, ReadonlySet<string>> | null;
+  availableModelAccess?: ReadonlyMap<string, OdooModelAccess> | null;
+  touchAgentAccess?: () => void;
+  noteAgentAccessFailure?: (error: unknown) => void;
   enabledFeatures?: ReadonlySet<string>;
   authInfo?: AuthInfo;
   eventObserver?: RuntimeEventObserver;

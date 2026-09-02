@@ -80,7 +80,9 @@ Tests must assert behavior rather than treating annotations as controls:
 - mutations and arbitrary public methods never retry automatically;
 - actionable Odoo rejections say `not_applied`; ambiguous delivery or invalid post-success processing says `unknown`;
 - unknown mutations expose sanitized known facts and a concrete reconciliation read while setting `retryable=false`;
-- API-document caching stays bounded per identity, excludes failures, and capability visibility requires published methods plus enabled staged features;
+- the Agent access cache stays at 50 LRU entries, coalesces cold loads and refreshes, stores failures only as unavailable status, and cancels timers and refreshes at shutdown;
+- a cold connection makes exactly one identity request and one API-document request, while warm listing, search, and execution add no preflight calls;
+- capability visibility requires Odoo-advertised model operations or public methods plus enabled staged features, and stdio emits one list-change notification only when visible names change;
 - the configured MCP public hostname remains same-origin allowed and OAuth vault files remain mode `0600` under a mode `0700` directory.
 
 ## Release evidence
