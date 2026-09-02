@@ -11,14 +11,25 @@ describe("stdio entrypoint", () => {
       response.setHeader("Content-Type", "application/json");
       if (request.url?.includes("/json/2/usl.agent/current_identity")) {
         response.end(JSON.stringify({
-          schema_version: 1,
+          schema_version: 2,
           principal_kind: "agent",
           user_id: 41,
-          agent: { id: 7, name: "stdio Agent", purpose: "Test stdio.", state: "active" },
+          agent: {
+            id: 7,
+            name: "stdio Agent",
+            purpose: "Test stdio.",
+            state: "active",
+            access_mode: "read_write",
+            authority_reduced: false,
+            partner_id: 43
+          },
           owner: { id: 5, name: "Test Owner" },
           credential: { id: 9, name: "stdio", expires_at: "2027-09-02 00:00:00" },
           company_id: 1,
-          company_ids: [1]
+          company_ids: [1],
+          companies: [{ id: 1, name: "USL" }],
+          effective_applications: [{ id: 10, name: "Accounting", access: "read_write" }],
+          effective_group_ids: [1, 10]
         }));
         return;
       }
@@ -49,7 +60,7 @@ describe("stdio entrypoint", () => {
     try {
       await client.connect(transport);
       const tools = await client.listTools();
-      expect(tools.tools).toHaveLength(19);
+      expect(tools.tools).toHaveLength(20);
       expect(tools.tools.map((tool) => tool.name)).toEqual(expect.arrayContaining([
         "odoo_search_capabilities",
         "odoo_search_models",

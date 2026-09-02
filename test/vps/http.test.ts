@@ -29,14 +29,25 @@ function configuration() {
 }
 
 const agentIdentity = {
-  schema_version: 1,
+  schema_version: 2,
   principal_kind: "agent",
   user_id: 41,
-  agent: { id: 7, name: "HTTP Test Agent", purpose: "Exercise MCP transport.", state: "active" },
+  agent: {
+    id: 7,
+    name: "HTTP Test Agent",
+    purpose: "Exercise MCP transport.",
+    state: "active",
+    access_mode: "read_write",
+    authority_reduced: false,
+    partner_id: 43
+  },
   owner: { id: 5, name: "Valentin" },
   credential: { id: 9, name: "HTTP test", expires_at: "2027-09-02 00:00:00" },
   company_id: 1,
-  company_ids: [1, 2]
+  company_ids: [1, 2],
+  companies: [{ id: 1, name: "USL" }, { id: 2, name: "USL MEDIA" }],
+  effective_applications: [{ id: 10, name: "Accounting", access: "read_write" }],
+  effective_group_ids: [1, 10]
 };
 
 function testServices(identity: unknown = agentIdentity) {

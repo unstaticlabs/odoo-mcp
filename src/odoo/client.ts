@@ -398,6 +398,8 @@ export function toolFailureFromError(error: unknown) {
             ? "Ask the Agent owner to review and reactivate the Agent."
             : error.policyCode === "agent_authority_reduced"
               ? "Ask the Agent owner to review its reduced companies and application access."
+              : error.policyCode === "agent_read_only_action_denied"
+                ? "Use a read or approved collaboration capability, or ask the owner to apply the read/write profile."
               : "Use a permitted recoverable workflow or ask the accountable human to perform the operation."
       } as const;
     }

@@ -3,14 +3,17 @@ import type { RequestContext } from "../runtime/context.js";
 import type { OdooClient } from "./client.js";
 
 export const AgentIdentitySchema = z.object({
-  schema_version: z.literal(1),
+  schema_version: z.literal(2),
   principal_kind: z.literal("agent"),
   user_id: z.number().int().positive(),
   agent: z.object({
     id: z.number().int().positive(),
     name: z.string().min(1).max(200),
     purpose: z.string().min(1).max(10_000),
-    state: z.literal("active")
+    state: z.literal("active"),
+    access_mode: z.enum(["read_only", "read_write"]),
+    authority_reduced: z.boolean(),
+    partner_id: z.number().int().positive()
   }).strict(),
   owner: z.object({
     id: z.number().int().positive(),
@@ -22,7 +25,17 @@ export const AgentIdentitySchema = z.object({
     expires_at: z.string().min(1).max(64)
   }).strict(),
   company_id: z.number().int().positive(),
-  company_ids: z.array(z.number().int().positive()).min(1).max(100)
+  company_ids: z.array(z.number().int().positive()).min(1).max(100),
+  companies: z.array(z.object({
+    id: z.number().int().positive(),
+    name: z.string().min(1).max(200)
+  }).strict()).min(1).max(100),
+  effective_applications: z.array(z.object({
+    id: z.number().int().positive(),
+    name: z.string().min(1).max(200),
+    access: z.enum(["read_only", "read_write"])
+  }).strict()).max(500),
+  effective_group_ids: z.array(z.number().int().positive()).max(2_000)
 }).strict();
 
 export type AgentIdentity = z.infer<typeof AgentIdentitySchema>;

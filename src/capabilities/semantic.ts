@@ -346,6 +346,7 @@ export function registerSemanticCapabilities(registry: CapabilityRegistry, clien
     toolsets: ["expenses", "accounting"],
     profiles: ["accounting"],
     effect: "read",
+    agentReadonly: false,
     annotations: readAnnotations,
     keywords: ["expense batch", "review", "receipts", "exceptions", "analytics", "accounting"],
     requiredModules: ["usl_expense_batch"],
