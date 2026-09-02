@@ -6,9 +6,15 @@ import type { NextFunction, Request, Response } from "express";
 import { createOAuthService } from "./auth/oauth.js";
 import { loadAgentIdentity } from "./odoo/agent_identity.js";
 import { OdooError } from "./odoo/client.js";
-import { createRequestContext, ProfileNameSchema, type ProfileName } from "./runtime/context.js";
+import {
+  createRequestContext,
+  principalFromAuthInfo,
+  ProfileNameSchema,
+  type ProfileName
+} from "./runtime/context.js";
 import { loadRuntimeConfig, resolveDirectConnection, type RuntimeConfig } from "./runtime/config.js";
 import { emitEvent } from "./runtime/logging.js";
+import { traceContextFromHttp } from "./runtime/observability.js";
 import {
   createHttpServerFactory,
   createRuntimeServices,
@@ -48,7 +54,10 @@ export function createHttpApp(
     jsonLimit: `${config.requestBytes}b`
   });
   const oauth = createOAuthService(config, services);
-  app.locals.closeRuntime = () => oauth?.close();
+  app.locals.closeRuntime = async () => {
+    oauth?.close();
+    await services.observability.close();
+  };
   const mcpHandlers = new Map<ProfileName, ReturnType<typeof createMcpHandler>>();
   const directHandlers = new Map<ProfileName, ReturnType<typeof toNodeHandler>>();
   const oauthHandlers = new Map<ProfileName, ReturnType<typeof toNodeHandler>>();
@@ -63,7 +72,7 @@ export function createHttpApp(
           profile,
           status: "protocol_error",
           error_name: error.name
-        })
+        }, services.observability)
       });
       mcpHandlers.set(profile, current);
     }
@@ -78,7 +87,7 @@ export function createHttpApp(
           profile,
           status: "adapter_error",
           error_name: error.name
-        })
+        }, services.observability)
       });
       directHandlers.set(profile, current);
     }
@@ -95,7 +104,7 @@ export function createHttpApp(
           auth_mode: "oauth",
           status: "adapter_error",
           error_name: error.name
-        })
+        }, services.observability)
       });
       oauthHandlers.set(profile, current);
     }
@@ -138,7 +147,7 @@ export function createHttpApp(
         auth_mode: principal.authMode,
         status: "ok",
         duration_ms: Date.now() - started
-      });
+      }, services.observability);
       next();
     } catch (error) {
       emitEvent("auth.resolved", {
@@ -146,7 +155,7 @@ export function createHttpApp(
         status: "rejected",
         duration_ms: Date.now() - started,
         error_name: error instanceof Error ? error.name : "Error"
-      });
+      }, services.observability);
       response.status(401).json({
         error: error instanceof OdooError
           ? error.policyCode ?? "invalid_odoo_credentials"
@@ -175,7 +184,8 @@ export function createHttpApp(
       status: ready ? "ready" : "not_ready",
       targets: config.targets.length,
       default_profile: budget,
-      oauth: oauthStatus
+      oauth: oauthStatus,
+      analytics: services.observability.status
     });
   });
 
@@ -228,21 +238,36 @@ export function createHttpApp(
     }
     const requestId = request.auth?.extra?.requestId;
     const correlationId = request.auth?.extra?.correlationId;
+    const traceContext = traceContextFromHttp(requestHeaders(request));
+    let principalId: string | undefined;
+    try {
+      if (request.auth) principalId = services.observability.principalId(principalFromAuthInfo(request.auth));
+    } catch {
+      principalId = undefined;
+    }
     const started = Date.now();
     emitEvent("mcp.request.started", {
       request_id: typeof requestId === "string" ? requestId : undefined,
       correlation_id: typeof correlationId === "string" ? correlationId : undefined,
       profile,
-      method: request.method
-    });
+      method: request.method,
+      principal_id: principalId,
+      trace_id: traceContext?.traceId,
+      parent_span_id: traceContext?.spanId,
+      trace_sampled: traceContext?.sampled
+    }, services.observability);
     response.once("finish", () => emitEvent("mcp.request.completed", {
       request_id: typeof requestId === "string" ? requestId : undefined,
       correlation_id: typeof correlationId === "string" ? correlationId : undefined,
       profile,
       method: request.method,
       status: response.statusCode,
-      duration_ms: Date.now() - started
-    }));
+      duration_ms: Date.now() - started,
+      principal_id: principalId,
+      trace_id: traceContext?.traceId,
+      parent_span_id: traceContext?.spanId,
+      trace_sampled: traceContext?.sampled
+    }, services.observability));
     try {
       if (request.headers.authorization) {
         const current = oauthHandler(profile);
@@ -279,7 +304,7 @@ export function startHttpServer(config: RuntimeConfig = loadRuntimeConfig()): vo
     if (closing) return;
     closing = true;
     server.close(() => {
-      app.locals.closeRuntime?.();
+      void app.locals.closeRuntime?.();
     });
   };
   process.once("SIGTERM", close);

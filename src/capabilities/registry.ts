@@ -12,6 +12,7 @@ import {
 import type { ProfileName, RequestContext } from "../runtime/context.js";
 import { envelopeSchema, resultEnvelope, toolError, toolResult } from "../runtime/envelope.js";
 import { emitEvent } from "../runtime/logging.js";
+import { withMcpTraceContext } from "../runtime/observability.js";
 import { SERVER_VERSION } from "../version.js";
 
 export type CapabilityLayer = "generic" | "semantic" | "business_action";
@@ -88,6 +89,14 @@ function estimateSchemaTokens(input: z.ZodType, output: z.ZodType): number {
   return Math.ceil(serialized.length / 4);
 }
 
+function jsonBytes(value: unknown): number | undefined {
+  try {
+    return Buffer.byteLength(JSON.stringify(value));
+  } catch {
+    return undefined;
+  }
+}
+
 export function instrumentCancellation(
   signal: AbortSignal,
   context: RequestContext,
@@ -102,8 +111,12 @@ export function instrumentCancellation(
     profile: context.profile,
     target_id: context.principal.targetId,
     effect: capability.effect,
-    duration_ms: Date.now() - started
-  });
+    duration_ms: Date.now() - started,
+    principal_id: context.analyticsPrincipalId,
+    trace_id: context.trace?.traceId,
+    parent_span_id: context.trace?.spanId,
+    trace_sampled: context.trace?.sampled
+  }, context.eventObserver);
   if (signal.aborted) emitCancellation();
   else signal.addEventListener("abort", emitCancellation, { once: true });
   return () => signal.removeEventListener("abort", emitCancellation);
@@ -141,27 +154,33 @@ export function defineCapability<I extends ObjectSchema, O extends ObjectSchema>
           }
         },
         async (input, mcpContext) => {
+          const activeContext = withMcpTraceContext(
+            context,
+            mcpContext.mcpReq._meta,
+            mcpContext.mcpReq.envelope
+          );
+          const requestBytes = jsonBytes(input);
           const started = Date.now();
           const signal = mcpContext.mcpReq.signal;
-          const stopInstrumentingCancellation = instrumentCancellation(signal, context, spec, started);
+          const stopInstrumentingCancellation = instrumentCancellation(signal, activeContext, spec, started);
           emitEvent("mcp.tool.started", {
-            request_id: context.requestId,
-            correlation_id: context.correlationId,
+            request_id: activeContext.requestId,
+            correlation_id: activeContext.correlationId,
             capability_id: spec.id,
             tool_name: spec.name,
-            profile: context.profile,
-            target_id: context.principal.targetId,
+            profile: activeContext.profile,
+            target_id: activeContext.principal.targetId,
             effect: spec.effect
-          });
+          }, activeContext.eventObserver);
           try {
-            if (!context.validateAgentIdentity) {
+            if (!activeContext.validateAgentIdentity) {
               throw new Error("The MCP runtime did not install its Agent identity validator");
             }
-            await context.validateAgentIdentity(signal);
-            const result = await spec.handler(input as z.infer<I>, context, signal);
+            activeContext.agentIdentity = await activeContext.validateAgentIdentity(signal);
+            const result = await spec.handler(input as z.infer<I>, activeContext, signal);
             const render = (value: CapabilityHandlerResult<O>) => {
               const envelope = envelopeSchema(spec.output).parse(
-                resultEnvelope(context, spec.id, value.data, value.warnings)
+                resultEnvelope(activeContext, spec.id, value.data, value.warnings)
               );
               return toolResult(envelope);
             };
@@ -169,31 +188,48 @@ export function defineCapability<I extends ObjectSchema, O extends ObjectSchema>
               ? await result.guard(render)
               : render(result);
             emitEvent("mcp.tool.completed", {
-              request_id: context.requestId,
-              correlation_id: context.correlationId,
+              request_id: activeContext.requestId,
+              correlation_id: activeContext.correlationId,
               capability_id: spec.id,
               tool_name: spec.name,
-              profile: context.profile,
-              target_id: context.principal.targetId,
+              profile: activeContext.profile,
+              target_id: activeContext.principal.targetId,
               effect: spec.effect,
+              layer: spec.layer,
+              toolsets: spec.toolsets.join(","),
               status: "ok",
-              duration_ms: Date.now() - started
-            });
+              duration_ms: Date.now() - started,
+              request_bytes: requestBytes,
+              response_bytes: jsonBytes(response),
+              principal_id: activeContext.analyticsPrincipalId,
+              trace_id: activeContext.trace?.traceId,
+              parent_span_id: activeContext.trace?.spanId,
+              trace_sampled: activeContext.trace?.sampled
+            }, activeContext.eventObserver);
             return response;
           } catch (error) {
             const failure = toolFailureFromError(error);
+            const response = toolError(failure, activeContext);
             emitEvent("mcp.tool.completed", {
-              request_id: context.requestId,
-              correlation_id: context.correlationId,
+              request_id: activeContext.requestId,
+              correlation_id: activeContext.correlationId,
               capability_id: spec.id,
               tool_name: spec.name,
-              profile: context.profile,
-              target_id: context.principal.targetId,
+              profile: activeContext.profile,
+              target_id: activeContext.principal.targetId,
               effect: spec.effect,
+              layer: spec.layer,
+              toolsets: spec.toolsets.join(","),
               status: failure.code,
-              duration_ms: Date.now() - started
-            });
-            return toolError(failure, context);
+              duration_ms: Date.now() - started,
+              request_bytes: requestBytes,
+              response_bytes: jsonBytes(response),
+              principal_id: activeContext.analyticsPrincipalId,
+              trace_id: activeContext.trace?.traceId,
+              parent_span_id: activeContext.trace?.spanId,
+              trace_sampled: activeContext.trace?.sampled
+            }, activeContext.eventObserver);
+            return response;
           } finally {
             stopInstrumentingCancellation();
           }
@@ -329,7 +365,7 @@ export class CapabilityRegistry {
       profile: context.profile,
       target_id: context.principal.targetId,
       tool_count: this.visible(context.profile, availability).length
-    });
+    }, context.eventObserver);
     return server;
   }
 }

@@ -140,7 +140,7 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
           enabledFeatures: context.enabledFeatures,
           accessMode
         }).length
-      });
+      }, context.eventObserver);
       return {
         data: {
           capabilities: registry.search(query, limit, {

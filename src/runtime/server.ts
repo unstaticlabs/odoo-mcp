@@ -10,19 +10,22 @@ import {
   type OdooPrincipal,
   type ProfileName
 } from "./context.js";
+import { createObservability, traceContextFromHttp, type Observability } from "./observability.js";
 
 export interface RuntimeServices {
   client: OdooClient;
   registry: CapabilityRegistry;
   enabledFeatures: ReadonlySet<string>;
+  observability: Observability;
 }
 
 export function createRuntimeServices(config: RuntimeConfig): RuntimeServices {
+  const observability = createObservability(config.analytics);
   const client = new OdooClient(config.targetConcurrency, config.responseBytes);
   const enabledFeatures = new Set(
     config.documentMaterializationEnabled ? ["document_materialization"] : []
   );
-  return { client, registry: createCapabilityRegistry(client), enabledFeatures };
+  return { client, registry: createCapabilityRegistry(client), enabledFeatures, observability };
 }
 
 export function directAuthInfo(
@@ -42,6 +45,9 @@ export function createHttpServerFactory(services: RuntimeServices, profile: Prof
   return async (mcpContext: McpRequestContext) => {
     const principal = principalFromAuthInfo(mcpContext.authInfo);
     const context = createRequestContext(profile, principal, mcpContext.authInfo);
+    context.eventObserver = services.observability;
+    context.analyticsPrincipalId = services.observability.principalId(principal);
+    context.trace = traceContextFromHttp(mcpContext.requestInfo?.headers);
     context.validateAgentIdentity = async (signal) => {
       const identity = await loadAgentIdentity(services.client, context, signal);
       context.agentIdentity = identity;
@@ -52,7 +58,18 @@ export function createHttpServerFactory(services: RuntimeServices, profile: Prof
     context.availableModules = surface?.modules ?? null;
     context.availablePublicMethods = surface?.publicMethods ?? null;
     context.enabledFeatures = services.enabledFeatures;
-    return services.registry.createServer(context);
+    const server = services.registry.createServer(context);
+    services.observability.instrumentServer(
+      server,
+      context,
+      services.registry.list(profile, {
+        modules: context.availableModules,
+        publicMethods: context.availablePublicMethods,
+        enabledFeatures: context.enabledFeatures,
+        accessMode: context.agentIdentity?.agent.access_mode
+      })
+    );
+    return server;
   };
 }
 
@@ -63,6 +80,8 @@ export function createStdioServerFactory(
 ) {
   return async () => {
     const context = createRequestContext(profile, principal);
+    context.eventObserver = services.observability;
+    context.analyticsPrincipalId = services.observability.principalId(principal);
     context.validateAgentIdentity = async (signal) => {
       const identity = await loadAgentIdentity(services.client, context, signal);
       context.agentIdentity = identity;
@@ -73,6 +92,17 @@ export function createStdioServerFactory(
     context.availableModules = surface?.modules ?? null;
     context.availablePublicMethods = surface?.publicMethods ?? null;
     context.enabledFeatures = services.enabledFeatures;
-    return services.registry.createServer(context);
+    const server = services.registry.createServer(context);
+    services.observability.instrumentServer(
+      server,
+      context,
+      services.registry.list(profile, {
+        modules: context.availableModules,
+        publicMethods: context.availablePublicMethods,
+        enabledFeatures: context.enabledFeatures,
+        accessMode: context.agentIdentity?.agent.access_mode
+      })
+    );
+    return server;
   };
 }

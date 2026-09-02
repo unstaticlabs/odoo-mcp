@@ -16,6 +16,8 @@ services:
       BETTER_AUTH_SECRET_FILE: /run/secrets/better_auth_secret
       MCP_CREDENTIAL_ENCRYPTION_KEY_FILE: /run/secrets/credential_encryption_key
       MCP_OAUTH_TRUSTED_ORIGINS: https://chatgpt.com,https://claude.ai
+      # Add the required values/secrets from docs/observability.md before enabling.
+      MCP_ANALYTICS_ENABLED: "false"
     secrets:
       - better_auth_secret
       - credential_encryption_key

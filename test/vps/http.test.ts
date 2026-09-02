@@ -10,6 +10,7 @@ import { createHttpApp } from "../../src/http.js";
 import { createCapabilityRegistry } from "../../src/capabilities/index.js";
 import { OdooClient } from "../../src/odoo/client.js";
 import { loadRuntimeConfig } from "../../src/runtime/config.js";
+import { createObservability } from "../../src/runtime/observability.js";
 
 const closeCallbacks: Array<() => Promise<void>> = [];
 
@@ -50,7 +51,7 @@ const agentIdentity = {
   effective_group_ids: [1, 10]
 };
 
-function testServices(identity: unknown = agentIdentity) {
+function testServices(config: ReturnType<typeof configuration>, identity: unknown = agentIdentity) {
   const fetcher: typeof fetch = async (input) => {
     const url = String(input);
     if (url.includes("/json/2/usl.agent/current_identity")) return Response.json(identity);
@@ -58,16 +59,21 @@ function testServices(identity: unknown = agentIdentity) {
     return Response.json({ message: "unexpected test request" }, { status: 404 });
   };
   const client = new OdooClient(8, 1024 * 1024, fetcher);
-  return { client, registry: createCapabilityRegistry(client) };
+  return {
+    client,
+    registry: createCapabilityRegistry(client),
+    enabledFeatures: new Set(config.documentMaterializationEnabled ? ["document_materialization"] : []),
+    observability: createObservability(config.analytics)
+  };
 }
 
 async function listeningServer(config = configuration(), identity: unknown = agentIdentity) {
-  const app = createHttpApp(config, testServices(identity));
+  const app = createHttpApp(config, testServices(config, identity));
   const server = app.listen(0, "127.0.0.1");
   await once(server, "listening");
   const address = server.address() as AddressInfo;
   closeCallbacks.push(async () => {
-    (app.locals.closeRuntime as (() => void) | undefined)?.();
+    await (app.locals.closeRuntime as (() => Promise<void>) | undefined)?.();
     await new Promise<void>((resolve, reject) => {
       server.close((error) => error ? reject(error) : resolve());
     });
