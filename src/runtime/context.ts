@@ -1,5 +1,7 @@
 import type { AuthInfo } from "@modelcontextprotocol/server";
+import type { Context as OpenTelemetryContext } from "@opentelemetry/api";
 import { z } from "zod";
+import type { RuntimeEventObserver } from "./logging.js";
 
 export const ProfileNameSchema = z.enum([
   "default",
@@ -33,6 +35,16 @@ export interface RequestContext {
   availablePublicMethods?: ReadonlyMap<string, ReadonlySet<string>> | null;
   enabledFeatures?: ReadonlySet<string>;
   authInfo?: AuthInfo;
+  eventObserver?: RuntimeEventObserver;
+  analyticsPrincipalId?: string;
+  trace?: TraceContext;
+}
+
+export interface TraceContext {
+  context: OpenTelemetryContext;
+  traceId: string;
+  spanId: string;
+  sampled: boolean;
 }
 
 export function createRequestContext(

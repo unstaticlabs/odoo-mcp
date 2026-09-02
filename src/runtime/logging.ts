@@ -1,4 +1,5 @@
 export type EventName =
+  | "analytics.configuration"
   | "auth.resolved"
   | "auth.enrollment.completed"
   | "auth.enrollment.revoked"
@@ -12,9 +13,18 @@ export type EventName =
   | "odoo.call.completed"
   | "mcp.request.cancelled";
 
-type EventValue = string | number | boolean | null | undefined;
+export type EventValue = string | number | boolean | null | undefined;
+export type EventDimensions = Record<string, EventValue>;
 
-export function emitEvent(event: EventName, dimensions: Record<string, EventValue>): void {
+export interface RuntimeEventObserver {
+  captureRuntimeEvent(event: EventName, dimensions: EventDimensions): void;
+}
+
+export function emitEvent(
+  event: EventName,
+  dimensions: EventDimensions,
+  observer?: RuntimeEventObserver
+): void {
   const payload: Record<string, EventValue> = {
     timestamp: new Date().toISOString(),
     schema_version: "1",
@@ -22,4 +32,9 @@ export function emitEvent(event: EventName, dimensions: Record<string, EventValu
     ...dimensions
   };
   process.stderr.write(`${JSON.stringify(payload)}\n`);
+  try {
+    observer?.captureRuntimeEvent(event, payload);
+  } catch {
+    // Observability is fail-open and must never affect the MCP operation.
+  }
 }

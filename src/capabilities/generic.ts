@@ -138,7 +138,7 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
           publicMethods: context.availablePublicMethods,
           enabledFeatures: context.enabledFeatures
         }).length
-      });
+      }, context.eventObserver);
       return {
         data: {
           capabilities: registry.search(query, limit, {

@@ -92,4 +92,42 @@ describe("runtime target mapping", () => {
       MCP_OAUTH_DATABASE: "/tmp/odoo-mcp.sqlite"
     }))).toThrow("OAuth requires");
   });
+
+  it("keeps analytics opt-in and degrades safely when its configuration is incomplete", () => {
+    expect(loadRuntimeConfig(environment()).analytics).toEqual({
+      status: "disabled",
+      environment: "development"
+    });
+    expect(loadRuntimeConfig(environment({ MCP_ANALYTICS_ENABLED: "true" })).analytics).toEqual({
+      status: "degraded",
+      environment: "development",
+      missingConfiguration: [
+        "MCP_ANALYTICS_PSEUDONYMIZATION_KEY",
+        "MCP_BUILD_ID",
+        "MCP_DEPLOYMENT_ID",
+        "POSTHOG_API_KEY",
+        "POSTHOG_HOST"
+      ]
+    });
+  });
+
+  it("accepts a complete privacy-safe analytics configuration", () => {
+    const config = loadRuntimeConfig(environment({
+      MCP_ANALYTICS_ENABLED: "true",
+      POSTHOG_API_KEY: "phc_project",
+      POSTHOG_HOST: "https://eu.i.posthog.com",
+      MCP_ANALYTICS_PSEUDONYMIZATION_KEY: Buffer.alloc(32, 7).toString("base64"),
+      MCP_DEPLOYMENT_ID: "vps-production",
+      MCP_BUILD_ID: "9a0e681",
+      MCP_ENVIRONMENT: "production"
+    }));
+    expect(config.analytics).toMatchObject({
+      status: "ready",
+      host: "https://eu.i.posthog.com",
+      deploymentId: "vps-production",
+      buildId: "9a0e681",
+      environment: "production"
+    });
+    expect(config.analytics.pseudonymizationKey).toEqual(Buffer.alloc(32, 7));
+  });
 });

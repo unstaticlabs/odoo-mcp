@@ -51,11 +51,13 @@ Read calls retry transient network failures and HTTP 429/502/503/504 at most thr
 
 `odoo_call_method` deliberately preserves Odoo's public-method flexibility. The MCP validates model/method syntax, named arguments, bounded context, body size, depth, and key count. Odoo rejects private, unsafe, or `@api.private` methods and enforces the selected identity's permissions. The MCP does not maintain a method allowlist or infer whether an arbitrary public method is safe or idempotent.
 
-## Concurrency, caching, and events
+## Concurrency, caching, and observability
 
 Calls use a per-target semaphore, defaulting to eight concurrent requests. There is no global serialization. `/doc-bearer` uses identity-scoped ETag-aware caching; module discovery caches success for five minutes and failure for one minute.
 
-Content-free structured event hooks cover auth resolution, MCP request/list/search/execute boundaries, and Odoo call boundaries. Stable request, correlation, target, capability, tool, and profile identifiers support future measurement. Events exclude credentials, URLs, database names, prompts, arguments, record identifiers/values, and outputs. Production analytics storage remains a separate issue.
+Content-free structured event hooks cover auth resolution, MCP request/list/search/execute boundaries, and Odoo call boundaries. Stable request, correlation, target, capability, tool, profile, deployment, build, and W3C trace identifiers support comparisons across revisions and clients.
+
+Optional PostHog export is owned entirely by `src/runtime/observability.ts` and instruments every registry-generated server with the pinned official MCP integration. Remote export is disabled by default, fail-open, and restricted by a second explicit property allowlist. It exports completed tool/request/Odoo-attempt metadata and byte counts, never credentials, URLs, database names, prompts, arguments/results, record identifiers/values, exception text, or document grants. Analytics does not add tool parameters, conversation/model fields, or analytics-specific tools. See `docs/observability.md` for the event and operational contract.
 
 ## Server instructions and resources
 
