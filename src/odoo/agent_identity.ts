@@ -31,7 +31,7 @@ export const AgentIdentitySchema = z.object({
     name: z.string().min(1).max(200)
   }).strict()).min(1).max(100),
   effective_applications: z.array(z.object({
-    id: z.number().int().positive(),
+    id: z.union([z.number().int().positive(), z.literal("settings")]),
     name: z.string().min(1).max(200),
     access: z.enum(["read_only", "read_write"])
   }).strict()).max(500),

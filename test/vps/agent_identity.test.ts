@@ -30,7 +30,10 @@ const identity = {
   company_id: 1,
   company_ids: [1, 2],
   companies: [{ id: 1, name: "USL" }, { id: 2, name: "USL MEDIA" }],
-  effective_applications: [{ id: 10, name: "Accounting", access: "read_only" }],
+  effective_applications: [
+    { id: 10, name: "Accounting", access: "read_only" },
+    { id: "settings", name: "Settings", access: "read_only" }
+  ],
   effective_group_ids: [1, 10]
 };
 

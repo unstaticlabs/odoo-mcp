@@ -575,7 +575,7 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
       }).strict(),
       effective_company_ids: z.array(z.number().int().positive()),
       effective_applications: z.array(z.object({
-        id: z.number().int().positive(),
+        id: z.union([z.number().int().positive(), z.literal("settings")]),
         name: z.string(),
         access: z.enum(["read_only", "read_write"])
       }).strict())
