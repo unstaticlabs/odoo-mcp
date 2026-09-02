@@ -7,6 +7,8 @@ import { join } from "node:path";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { afterEach, describe, expect, it } from "vitest";
 import { createHttpApp } from "../../src/http.js";
+import { createCapabilityRegistry } from "../../src/capabilities/index.js";
+import { OdooClient } from "../../src/odoo/client.js";
 import { loadRuntimeConfig } from "../../src/runtime/config.js";
 
 const closeCallbacks: Array<() => Promise<void>> = [];
@@ -26,8 +28,41 @@ function configuration() {
   });
 }
 
-async function listeningServer(config = configuration()) {
-  const app = createHttpApp(config);
+const agentIdentity = {
+  schema_version: 3,
+  principal_kind: "agent",
+  user_id: 41,
+  agent: {
+    id: 7,
+    name: "HTTP Test Agent",
+    purpose: "Exercise MCP transport.",
+    state: "active",
+    access_mode: "read_write",
+    authority_reduced: false,
+    partner_id: 43
+  },
+  owner: { id: 5, name: "Valentin" },
+  credential: { id: 9, name: "HTTP test", expires_at: "2027-09-02 00:00:00" },
+  company_id: 1,
+  company_ids: [1, 2],
+  companies: [{ id: 1, name: "USL" }, { id: 2, name: "USL MEDIA" }],
+  effective_applications: [{ id: 10, name: "Accounting", access: "read_write" }],
+  effective_group_ids: [1, 10]
+};
+
+function testServices(identity: unknown = agentIdentity) {
+  const fetcher: typeof fetch = async (input) => {
+    const url = String(input);
+    if (url.includes("/json/2/usl.agent/current_identity")) return Response.json(identity);
+    if (url.endsWith("/doc-bearer/index.json")) return Response.json({ modules: [] });
+    return Response.json({ message: "unexpected test request" }, { status: 404 });
+  };
+  const client = new OdooClient(8, 1024 * 1024, fetcher);
+  return { client, registry: createCapabilityRegistry(client) };
+}
+
+async function listeningServer(config = configuration(), identity: unknown = agentIdentity) {
+  const app = createHttpApp(config, testServices(identity));
   const server = app.listen(0, "127.0.0.1");
   await once(server, "listening");
   const address = server.address() as AddressInfo;
@@ -128,5 +163,28 @@ describe("VPS HTTP MCP transport", () => {
       body: "{}"
     });
     expect(unknown.status).toBe(404);
+  });
+
+  it("rejects a human Odoo key before exposing MCP tools", async () => {
+    const origin = await listeningServer(configuration(), {
+      uid: 5,
+      name: "Human user"
+    });
+    const response = await fetch(`${origin}/mcp`, {
+      method: "POST",
+      headers: {
+        ...credentialHeaders,
+        "Content-Type": "application/json",
+        Accept: "application/json, text/event-stream"
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "test", version: "1" } }
+      })
+    });
+    expect(response.status).toBeGreaterThanOrEqual(400);
+    expect(await response.text()).toContain("governed Agent credential");
   });
 });

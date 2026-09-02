@@ -10,6 +10,7 @@ This release is a clean break from the previous hosted runtime and Odoo Online-s
 - Replace previous grant storage with the mounted Better Auth SQLite vault. Old grants are not imported; hosted clients enroll once.
 - Direct clients replace the old bearer/key arrangement with `X-Odoo-Url`, `X-Odoo-Database`, and `X-Odoo-Api-Key` together.
 - Local clients use the stdio entrypoint and environment credentials.
+- Replace every human Odoo key with a governed Agent credential created in **My Agents**. Hosted OAuth authorization remains human, but Odoo execution and attribution belong to the Agent.
 
 ## Tool migration
 
@@ -44,6 +45,7 @@ Old offset pagination, heterogeneous batch writes, duplicated server-specific to
 - The unrestricted public-method escape hatch is preserved but renamed, deferred, and truthfully annotated as potentially destructive/non-idempotent.
 - Specialized capabilities disappear when the owning Distribution module is definitively absent; generic discovery/read remains.
 - The document archive contract is the Distribution facade rather than an Enterprise application model.
+- `odoo_describe_environment` now reports the Agent, accountable owner, credential expiry and effective companies. Human keys, suspended Agents and expired Agent credentials fail before tools are exposed.
 
 ## Client profile choice
 

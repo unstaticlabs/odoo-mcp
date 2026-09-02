@@ -1,6 +1,7 @@
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { afterEach, describe, expect, it } from "vitest";
 import { createCapabilityRegistry } from "../../src/capabilities/index.js";
+import { loadAgentIdentity } from "../../src/odoo/agent_identity.js";
 import { OdooClient } from "../../src/odoo/client.js";
 import type { RequestContext } from "../../src/runtime/context.js";
 
@@ -32,7 +33,16 @@ function context(profile: "default" | "advanced" = "default"): RequestContext {
 }
 
 async function connected(profile: "default" | "advanced") {
-  const server = createCapabilityRegistry(new OdooClient()).createServer(context(profile));
+  const odoo = new OdooClient();
+  const requestContext = context(profile);
+  requestContext.validateAgentIdentity = async (signal) => {
+    const identity = await loadAgentIdentity(odoo, requestContext, signal);
+    requestContext.agentIdentity = identity;
+    return identity;
+  };
+  await requestContext.validateAgentIdentity();
+  requestContext.availableModules = await odoo.installedModules(requestContext);
+  const server = createCapabilityRegistry(odoo).createServer(requestContext);
   const client = new Client({ name: "distribution-integration-test", version: "1.0.0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await server.connect(serverTransport);
@@ -75,6 +85,11 @@ describe.skipIf(!live)("live USL Odoo Distribution", () => {
       arguments: { model: "res.users", method: "context_get", kwargs: {}, context: {} }
     });
     expect(result.isError).not.toBe(true);
-    expect(result.structuredContent).toMatchObject({ data: { outcome: "succeeded" } });
+    expect(result.structuredContent).toMatchObject({
+      data: {
+        execution: { outcome: "succeeded" },
+        result: { uid: expect.any(Number) }
+      }
+    });
   });
 });

@@ -4,7 +4,9 @@ import { toNodeHandler } from "@modelcontextprotocol/node";
 import { createMcpHandler, type AuthInfo } from "@modelcontextprotocol/server";
 import type { NextFunction, Request, Response } from "express";
 import { createOAuthService } from "./auth/oauth.js";
-import { ProfileNameSchema, type ProfileName } from "./runtime/context.js";
+import { loadAgentIdentity } from "./odoo/agent_identity.js";
+import { OdooError } from "./odoo/client.js";
+import { createRequestContext, ProfileNameSchema, type ProfileName } from "./runtime/context.js";
 import { loadRuntimeConfig, resolveDirectConnection, type RuntimeConfig } from "./runtime/config.js";
 import { emitEvent } from "./runtime/logging.js";
 import {
@@ -100,7 +102,7 @@ export function createHttpApp(
     return current;
   }
 
-  function authenticate(request: AuthenticatedRequest, response: Response, next: NextFunction): void {
+  async function authenticate(request: AuthenticatedRequest, response: Response, next: NextFunction): Promise<void> {
     const started = Date.now();
     try {
       if (request.headers.authorization) {
@@ -125,6 +127,10 @@ export function createHttpApp(
       const requestId = crypto.randomUUID();
       const correlationId = correlationIdFromRequest(request);
       request.auth = directAuthInfo(principal, requestId, correlationId);
+      await loadAgentIdentity(
+        services.client,
+        createRequestContext("default", principal, request.auth),
+      );
       emitEvent("auth.resolved", {
         request_id: requestId,
         correlation_id: correlationId,
@@ -142,7 +148,9 @@ export function createHttpApp(
         error_name: error instanceof Error ? error.name : "Error"
       });
       response.status(401).json({
-        error: "invalid_odoo_credentials",
+        error: error instanceof OdooError
+          ? error.policyCode ?? "invalid_odoo_credentials"
+          : "agent_principal_required",
         message: error instanceof Error ? error.message : "Invalid Odoo connection"
       });
     }
