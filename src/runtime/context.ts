@@ -32,6 +32,8 @@ export interface RequestContext {
   profile: ProfileName;
   principal: OdooPrincipal;
   availableModules?: ReadonlySet<string> | null;
+  availablePublicMethods?: ReadonlyMap<string, ReadonlySet<string>> | null;
+  enabledFeatures?: ReadonlySet<string>;
   authInfo?: AuthInfo;
   eventObserver?: RuntimeEventObserver;
   analyticsPrincipalId?: string;

@@ -8,6 +8,7 @@ services:
       MCP_PUBLIC_ORIGIN: https://mcp.example.com
       MCP_ALLOWED_HOSTS: mcp.example.com
       MCP_ALLOWED_ORIGINS: mcp.example.com
+      MCP_DOCUMENT_MATERIALIZATION_ENABLED: "false"
       ODOO_TARGETS_JSON: >-
         [{"id":"primary","publicOrigin":"https://odoo.example.com","internalOrigin":"http://odoo:8069","databases":["odoo"]}]
       MCP_OAUTH_ENABLED: "true"

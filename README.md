@@ -75,6 +75,7 @@ docker build -t usl-odoo-mcp .
 
 ## Documentation
 
+- [Contributing and Git workflow](CONTRIBUTING.md)
 - [Architecture](docs/architecture.md)
 - [Authentication and credential operations](docs/authentication.md)
 - [Tool catalogue and profiles](docs/tool-catalogue.md)

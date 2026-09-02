@@ -16,6 +16,7 @@ Copy `compose.example.yml`, attach it to the existing Odoo network, configure th
 Required runtime configuration:
 
 - `MCP_PUBLIC_ORIGIN`, `MCP_ALLOWED_HOSTS`, and `MCP_ALLOWED_ORIGINS`;
+- `MCP_DOCUMENT_MATERIALIZATION_ENABLED=false` until its coordinated Odoo backend is deployed;
 - one or more Odoo targets;
 - request/response bounds and per-target concurrency if defaults are unsuitable;
 - OAuth database/secrets/trusted origins when hosted clients are enabled.
@@ -23,7 +24,7 @@ Required runtime configuration:
   `MCP_ANALYTICS_ENABLED=false` until residency, retention, deletion, and
   project access have been approved.
 
-`MCP_ALLOWED_HOSTS` and `MCP_ALLOWED_ORIGINS` are comma-separated hostnames accepted by the MCP Express boundary. `MCP_OAUTH_TRUSTED_ORIGINS` contains complete trusted web origins for OAuth.
+`MCP_ALLOWED_HOSTS` and `MCP_ALLOWED_ORIGINS` are comma-separated hostnames accepted by the MCP Express boundary. The hostname from `MCP_PUBLIC_ORIGIN` is always included in the origin allowlist so same-origin MCP clients keep working when additional origins are configured. `MCP_OAUTH_TRUSTED_ORIGINS` contains complete trusted web origins for OAuth.
 
 ## Rollout
 
@@ -50,17 +51,26 @@ The process handles `SIGTERM`/`SIGINT` by closing the listener and OAuth vault, 
 
 ## Data and backup
 
-The only MCP persistent state is the optional SQLite OAuth vault. Use a durable mounted volume, monitor free disk, and back up with `npm run oauth:backup`. The SQLite database uses WAL mode. Never copy only a live database file with a naive file copy while writes are active.
+The only MCP persistent state is the optional SQLite OAuth vault. Use a durable mounted volume, monitor free disk, and back up with `npm run oauth:backup`. Its parent directory must be dedicated to the MCP process, owned by that process user, and mode `0700`; startup creates a missing directory but refuses to modify an existing unsafe or shared directory. The SQLite database uses WAL mode. Never copy only a live database file with a naive file copy while writes are active.
 
 Odoo records, authorization, and business audit history remain in Odoo and follow the Distribution's backup procedures.
 
 ## Document materialization dependency
 
 The deferred `documents_create_download_url` and `documents_revoke_download_url`
-tools require the coordinated `usl_documents` backend and Paperless
-`3.0.5-usl.7`. The MCP does not proxy file bytes and does not know Paperless
-credentials. Odoo issues the opaque capability and remains the authorization
-gateway for each GET, HEAD, and Range request.
+tools require the coordinated `usl_documents` backend public methods and Paperless
+`3.0.5-usl.9`. Until these changes reach `19-usl`, the authoritative Distribution
+source is `usl/codex/chore-post-migration-continuous-operations`. The MCP does not
+proxy file bytes and does not know Paperless credentials. Odoo issues the opaque
+capability and remains the authorization gateway for each GET, HEAD, and Range
+request.
+
+Deploy and verify that authoritative Distribution branch first. Confirm `/doc-bearer` publishes
+`usl.document.mcp_create_download_grant` and
+`usl.document.mcp_revoke_download_grant`, configure the ingress below, and only
+then set `MCP_DOCUMENT_MATERIALIZATION_ENABLED=true`. The registry requires both
+the deployed public methods and this operator flag; otherwise it omits the two
+tools while leaving document search, metadata, and OCR available.
 
 Before exposing the tools, configure Odoo's frozen HTTPS `web.base.url` and the
 Distribution's `/agent-documents/<43-character-token>` ingress contract. That
@@ -71,8 +81,8 @@ and Caddy examples live in the Distribution runbook
 `docs/operations/document-materialization.md`.
 
 Treat a returned URL as a temporary secret. MCP request telemetry must not log
-tool results. Roll back the MCP capability if the backend or ingress is absent;
-search, metadata, and OCR tools remain usable without materialization.
+tool results. For rollback, set `MCP_DOCUMENT_MATERIALIZATION_ENABLED=false`
+before removing the Odoo backend or ingress.
 
 ## Rollback
 

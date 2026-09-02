@@ -349,6 +349,7 @@ export function registerSemanticCapabilities(registry: CapabilityRegistry, clien
     annotations: readAnnotations,
     keywords: ["expense batch", "review", "receipts", "exceptions", "analytics", "accounting"],
     requiredModules: ["usl_expense_batch"],
+    requiredPublicMethods: [{ model: "usl.expense.batch", method: "get_review_summary" }],
     defaultVisible: false,
     alwaysLoad: false,
     sortOrder: 240,
@@ -376,6 +377,7 @@ export function registerSemanticCapabilities(registry: CapabilityRegistry, clien
     annotations: readAnnotations,
     keywords: ["home", "attention", "AI pipeline", "blocked", "failed", "review"],
     requiredModules: ["usl_home"],
+    requiredPublicMethods: [{ model: "usl.home.service", method: "get_ai_attention" }],
     defaultVisible: true,
     alwaysLoad: false,
     sortOrder: 250,
@@ -459,6 +461,7 @@ export function registerDocumentCapabilities(registry: CapabilityRegistry, clien
     annotations: readAnnotations,
     keywords: ["archive", "document", "hybrid search", "semantic", "exact", "Paperless"],
     requiredModules: ["usl_documents"],
+    requiredPublicMethods: [{ model: "usl.document", method: "mcp_search" }],
     defaultVisible: false,
     alwaysLoad: false,
     sortOrder: 300,
@@ -513,6 +516,11 @@ export function registerDocumentCapabilities(registry: CapabilityRegistry, clien
     annotations: readAnnotations,
     keywords: ["document metadata", "versions", "linked records", "archive context"],
     requiredModules: ["usl_documents"],
+    requiredPublicMethods: [
+      { model: "usl.document", method: "mcp_get" },
+      { model: "usl.document", method: "mcp_get_versions" },
+      { model: "usl.document", method: "mcp_get_links" }
+    ],
     defaultVisible: true,
     alwaysLoad: false,
     sortOrder: 310,
@@ -542,6 +550,7 @@ export function registerDocumentCapabilities(registry: CapabilityRegistry, clien
     annotations: readAnnotations,
     keywords: ["document text", "OCR", "content", "pagination"],
     requiredModules: ["usl_documents"],
+    requiredPublicMethods: [{ model: "usl.document", method: "mcp_get_content" }],
     defaultVisible: false,
     alwaysLoad: false,
     sortOrder: 320,
@@ -573,6 +582,7 @@ export function registerDocumentCapabilities(registry: CapabilityRegistry, clien
     annotations: readAnnotations,
     keywords: ["similar", "semantic", "related documents", "duplicates"],
     requiredModules: ["usl_documents"],
+    requiredPublicMethods: [{ model: "usl.document", method: "mcp_find_similar" }],
     defaultVisible: false,
     alwaysLoad: false,
     sortOrder: 330,
@@ -605,6 +615,7 @@ export function registerDocumentCapabilities(registry: CapabilityRegistry, clien
     annotations: readAnnotations,
     keywords: ["saved views", "tags", "correspondents", "document types", "filters"],
     requiredModules: ["usl_documents"],
+    requiredPublicMethods: Object.values(catalogMethods).map((method) => ({ model: "usl.document", method })),
     defaultVisible: false,
     alwaysLoad: false,
     sortOrder: 340,
@@ -647,16 +658,27 @@ export function registerBusinessActions(registry: CapabilityRegistry, client: Od
     annotations: actionAnnotations,
     keywords: ["link document", "record relationship", "archive"],
     requiredModules: ["usl_documents"],
+    requiredPublicMethods: [{ model: "usl.document", method: "link_to_record" }],
     defaultVisible: false,
     alwaysLoad: false,
     sortOrder: 500,
     input: documentLinkInput,
     output: ActionOutputSchema,
     async handler({ document_id, model, id, context: requestedContext }, context, signal) {
-      const result = await client.call<unknown>(context, "usl.document", "link_to_record", {
+      const receipt = await client.call<unknown>(context, "usl.document", "link_to_record", {
         ids: [document_id], res_model: model, res_id: id, context: rpcContext(requestedContext, context)
-      }, { kind: "mutation", signal });
-      return { data: { result, correlation_id: context.correlationId, outcome: "succeeded" as const } };
+      }, {
+        kind: "mutation",
+        signal,
+        reconciliation: {
+          targetModel: "usl.document",
+          knownIds: [document_id],
+          fields: ["link_ids"],
+          suggestedTool: "documents_get_context",
+          instructions: `Read document ${document_id} and inspect its links for ${model},${id}. Create the link again only if that exact active relationship is absent.`
+        }
+      });
+      return receipt.finalize((result) => ({ data: { result, correlation_id: context.correlationId, outcome: "succeeded" as const } }));
     }
   }));
 
@@ -673,6 +695,8 @@ export function registerBusinessActions(registry: CapabilityRegistry, client: Od
     annotations: actionAnnotations,
     keywords: ["download", "materialize", "PDF", "image", "binary", "short-lived URL"],
     requiredModules: ["usl_documents"],
+    requiredPublicMethods: [{ model: "usl.document", method: "mcp_create_download_grant" }],
+    requiredFeatures: ["document_materialization"],
     defaultVisible: false,
     alwaysLoad: false,
     sortOrder: 515,
@@ -685,7 +709,7 @@ export function registerBusinessActions(registry: CapabilityRegistry, client: Od
     }).strict(),
     output: DownloadGrantOutputSchema,
     async handler({ document_id, document_version_id, variant, ttl_seconds, context: requestedContext }, context, signal) {
-      const result = await client.call<{
+      const receipt = await client.call<{
         grant_id: string;
         url: string;
         expires_at: string;
@@ -703,8 +727,18 @@ export function registerBusinessActions(registry: CapabilityRegistry, client: Od
         variant,
         ttl_seconds,
         context: rpcContext(requestedContext, context)
-      }, { kind: "mutation", signal });
-      return {
+      }, {
+        kind: "mutation",
+        signal,
+        reconciliation: {
+          targetModel: "usl.document",
+          knownIds: [document_id],
+          fields: ["version_ids"],
+          suggestedTool: "documents_get_context",
+          instructions: "Read the document and selected version again. If the error includes a grant_id, revoke that grant before issuing another URL. Without a grant_id, do not issue another URL until an operator reconciles the Odoo grant audit."
+        }
+      });
+      return receipt.finalize((result) => ({
         data: DownloadGrantOutputSchema.parse({
           ...result,
           document: ref(context, "usl.document", result.document.id, result.document.name),
@@ -713,7 +747,10 @@ export function registerBusinessActions(registry: CapabilityRegistry, client: Od
           correlation_id: context.correlationId,
           outcome: "succeeded"
         })
-      };
+      }), (result) => ({
+        knownIds: [document_id],
+        grantId: z.string().uuid().parse(result.grant_id)
+      }));
     }
   }));
 
@@ -735,6 +772,8 @@ export function registerBusinessActions(registry: CapabilityRegistry, client: Od
     },
     keywords: ["revoke", "download URL", "grant", "materialization"],
     requiredModules: ["usl_documents"],
+    requiredPublicMethods: [{ model: "usl.document", method: "mcp_revoke_download_grant" }],
+    requiredFeatures: ["document_materialization"],
     defaultVisible: false,
     alwaysLoad: false,
     sortOrder: 516,
@@ -751,7 +790,7 @@ export function registerBusinessActions(registry: CapabilityRegistry, client: Od
       outcome: z.literal("succeeded")
     }).strict(),
     async handler({ grant_id, reason, context: requestedContext }, context, signal) {
-      const result = await client.call<{
+      const receipt = await client.call<{
         grant_id: string;
         revoked: true;
         revoked_at: string;
@@ -759,14 +798,22 @@ export function registerBusinessActions(registry: CapabilityRegistry, client: Od
         grant_id,
         ...(reason ? { reason } : {}),
         context: rpcContext(requestedContext, context)
-      }, { kind: "mutation", signal });
-      return {
+      }, {
+        kind: "mutation",
+        signal,
+        reconciliation: {
+          targetModel: "usl.document.download.grant",
+          suggestedTool: "documents_revoke_download_url",
+          instructions: `The grant ID is ${grant_id}. Revocation is idempotent, so a deliberate repeat is safe after checking that the original response was not received; never recreate or expose the download URL.`
+        }
+      });
+      return receipt.finalize((result) => ({
         data: {
           ...result,
           correlation_id: context.correlationId,
           outcome: "succeeded" as const
         }
-      };
+      }), () => ({ grantId: grant_id }));
     }
   }));
 
@@ -783,16 +830,27 @@ export function registerBusinessActions(registry: CapabilityRegistry, client: Od
     annotations: actionAnnotations,
     keywords: ["unlink document", "remove relationship", "archive"],
     requiredModules: ["usl_documents"],
+    requiredPublicMethods: [{ model: "usl.document", method: "unlink_from_record" }],
     defaultVisible: false,
     alwaysLoad: false,
     sortOrder: 510,
     input: documentLinkInput,
     output: ActionOutputSchema,
     async handler({ document_id, model, id, context: requestedContext }, context, signal) {
-      const result = await client.call<unknown>(context, "usl.document", "unlink_from_record", {
+      const receipt = await client.call<unknown>(context, "usl.document", "unlink_from_record", {
         ids: [document_id], res_model: model, res_id: id, context: rpcContext(requestedContext, context)
-      }, { kind: "mutation", signal });
-      return { data: { result, correlation_id: context.correlationId, outcome: "succeeded" as const } };
+      }, {
+        kind: "mutation",
+        signal,
+        reconciliation: {
+          targetModel: "usl.document",
+          knownIds: [document_id],
+          fields: ["link_ids"],
+          suggestedTool: "documents_get_context",
+          instructions: `Read document ${document_id} and inspect its links for ${model},${id}. Repeat unlinking only if that exact active relationship still exists.`
+        }
+      });
+      return receipt.finalize((result) => ({ data: { result, correlation_id: context.correlationId, outcome: "succeeded" as const } }));
     }
   }));
 
@@ -809,6 +867,7 @@ export function registerBusinessActions(registry: CapabilityRegistry, client: Od
     annotations: actionAnnotations,
     keywords: ["expense batch", "apply context", "revision", "atomic", "analytic"],
     requiredModules: ["usl_expense_batch"],
+    requiredPublicMethods: [{ model: "usl.expense.batch", method: "apply_context" }],
     defaultVisible: false,
     alwaysLoad: false,
     sortOrder: 520,
@@ -821,14 +880,23 @@ export function registerBusinessActions(registry: CapabilityRegistry, client: Od
     }).strict(),
     output: ActionOutputSchema,
     async handler({ batch_id, expense_ids, force_expense_ids, expected_revision, context: requestedContext }, context, signal) {
-      const result = await client.call<unknown>(context, "usl.expense.batch", "apply_context", {
+      const receipt = await client.call<unknown>(context, "usl.expense.batch", "apply_context", {
         ids: [batch_id],
         ...(expense_ids ? { expense_ids } : {}),
         ...(force_expense_ids ? { force_expense_ids } : {}),
         expected_revision,
         context: rpcContext(requestedContext, context)
-      }, { kind: "mutation", signal });
-      return { data: { result, correlation_id: context.correlationId, outcome: "succeeded" as const } };
+      }, {
+        kind: "mutation",
+        signal,
+        reconciliation: {
+          targetModel: "usl.expense.batch",
+          knownIds: [batch_id],
+          suggestedTool: "expense_batches_get_context",
+          instructions: "Read the batch revision and expense context. Preserve fields already applied, then retry only with the latest revision and the remaining intended changes."
+        }
+      });
+      return receipt.finalize((result) => ({ data: { result, correlation_id: context.correlationId, outcome: "succeeded" as const } }));
     }
   }));
 
@@ -849,16 +917,26 @@ export function registerBusinessActions(registry: CapabilityRegistry, client: Od
       annotations: actionAnnotations,
       keywords: ["expense batch", action.method, "workflow", "atomic"],
       requiredModules: ["usl_expense_batch"],
+      requiredPublicMethods: [{ model: "usl.expense.batch", method: action.method }],
       defaultVisible: false,
       alwaysLoad: false,
       sortOrder: action.name === "expense_batches_submit" ? 530 : action.name === "expense_batches_approve" ? 540 : 550,
       input: z.object({ batch_id: PositiveIdSchema, context: OdooContextSchema }).strict(),
       output: ActionOutputSchema,
       async handler({ batch_id, context: requestedContext }, context, signal) {
-        const result = await client.call<unknown>(context, "usl.expense.batch", action.method, {
+        const receipt = await client.call<unknown>(context, "usl.expense.batch", action.method, {
           ids: [batch_id], context: rpcContext(requestedContext, context)
-        }, { kind: "mutation", signal });
-        return { data: { result, correlation_id: context.correlationId, outcome: "succeeded" as const } };
+        }, {
+          kind: "mutation",
+          signal,
+          reconciliation: {
+            targetModel: "usl.expense.batch",
+            knownIds: [batch_id],
+            suggestedTool: "expense_batches_get_context",
+            instructions: `Read the batch and its expenses. Repeat ${action.method} only if the current workflow state proves that the transition did not apply.`
+          }
+        });
+        return receipt.finalize((result) => ({ data: { result, correlation_id: context.correlationId, outcome: "succeeded" as const } }));
       }
     }));
   }

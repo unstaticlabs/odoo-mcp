@@ -1,5 +1,9 @@
+import { randomUUID } from "node:crypto";
 import { once } from "node:events";
+import { mkdtempSync, rmSync } from "node:fs";
 import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { afterEach, describe, expect, it } from "vitest";
 import { createHttpApp } from "../../src/http.js";
@@ -18,17 +22,21 @@ function configuration() {
     ODOO_DATABASE: "usl",
     MCP_PUBLIC_ORIGIN: "http://127.0.0.1:3000",
     MCP_ALLOWED_HOSTS: "127.0.0.1",
-    MCP_ALLOWED_ORIGINS: "127.0.0.1"
+    MCP_ALLOWED_ORIGINS: "chatgpt.com"
   });
 }
 
-async function listeningServer() {
-  const server = createHttpApp(configuration()).listen(0, "127.0.0.1");
+async function listeningServer(config = configuration()) {
+  const app = createHttpApp(config);
+  const server = app.listen(0, "127.0.0.1");
   await once(server, "listening");
   const address = server.address() as AddressInfo;
-  closeCallbacks.push(async () => new Promise<void>((resolve, reject) => {
-    server.close((error) => error ? reject(error) : resolve());
-  }));
+  closeCallbacks.push(async () => {
+    (app.locals.closeRuntime as (() => void) | undefined)?.();
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => error ? reject(error) : resolve());
+    });
+  });
   return `http://127.0.0.1:${address.port}`;
 }
 
@@ -54,6 +62,29 @@ describe("VPS HTTP MCP transport", () => {
     const tools = await client.listTools();
     expect(tools.tools.map((tool) => tool.name)).toContain("odoo_search_records");
     expect(tools.tools.map((tool) => tool.name)).not.toContain("odoo_call_method");
+  });
+
+  it("serves the enrollment page with a CSP that permits its own submit fetch", async () => {
+    const databaseDirectory = mkdtempSync(join(tmpdir(), `odoo-mcp-test-oauth-${randomUUID()}-`));
+    const databasePath = join(databaseDirectory, "oauth.sqlite");
+    closeCallbacks.push(async () => rmSync(databaseDirectory, { recursive: true, force: true }));
+    const origin = await listeningServer(loadRuntimeConfig({
+      ODOO_PUBLIC_ORIGIN: "https://odoo.example",
+      ODOO_INTERNAL_ORIGIN: "http://odoo:8069",
+      ODOO_DATABASE: "usl",
+      MCP_PUBLIC_ORIGIN: "http://127.0.0.1:3000",
+      MCP_ALLOWED_HOSTS: "127.0.0.1",
+      MCP_ALLOWED_ORIGINS: "127.0.0.1",
+      MCP_OAUTH_ENABLED: "true",
+      MCP_OAUTH_DATABASE: databasePath,
+      BETTER_AUTH_SECRET: "vps-test-better-auth-secret-vps-test",
+      MCP_CREDENTIAL_ENCRYPTION_KEY: Buffer.alloc(32, 7).toString("base64")
+    }));
+    const response = await fetch(`${origin}/oauth/enroll`);
+    expect(response.status).toBe(200);
+    const csp = response.headers.get("content-security-policy") ?? "";
+    expect(csp).toContain("default-src 'none'");
+    expect(csp).toContain("connect-src 'self'");
   });
 
   it("retains the preceding stateless protocol generation", async () => {
@@ -98,5 +129,21 @@ describe("VPS HTTP MCP transport", () => {
       body: "{}"
     });
     expect(unknown.status).toBe(404);
+  });
+
+  it("allows its public hostname when additional client origins are configured", async () => {
+    const origin = await listeningServer();
+    const sameOrigin = await fetch(`${origin}/mcp`, {
+      method: "POST",
+      headers: { Origin: origin, "Content-Type": "application/json" },
+      body: "{}"
+    });
+    expect(sameOrigin.status).toBe(401);
+    const rejected = await fetch(`${origin}/mcp`, {
+      method: "POST",
+      headers: { Origin: "https://evil.example", "Content-Type": "application/json" },
+      body: "{}"
+    });
+    expect(rejected.status).toBe(403);
   });
 });

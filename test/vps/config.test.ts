@@ -48,6 +48,17 @@ describe("runtime target mapping", () => {
     });
   });
 
+  it("always permits its own public origin and keeps materialization opt-in", () => {
+    const disabled = loadRuntimeConfig(environment({
+      MCP_ALLOWED_ORIGINS: "chatgpt.com,claude.ai"
+    }));
+    expect(disabled.allowedOrigins).toEqual(["mcp.example", "chatgpt.com", "claude.ai"]);
+    expect(disabled.documentMaterializationEnabled).toBe(false);
+    expect(loadRuntimeConfig(environment({
+      MCP_DOCUMENT_MATERIALIZATION_ENABLED: "true"
+    })).documentMaterializationEnabled).toBe(true);
+  });
+
   it("requires the direct credential tuple as a unit", () => {
     const config = loadRuntimeConfig(environment());
     expect(() => resolveDirectConnection(config, new Headers({

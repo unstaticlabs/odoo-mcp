@@ -84,7 +84,9 @@ function capabilitySummary(metadata: CapabilityMetadata) {
     effect: metadata.effect,
     profiles: [...metadata.profiles],
     always_load: metadata.alwaysLoad,
-    required_modules: [...metadata.requiredModules]
+    required_modules: [...metadata.requiredModules],
+    required_public_methods: metadata.requiredPublicMethods.map(({ model, method }) => ({ model, method })),
+    required_features: [...metadata.requiredFeatures]
   };
 }
 
@@ -120,7 +122,9 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
         effect: z.enum(["read", "write", "consequential", "irreversible"]),
         profiles: z.array(z.string()),
         always_load: z.boolean(),
-        required_modules: z.array(z.string())
+        required_modules: z.array(z.string()),
+        required_public_methods: z.array(z.object({ model: z.string(), method: z.string() }).strict()),
+        required_features: z.array(z.string())
       }).strict())
     }).strict(),
     async handler({ query, limit }, context) {
@@ -129,9 +133,21 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
         correlation_id: context.correlationId,
         profile: context.profile,
         target_id: context.principal.targetId,
-        result_count: registry.search(query, limit, context.availableModules).length
+        result_count: registry.search(query, limit, {
+          modules: context.availableModules,
+          publicMethods: context.availablePublicMethods,
+          enabledFeatures: context.enabledFeatures
+        }).length
       }, context.eventObserver);
-      return { data: { capabilities: registry.search(query, limit, context.availableModules).map(capabilitySummary) } };
+      return {
+        data: {
+          capabilities: registry.search(query, limit, {
+            modules: context.availableModules,
+            publicMethods: context.availablePublicMethods,
+            enabledFeatures: context.enabledFeatures
+          }).map(capabilitySummary)
+        }
+      };
     }
   }));
 
@@ -616,18 +632,29 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
     }).strict(),
     async handler({ model, values, context: requestedContext }, context, signal) {
       assertBoundedJson(values);
-      const result = await client.call<unknown>(context, model, "create", {
+      const receipt = await client.call<unknown>(context, model, "create", {
         vals_list: values,
         context: attributedContext(requestedContext, context.correlationId)
-      }, { kind: "mutation", signal });
-      const ids = resultIds(result);
-      return {
-        data: {
-          ids,
-          records: ids.map((id) => recordReference(context, model, id)),
-          execution: { correlation_id: context.correlationId, outcome: "succeeded" as const }
+      }, {
+        kind: "mutation",
+        signal,
+        reconciliation: {
+          targetModel: model,
+          suggestedTool: "odoo_search_records",
+          fields: [...new Set(values.flatMap((value) => Object.keys(value)))].slice(0, 100),
+          instructions: "Search with a selective domain built from stable fields in the original values. If no stable unique fields exist, report that the create cannot be reconciled safely and do not repeat it."
         }
-      };
+      });
+      return receipt.finalize((result) => {
+        const ids = resultIds(result);
+        return {
+          data: {
+            ids,
+            records: ids.map((id) => recordReference(context, model, id)),
+            execution: { correlation_id: context.correlationId, outcome: "succeeded" as const }
+          }
+        };
+      }, (result) => ({ knownIds: resultIds(result) }));
     }
   }));
 
@@ -657,12 +684,22 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
     async handler({ model, ids, values, context: requestedContext }, context, signal) {
       assertBoundedJson(values);
       const uniqueIds = [...new Set(ids)];
-      const updated = await client.call<boolean>(context, model, "write", {
+      const receipt = await client.call<boolean>(context, model, "write", {
         ids: uniqueIds,
         vals: values,
         context: attributedContext(requestedContext, context.correlationId)
-      }, { kind: "mutation", signal });
-      return { data: { updated: Boolean(updated), ids: uniqueIds, execution: { correlation_id: context.correlationId, outcome: "succeeded" as const } } };
+      }, {
+        kind: "mutation",
+        signal,
+        reconciliation: {
+          targetModel: model,
+          knownIds: uniqueIds,
+          fields: Object.keys(values).slice(0, 100),
+          suggestedTool: "odoo_read_records",
+          instructions: "Read these records and compare the named fields with the original patch. Keep matching values, and send only a minimal corrective patch for values that are still absent."
+        }
+      });
+      return receipt.finalize((updated) => ({ data: { updated: Boolean(updated), ids: uniqueIds, execution: { correlation_id: context.correlationId, outcome: "succeeded" as const } } }));
     }
   }));
 
@@ -686,11 +723,21 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
     output: z.object({ archived: z.boolean(), ids: z.array(z.number().int().positive()), execution: ExecutionSchema }).strict(),
     async handler({ model, ids, context: requestedContext }, context, signal) {
       const uniqueIds = [...new Set(ids)];
-      await client.call(context, model, "action_archive", {
+      const receipt = await client.call(context, model, "action_archive", {
         ids: uniqueIds,
         context: attributedContext(requestedContext, context.correlationId)
-      }, { kind: "mutation", signal });
-      return { data: { archived: true, ids: uniqueIds, execution: { correlation_id: context.correlationId, outcome: "succeeded" as const } } };
+      }, {
+        kind: "mutation",
+        signal,
+        reconciliation: {
+          targetModel: model,
+          knownIds: uniqueIds,
+          fields: ["active"],
+          suggestedTool: "odoo_read_records",
+          instructions: "Read the active field for these records. Retry only records that are still active and readable."
+        }
+      });
+      return receipt.finalize(() => ({ data: { archived: true, ids: uniqueIds, execution: { correlation_id: context.correlationId, outcome: "succeeded" as const } } }));
     }
   }));
 
@@ -723,14 +770,24 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
       const html = body_is_html
         ? body
         : `<p>${body.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll("\n", "<br>")}</p>`;
-      const result = await client.call<unknown>(context, model, "message_post", {
+      const receipt = await client.call<unknown>(context, model, "message_post", {
         ids: [id],
         body: html,
         body_is_html: true,
         subtype_xmlid: subtype,
         context: attributedContext(requestedContext, context.correlationId)
-      }, { kind: "mutation", signal });
-      return { data: { result, execution: { correlation_id: context.correlationId, outcome: "succeeded" as const } } };
+      }, {
+        kind: "mutation",
+        signal,
+        reconciliation: {
+          targetModel: model,
+          knownIds: [id],
+          fields: ["message_ids"],
+          suggestedTool: "odoo_read_records",
+          instructions: "Read the record's chatter references and inspect recent messages for the original note before posting it again."
+        }
+      });
+      return receipt.finalize((result) => ({ data: { result, execution: { correlation_id: context.correlationId, outcome: "succeeded" as const } } }));
     }
   }));
 
@@ -754,11 +811,21 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
     output: z.object({ deleted: z.boolean(), ids: z.array(z.number().int().positive()), execution: ExecutionSchema }).strict(),
     async handler({ model, ids, context: requestedContext }, context, signal) {
       const uniqueIds = [...new Set(ids)];
-      const deleted = await client.call<boolean>(context, model, "unlink", {
+      const receipt = await client.call<boolean>(context, model, "unlink", {
         ids: uniqueIds,
         context: attributedContext(requestedContext, context.correlationId)
-      }, { kind: "mutation", signal });
-      return { data: { deleted: Boolean(deleted), ids: uniqueIds, execution: { correlation_id: context.correlationId, outcome: "succeeded" as const } } };
+      }, {
+        kind: "mutation",
+        signal,
+        reconciliation: {
+          targetModel: model,
+          knownIds: uniqueIds,
+          fields: ["display_name"],
+          suggestedTool: "odoo_read_records",
+          instructions: "Read the IDs before any repeat. A missing record may be deleted or merely inaccessible; do not claim deletion unless access and surrounding records establish it."
+        }
+      });
+      return receipt.finalize((deleted) => ({ data: { deleted: Boolean(deleted), ids: uniqueIds, execution: { correlation_id: context.correlationId, outcome: "succeeded" as const } } }));
     }
   }));
 
@@ -791,12 +858,22 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
         throw new Error("Pass ids and context through their dedicated parameters, not kwargs");
       }
       assertBoundedJson(kwargs);
-      const result = await client.call<unknown>(context, model, method, {
+      const uniqueIds = ids ? [...new Set(ids)] : undefined;
+      const receipt = await client.call<unknown>(context, model, method, {
         ...kwargs,
-        ...(ids ? { ids: [...new Set(ids)] } : {}),
+        ...(uniqueIds ? { ids: uniqueIds } : {}),
         context: attributedContext(requestedContext, context.correlationId)
-      }, { kind: "mutation", signal });
-      return { data: { result, execution: { correlation_id: context.correlationId, outcome: "succeeded" as const } } };
+      }, {
+        kind: "mutation",
+        signal,
+        reconciliation: {
+          targetModel: model,
+          ...(uniqueIds ? { knownIds: uniqueIds } : {}),
+          suggestedTool: uniqueIds ? "odoo_read_records" : "odoo_search_records",
+          instructions: "Inspect the method's documented effects and fetch the affected records. Because this is an arbitrary public method, retry only after its business effect is proven absent."
+        }
+      });
+      return receipt.finalize((result) => ({ data: { result, execution: { correlation_id: context.correlationId, outcome: "succeeded" as const } } }));
     }
   }));
 }

@@ -14,13 +14,17 @@ import { createObservability, traceContextFromHttp, type Observability } from ".
 export interface RuntimeServices {
   client: OdooClient;
   registry: CapabilityRegistry;
+  enabledFeatures: ReadonlySet<string>;
   observability: Observability;
 }
 
 export function createRuntimeServices(config: RuntimeConfig): RuntimeServices {
   const observability = createObservability(config.analytics);
   const client = new OdooClient(config.targetConcurrency, config.responseBytes);
-  return { client, registry: createCapabilityRegistry(client), observability };
+  const enabledFeatures = new Set(
+    config.documentMaterializationEnabled ? ["document_materialization"] : []
+  );
+  return { client, registry: createCapabilityRegistry(client), enabledFeatures, observability };
 }
 
 export function directAuthInfo(
@@ -43,12 +47,19 @@ export function createHttpServerFactory(services: RuntimeServices, profile: Prof
     context.eventObserver = services.observability;
     context.analyticsPrincipalId = services.observability.principalId(principal);
     context.trace = traceContextFromHttp(mcpContext.requestInfo?.headers);
-    context.availableModules = await services.client.installedModules(context, mcpContext.requestInfo?.signal);
+    const surface = await services.client.discoverSurface(context, mcpContext.requestInfo?.signal);
+    context.availableModules = surface?.modules ?? null;
+    context.availablePublicMethods = surface?.publicMethods ?? null;
+    context.enabledFeatures = services.enabledFeatures;
     const server = services.registry.createServer(context);
     services.observability.instrumentServer(
       server,
       context,
-      services.registry.list(profile, context.availableModules)
+      services.registry.list(profile, {
+        modules: context.availableModules,
+        publicMethods: context.availablePublicMethods,
+        enabledFeatures: context.enabledFeatures
+      })
     );
     return server;
   };
@@ -63,12 +74,19 @@ export function createStdioServerFactory(
     const context = createRequestContext(profile, principal);
     context.eventObserver = services.observability;
     context.analyticsPrincipalId = services.observability.principalId(principal);
-    context.availableModules = await services.client.installedModules(context);
+    const surface = await services.client.discoverSurface(context);
+    context.availableModules = surface?.modules ?? null;
+    context.availablePublicMethods = surface?.publicMethods ?? null;
+    context.enabledFeatures = services.enabledFeatures;
     const server = services.registry.createServer(context);
     services.observability.instrumentServer(
       server,
       context,
-      services.registry.list(profile, context.availableModules)
+      services.registry.list(profile, {
+        modules: context.availableModules,
+        publicMethods: context.availablePublicMethods,
+        enabledFeatures: context.enabledFeatures
+      })
     );
     return server;
   };

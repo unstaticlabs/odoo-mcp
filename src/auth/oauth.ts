@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { setDefaultAutoSelectFamily } from "node:net";
 import { cimd } from "@better-auth/cimd";
 import { fetchClientMetadataResource } from "@better-auth/cimd/node";
 import { mcp, requireMcpAuth } from "@better-auth/mcp";
@@ -12,6 +13,19 @@ import { resolveDirectConnection, type RuntimeConfig } from "../runtime/config.j
 import { emitEvent } from "../runtime/logging.js";
 import type { RuntimeServices } from "../runtime/server.js";
 import { CredentialVault, type ValidatedEnrollment } from "./vault.js";
+
+// Node enables socket family autoselection (RFC 8305) by default since v20.
+// An autoselecting socket calls its custom DNS `lookup` with `all: true` and
+// expects an address array; the @better-auth/cimd node transport pins one
+// DNS answer through a `lookup` callback that returns a scalar. The socket
+// then dials `undefined` and every CIMD metadata fetch fails with
+// ERR_INVALID_IP_ADDRESS before it reaches the network, so a hosted CIMD
+// client (ChatGPT sends client_id=https://chatgpt.com/oauth/client.json)
+// cannot authorize at all. Verified against @better-auth/cimd@1.7.2 on
+// Node 24. A per-request opt-out is not possible: the transport builds its
+// own request options. Remove this when the upstream transport honors the
+// `all` callback contract or sets `autoSelectFamily: false` itself.
+setDefaultAutoSelectFamily(false);
 
 const EnrollmentInputSchema = z.object({
   odooUrl: z.string().url().max(2048),
@@ -52,7 +66,11 @@ function html(document: string, nonce: string): Response {
     headers: {
       "Content-Type": "text/html; charset=utf-8",
       "Cache-Control": "no-store",
-      "Content-Security-Policy": `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'`,
+      // connect-src covers the pages' own same-origin fetch submissions
+      // (enroll, consent, revoke). Without it the browser falls back to
+      // default-src 'none' and blocks the submit, so hosted enrollment
+      // cannot complete at all.
+      "Content-Security-Policy": `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'`,
       "Referrer-Policy": "no-referrer",
       "X-Content-Type-Options": "nosniff"
     }
