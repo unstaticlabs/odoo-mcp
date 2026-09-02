@@ -11,7 +11,7 @@ Audited: 2026-08-30
 
 The current MCP contains useful JSON-2 integration, relational reads, canonical record links, bounded payload handling, structured Odoo errors, and well-tested domain helpers. Its architecture is nevertheless tied to Cloudflare Workers and exposes a large, duplicated static tool surface through four separately assembled servers. The committed Node migration is only scaffolding: its advertised entrypoints do not exist, its capability registry is not wired, and the repository does not currently typecheck or load all tests.
 
-The target is one Node 24 MCP running beside the self-hosted USL Odoo Distribution. One canonical capability registry produces a broad default interface, thematic visibility profiles, and a fully discoverable catalogue. A compact generic Odoo substrate remains first-class so agents can answer cross-domain and unanticipated questions. Semantic tools reduce round trips for common relational views, while consequential multi-step workflows execute through purpose-built public Odoo methods in one Odoo transaction.
+The target is one Node 26 MCP running beside the self-hosted USL Odoo Distribution. One canonical capability registry produces a broad default interface, thematic visibility profiles, and a fully discoverable catalogue. A compact generic Odoo substrate remains first-class so agents can answer cross-domain and unanticipated questions. Semantic tools reduce round trips for common relational views, while consequential multi-step workflows execute through purpose-built public Odoo methods in one Odoo transaction.
 
 This is a clean API break. Cloudflare compatibility, obsolete Odoo Online assumptions, duplicated tool variants, and Enterprise Documents models are removed rather than perpetuated.
 
@@ -135,7 +135,7 @@ Repository skills retain reusable MCP, commit, differential-review, property-tes
 
 ## Testing and agent evaluation
 
-The repository uses npm and Vitest under Node 24. Tests cover schemas, registry invariants, bounds, cursors, serialization, errors, target mapping, concurrency, protocol versions, HTTP, stdio, OAuth, real Distribution permissions, multi-company behavior, transactions, stale state, unknown outcomes, and consequential operations.
+The repository uses npm and Vitest under Node 26. Tests cover schemas, registry invariants, bounds, cursors, serialization, errors, target mapping, concurrency, protocol versions, HTTP, stdio, OAuth, real Distribution permissions, multi-company behavior, transactions, stale state, unknown outcomes, and consequential operations.
 
 The versioned agent corpus contains 60 fixture-backed tasks: straightforward, cross-domain, long-tail, unanticipated/held-out, schema discovery, multi-company, write/consequential, malformed, stale, unsupported, injection, and recovery cases. It compares large static, hard-domain, static-profile, dynamic-search, and selected hybrid surfaces with Codex and Claude.
 
@@ -145,7 +145,7 @@ The selected architecture is accepted when it stays within two percentage points
 
 Implementation lands in independently reversible conventional commits: specification, Node foundation, generic substrate, OAuth, profiles/semantic catalogue, atomic actions, evaluation, and deployment documentation. Additive Odoo service methods land in separately reviewed Odoo PRs before their MCP consumers.
 
-Completion requires a green Node 24 install/typecheck/test/build/container pipeline, one registry, no Cloudflare production artifacts, no legacy Documents models, no hypothetical policy/idempotency dependencies, functional direct/stdio/OAuth identities, working `odoo_call_method`, verified Distribution permissions and multi-company behavior, Odoo-side atomic consequential workflows, successful Codex/Claude evaluations, and complete deployment/rollback documentation.
+Completion requires a green Node 26 install/typecheck/test/build/container pipeline, one registry, no Cloudflare production artifacts, no legacy Documents models, no hypothetical policy/idempotency dependencies, functional direct/stdio/OAuth identities, working `odoo_call_method`, verified Distribution permissions and multi-company behavior, Odoo-side atomic consequential workflows, successful Codex/Claude evaluations, and complete deployment/rollback documentation.
 
 ## References
 
