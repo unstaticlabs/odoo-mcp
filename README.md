@@ -1,6 +1,6 @@
 # USL Odoo MCP
 
-One agent-facing MCP for the self-hosted USL Odoo Distribution. It runs as a Node 24 service beside Odoo and maps stable MCP contracts onto Odoo 19 JSON-2 and purpose-built Distribution methods.
+One agent-facing MCP for the self-hosted USL Odoo Distribution. It runs as a Node 26 service beside Odoo and maps stable MCP contracts onto Odoo 19 JSON-2 and purpose-built Distribution methods.
 
 The interface deliberately combines:
 
@@ -19,7 +19,7 @@ bearer capabilities.
 
 ## Runtime
 
-- Node 24, Express 5, MCP TypeScript SDK 2.0.
+- Node 26, Express 5, MCP TypeScript SDK 2.0.
 - Streamable HTTP at `/mcp` and `/mcp/:profile`.
 - `stdio` for local Codex and Claude clients.
 - `/healthz` for process health and `/readyz` for registry, OAuth, and analytics status.

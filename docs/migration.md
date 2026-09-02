@@ -4,7 +4,7 @@ This release is a clean break from the previous hosted runtime and Odoo Online-s
 
 ## Deployment changes
 
-- Deploy the Node 24 container beside the self-hosted Distribution.
+- Deploy the Node 26 container beside the self-hosted Distribution.
 - Replace the previous hosted endpoint with `/mcp` or `/mcp/:profile` on the VPS reverse-proxy origin.
 - Configure public-to-private Odoo target mappings.
 - Replace previous grant storage with the mounted Better Auth SQLite vault. Old grants are not imported; hosted clients enroll once.
