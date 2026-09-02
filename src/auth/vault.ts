@@ -1,5 +1,6 @@
 import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes } from "node:crypto";
-import { mkdirSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, isAbsolute } from "node:path";
 import BetterSqlite3, { type Database } from "better-sqlite3";
 import type { OdooPrincipal } from "../runtime/context.js";
@@ -56,6 +57,55 @@ function columnExists(database: Database, table: string, column: string): boolea
   return columns.some((candidate) => candidate.name === column);
 }
 
+function requireProcessOwnership(path: string, label: string, uid: number): void {
+  const entry = lstatSync(path);
+  if (entry.uid !== uid) {
+    throw new Error(`${label} must be owned by the MCP process user; found uid ${entry.uid}`);
+  }
+}
+
+function secureFile(path: string, label: string, uid: number): void {
+  const entry = lstatSync(path);
+  if (entry.isSymbolicLink() || !entry.isFile()) {
+    throw new Error(`${label} must be a regular file`);
+  }
+  requireProcessOwnership(path, label, uid);
+  const mode = 0o600;
+  chmodSync(path, mode);
+  const actual = statSync(path).mode & 0o777;
+  if (actual !== mode) {
+    throw new Error(`${label} must use mode ${mode.toString(8)}; found ${actual.toString(8)}`);
+  }
+}
+
+function secureDatabaseDirectory(path: string, uid: number): void {
+  if (path === tmpdir().replace(/\/$/, "")) {
+    throw new Error(
+      "OAuth SQLite directory must not be the shared operating-system temporary directory. "
+      + "Create a dedicated mode-700 subdirectory for MCP_OAUTH_DATABASE."
+    );
+  }
+  if (!existsSync(path)) mkdirSync(path, { recursive: true, mode: 0o700 });
+  const entry = lstatSync(path);
+  if (entry.isSymbolicLink() || !entry.isDirectory()) {
+    throw new Error("OAuth SQLite directory must be a regular directory");
+  }
+  requireProcessOwnership(path, "OAuth SQLite directory", uid);
+  const actual = entry.mode & 0o777;
+  if (actual !== 0o700) {
+    throw new Error(
+      `OAuth SQLite directory must use mode 700; found ${actual.toString(8)}. `
+      + "Use a dedicated process-owned directory and set its mode to 700 before starting the MCP."
+    );
+  }
+}
+
+function secureSqliteFiles(databasePath: string, uid: number): void {
+  for (const path of [databasePath, `${databasePath}-wal`, `${databasePath}-shm`]) {
+    if (existsSync(path)) secureFile(path, "OAuth SQLite file", uid);
+  }
+}
+
 export class CredentialVault {
   readonly database: Database;
   private readonly key: Buffer;
@@ -65,9 +115,17 @@ export class CredentialVault {
     private readonly runtime: RuntimeConfig
   ) {
     if (!isAbsolute(oauth.databasePath)) throw new Error("MCP_OAUTH_DATABASE must be an absolute path");
-    mkdirSync(dirname(oauth.databasePath), { recursive: true, mode: 0o700 });
+    const uid = process.getuid?.();
+    if (uid === undefined) {
+      throw new Error("The OAuth SQLite vault requires a platform that exposes process file ownership");
+    }
+    const databaseDirectory = dirname(oauth.databasePath);
+    secureDatabaseDirectory(databaseDirectory, uid);
+    secureSqliteFiles(oauth.databasePath, uid);
     this.database = new BetterSqlite3(oauth.databasePath);
+    secureSqliteFiles(oauth.databasePath, uid);
     this.database.pragma("journal_mode = WAL");
+    secureSqliteFiles(oauth.databasePath, uid);
     this.database.pragma("foreign_keys = ON");
     this.database.pragma("busy_timeout = 5000");
     this.key = encryptionKey(oauth.encryptionKey);
@@ -87,6 +145,7 @@ export class CredentialVault {
         grant_expires_at INTEGER NOT NULL
       );
     `);
+    secureSqliteFiles(oauth.databasePath, uid);
     if (!columnExists(this.database, "odoo_enrollment", "internal_email")) {
       this.database.exec("ALTER TABLE odoo_enrollment ADD COLUMN internal_email TEXT");
       const rows = this.database.prepare("SELECT enrollment_id FROM odoo_enrollment").all() as Array<{ enrollment_id: string }>;

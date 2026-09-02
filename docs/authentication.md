@@ -52,6 +52,10 @@ MCP_CREDENTIAL_ENCRYPTION_KEY_FILE=/run/secrets/credential_encryption_key
 MCP_OAUTH_TRUSTED_ORIGINS=https://chatgpt.com,https://claude.ai
 ```
 
+The vault parent directory must be private to the service identity. Startup
+enforces mode `0700` on that directory and mode `0600` on the SQLite database,
+WAL, and shared-memory files, and fails closed if those modes cannot be verified.
+
 Generate independent secrets:
 
 ```bash
@@ -84,6 +88,10 @@ Create a consistent SQLite backup to a new absolute path:
 ```bash
 npm run oauth:backup -- /backups/odoo-mcp-oauth-2026-08-30.sqlite
 ```
+
+The backup command creates or repairs the destination with mode `0600`. Keep
+the containing backup directory restricted and owned by the backup service
+identity.
 
 Back up the secret files separately. Restoring the database without the same credential-encryption key makes enrolled API keys unreadable. Changing the Better Auth secret invalidates existing token material.
 

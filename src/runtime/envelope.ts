@@ -47,7 +47,26 @@ export interface ToolFailure {
   code: string;
   message: string;
   retryable?: boolean;
+  condition_retryable?: boolean;
   outcome?: "succeeded" | "not_applied" | "unknown";
+  retry_guidance?: "safe" | "after_correction" | "reconcile_first" | "never";
+  stage?: "preflight" | "request_rejected" | "completion_ambiguous" | "response_processing";
+  known?: {
+    request_sent: "yes" | "no" | "unknown";
+    response_received: "yes" | "no" | "unknown";
+    result_received: "yes" | "no" | "unknown";
+    target_model?: string;
+    record_ids?: number[];
+    grant_id?: string;
+  };
+  reconciliation?: {
+    required: true;
+    suggested_tool: string;
+    target_model: string;
+    record_ids?: number[];
+    fields?: string[];
+    instructions: string;
+  };
   recovery?: string;
 }
 
@@ -57,7 +76,12 @@ export function toolError(failure: ToolFailure, context: RequestContext) {
       code: failure.code,
       message: failure.message,
       retryable: failure.retryable ?? false,
+      ...(failure.condition_retryable === undefined ? {} : { condition_retryable: failure.condition_retryable }),
       outcome: failure.outcome ?? "not_applied",
+      ...(failure.retry_guidance ? { retry_guidance: failure.retry_guidance } : {}),
+      ...(failure.stage ? { stage: failure.stage } : {}),
+      ...(failure.known ? { known: failure.known } : {}),
+      ...(failure.reconciliation ? { reconciliation: failure.reconciliation } : {}),
       ...(failure.recovery ? { recovery: failure.recovery } : {}),
       request_id: context.requestId,
       correlation_id: context.correlationId

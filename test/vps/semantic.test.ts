@@ -212,8 +212,56 @@ describe("Distribution semantic and business capabilities", () => {
     expect(JSON.parse(result.content[0]!.text)).toMatchObject({
       error: {
         outcome: "unknown",
-        retryable: true,
-        recovery: expect.stringContaining("Reconcile mutations before retrying")
+        retryable: false,
+        condition_retryable: true,
+        retry_guidance: "reconcile_first",
+        stage: "completion_ambiguous",
+        known: { request_sent: "unknown", target_model: "usl.document" },
+        recovery: expect.stringContaining("Do not repeat the mutation yet")
+      }
+    });
+  });
+
+  it("reports known grant evidence when a successful response cannot be validated", async () => {
+    const secretUrl = "https://odoo.example/agent-documents/secret-token";
+    const fetcher = vi.fn<typeof fetch>(async () => Response.json({
+      grant_id: "1fcae9e6-c713-42c5-9d1f-e1ba8dc76b40",
+      url: secretUrl,
+      document: { id: 17 }
+    }));
+    const server = createCapabilityRegistry(
+      new OdooClient(8, 1024 * 1024, fetcher)
+    ).createServer({ ...requestContext(), profile: "documents" });
+    const client = new Client({ name: "invalid-grant-result-test", version: "1.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    closeCallbacks.push(async () => {
+      await client.close();
+      await server.close();
+    });
+
+    const result = await client.callTool({
+      name: "documents_create_download_url",
+      arguments: { document_id: 17, context: {} }
+    });
+    const serialized = JSON.stringify(result);
+    expect(result.isError).toBe(true);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(serialized).not.toContain(secretUrl);
+    expect(JSON.parse(result.content[0]!.text)).toMatchObject({
+      error: {
+        outcome: "unknown",
+        retry_guidance: "reconcile_first",
+        stage: "response_processing",
+        known: {
+          request_sent: "yes",
+          response_received: "yes",
+          result_received: "yes",
+          target_model: "usl.document",
+          record_ids: [17],
+          grant_id: "1fcae9e6-c713-42c5-9d1f-e1ba8dc76b40"
+        }
       }
     });
   });

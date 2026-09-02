@@ -78,7 +78,10 @@ Tests must assert behavior rather than treating annotations as controls:
 - credentials and sensitive Odoo values do not appear in structured logs;
 - read retries occur only for classified transient failures;
 - mutations and arbitrary public methods never retry automatically;
-- actionable Odoo rejections say `not_applied`; ambiguous delivery says `unknown`.
+- actionable Odoo rejections say `not_applied`; ambiguous delivery or invalid post-success processing says `unknown`;
+- unknown mutations expose sanitized known facts and a concrete reconciliation read while setting `retryable=false`;
+- API-document caching stays bounded per identity, excludes failures, and capability visibility requires published methods plus enabled staged features;
+- the configured MCP public hostname remains same-origin allowed and OAuth vault files remain mode `0600` under a mode `0700` directory.
 
 ## Release evidence
 
