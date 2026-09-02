@@ -104,6 +104,14 @@ describe("canonical capability registry", () => {
     ]));
   });
 
+  it("keeps write tools available for mixed Agents while Odoo enforces each application", () => {
+    const registry = createCapabilityRegistry(new OdooClient());
+    const names = registry.list("all", undefined, "mixed").map((item) => item.name);
+    expect(names).toContain("odoo_search_records");
+    expect(names).toContain("odoo_create_records");
+    expect(names).toContain("odoo_update_records");
+  });
+
   it("publishes the read-only Agent catalogue from the authenticated identity", async () => {
     const registry = createCapabilityRegistry(new OdooClient());
     const server = registry.createServer(requestContext("read_only"));

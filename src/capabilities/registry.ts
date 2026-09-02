@@ -12,7 +12,7 @@ import { SERVER_VERSION } from "../version.js";
 
 export type CapabilityLayer = "generic" | "semantic" | "business_action";
 export type CapabilityEffect = "read" | "write" | "consequential" | "irreversible";
-export type AgentAccessMode = "read_only" | "read_write";
+export type AgentAccessMode = "read_only" | "read_write" | "mixed";
 
 const READONLY_AGENT_COLLABORATION_CAPABILITIES = new Set([
   "activities_schedule",

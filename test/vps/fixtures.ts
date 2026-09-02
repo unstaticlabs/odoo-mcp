@@ -1,7 +1,7 @@
 import type { RequestContext } from "../../src/runtime/context.js";
 
 const testAgentIdentity = {
-  schema_version: 2 as const,
+  schema_version: 3 as const,
   principal_kind: "agent" as const,
   user_id: 41,
   agent: {
@@ -22,7 +22,7 @@ const testAgentIdentity = {
   effective_group_ids: [1, 10]
 };
 
-export function requestContext(accessMode: "read_only" | "read_write" = "read_write"): RequestContext {
+export function requestContext(accessMode: "read_only" | "read_write" | "mixed" = "read_write"): RequestContext {
   const identity = {
     ...testAgentIdentity,
     agent: { ...testAgentIdentity.agent, access_mode: accessMode },

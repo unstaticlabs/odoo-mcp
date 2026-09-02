@@ -3,7 +3,7 @@ import type { RequestContext } from "../runtime/context.js";
 import type { OdooClient } from "./client.js";
 
 export const AgentIdentitySchema = z.object({
-  schema_version: z.literal(2),
+  schema_version: z.literal(3),
   principal_kind: z.literal("agent"),
   user_id: z.number().int().positive(),
   agent: z.object({
@@ -11,7 +11,7 @@ export const AgentIdentitySchema = z.object({
     name: z.string().min(1).max(200),
     purpose: z.string().min(1).max(10_000),
     state: z.literal("active"),
-    access_mode: z.enum(["read_only", "read_write"]),
+    access_mode: z.enum(["read_only", "read_write", "mixed"]),
     authority_reduced: z.boolean(),
     partner_id: z.number().int().positive()
   }).strict(),

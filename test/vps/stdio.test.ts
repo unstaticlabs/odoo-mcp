@@ -11,7 +11,7 @@ describe("stdio entrypoint", () => {
       response.setHeader("Content-Type", "application/json");
       if (request.url?.includes("/json/2/usl.agent/current_identity")) {
         response.end(JSON.stringify({
-          schema_version: 2,
+          schema_version: 3,
           principal_kind: "agent",
           user_id: 41,
           agent: {

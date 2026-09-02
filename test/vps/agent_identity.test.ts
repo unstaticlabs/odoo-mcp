@@ -13,7 +13,7 @@ const principal = {
 };
 
 const identity = {
-  schema_version: 2,
+  schema_version: 3,
   principal_kind: "agent",
   user_id: 41,
   agent: {
@@ -85,7 +85,20 @@ describe("governed Agent identity", () => {
     expect(toolFailureFromError(caught)).toMatchObject({
       code: "agent_read_only_action_denied",
       retryable: false,
-      recovery: expect.stringContaining("read/write profile")
+      recovery: expect.stringContaining("this application")
     });
+  });
+
+  it("accepts mixed per-application access", async () => {
+    const mixed = {
+      ...identity,
+      agent: { ...identity.agent, access_mode: "mixed" },
+      effective_applications: [
+        { id: 10, name: "Accounting", access: "read_write" },
+        { id: 11, name: "Project", access: "read_only" }
+      ]
+    };
+    const client = new OdooClient(1, 1024 * 1024, async () => Response.json(mixed));
+    await expect(loadAgentIdentity(client, createRequestContext("default", principal))).resolves.toEqual(mixed);
   });
 });

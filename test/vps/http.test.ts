@@ -29,7 +29,7 @@ function configuration() {
 }
 
 const agentIdentity = {
-  schema_version: 2,
+  schema_version: 3,
   principal_kind: "agent",
   user_id: 41,
   agent: {

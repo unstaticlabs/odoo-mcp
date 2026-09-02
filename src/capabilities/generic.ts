@@ -561,7 +561,7 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
         id: z.number().int().positive(),
         name: z.string(),
         purpose: z.string(),
-        access_mode: z.enum(["read_only", "read_write"]),
+        access_mode: z.enum(["read_only", "read_write", "mixed"]),
         authority_reduced: z.boolean()
       }).strict(),
       owner: z.object({
