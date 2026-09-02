@@ -129,33 +129,83 @@ export class MutationReceipt<T> {
   async finalize<R>(
     project: (value: T) => R | Promise<R>,
     observe?: (value: T) => MutationResultEvidence
-  ): Promise<R> {
+  ): Promise<FinalizedMutation<R>> {
     let observed: MutationResultEvidence | undefined;
     try {
       observed = observe?.(this.value);
-      return await project(this.value);
-    } catch (error) {
-      const detail = redactDetails(error instanceof Error ? error.message : String(error));
-      throw new OdooError(
-        `Odoo returned success for ${this.model}.${this.method}, but the MCP could not validate the result: ${detail}`,
-        "unknown",
-        200,
+      return new FinalizedMutation(
+        await project(this.value),
         this.model,
         this.method,
-        false,
-        "unknown",
-        detail,
-        "mutation",
-        "response_processing",
         this.reconciliation,
-        knownFacts(this.reconciliation, {
-          requestSent: "yes",
-          responseReceived: "yes",
-          resultReceived: "yes"
-        }, observed)
+        observed
+      );
+    } catch (error) {
+      throw mutationProcessingError(this.model, this.method, this.reconciliation, observed, error);
+    }
+  }
+}
+
+const finalizedMutationBrand = Symbol("FinalizedMutation");
+
+export class FinalizedMutation<T> {
+  readonly [finalizedMutationBrand] = true;
+
+  constructor(
+    private readonly value: T,
+    private readonly model: string,
+    private readonly method: string,
+    private readonly reconciliation: MutationReconciliation,
+    private readonly observed?: MutationResultEvidence
+  ) {}
+
+  async guard<R>(consume: (value: T) => R | Promise<R>): Promise<R> {
+    try {
+      return await consume(this.value);
+    } catch (error) {
+      throw mutationProcessingError(
+        this.model,
+        this.method,
+        this.reconciliation,
+        this.observed,
+        error
       );
     }
   }
+}
+
+export function isFinalizedMutation<T>(
+  value: T | FinalizedMutation<T>
+): value is FinalizedMutation<T> {
+  return value instanceof FinalizedMutation;
+}
+
+function mutationProcessingError(
+  model: string,
+  method: string,
+  reconciliation: MutationReconciliation,
+  observed: MutationResultEvidence | undefined,
+  error: unknown
+): OdooError {
+  const detail = redactDetails(error instanceof Error ? error.message : String(error));
+  return new OdooError(
+    `Odoo returned success for ${model}.${method}, but the MCP could not validate the result: ${detail}`,
+    "unknown",
+    200,
+    model,
+    method,
+    false,
+    "unknown",
+    detail,
+    "mutation",
+    "response_processing",
+    reconciliation,
+    knownFacts(reconciliation, {
+      requestSent: "yes",
+      responseReceived: "yes",
+      resultReceived: "yes"
+    }, observed)
+  );
 }
 
 function statusCode(status: number): OdooErrorCode {

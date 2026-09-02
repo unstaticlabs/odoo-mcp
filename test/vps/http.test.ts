@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -65,8 +65,9 @@ describe("VPS HTTP MCP transport", () => {
   });
 
   it("serves the enrollment page with a CSP that permits its own submit fetch", async () => {
-    const databasePath = join(tmpdir(), `odoo-mcp-test-oauth-${randomUUID()}.sqlite`);
-    closeCallbacks.push(async () => rmSync(databasePath, { force: true }));
+    const databaseDirectory = mkdtempSync(join(tmpdir(), `odoo-mcp-test-oauth-${randomUUID()}-`));
+    const databasePath = join(databaseDirectory, "oauth.sqlite");
+    closeCallbacks.push(async () => rmSync(databaseDirectory, { recursive: true, force: true }));
     const origin = await listeningServer(loadRuntimeConfig({
       ODOO_PUBLIC_ORIGIN: "https://odoo.example",
       ODOO_INTERNAL_ORIGIN: "http://odoo:8069",

@@ -48,7 +48,7 @@ The process handles `SIGTERM`/`SIGINT` by closing the listener and OAuth vault. 
 
 ## Data and backup
 
-The only MCP persistent state is the optional SQLite OAuth vault. Use a durable mounted volume, monitor free disk, and back up with `npm run oauth:backup`. The SQLite database uses WAL mode. Never copy only a live database file with a naive file copy while writes are active.
+The only MCP persistent state is the optional SQLite OAuth vault. Use a durable mounted volume, monitor free disk, and back up with `npm run oauth:backup`. Its parent directory must be dedicated to the MCP process, owned by that process user, and mode `0700`; startup creates a missing directory but refuses to modify an existing unsafe or shared directory. The SQLite database uses WAL mode. Never copy only a live database file with a naive file copy while writes are active.
 
 Odoo records, authorization, and business audit history remain in Odoo and follow the Distribution's backup procedures.
 
@@ -56,11 +56,13 @@ Odoo records, authorization, and business audit history remain in Odoo and follo
 
 The deferred `documents_create_download_url` and `documents_revoke_download_url`
 tools require the coordinated `usl_documents` backend public methods and Paperless
-`3.0.5-usl.7`. The MCP does not proxy file bytes and does not know Paperless
-credentials. Odoo issues the opaque capability and remains the authorization
-gateway for each GET, HEAD, and Range request.
+`3.0.5-usl.9`. Until these changes reach `19-usl`, the authoritative Distribution
+source is `usl/codex/chore-post-migration-continuous-operations`. The MCP does not
+proxy file bytes and does not know Paperless credentials. Odoo issues the opaque
+capability and remains the authorization gateway for each GET, HEAD, and Range
+request.
 
-Deploy and verify the Odoo PR first. Confirm `/doc-bearer` publishes
+Deploy and verify that authoritative Distribution branch first. Confirm `/doc-bearer` publishes
 `usl.document.mcp_create_download_grant` and
 `usl.document.mcp_revoke_download_grant`, configure the ingress below, and only
 then set `MCP_DOCUMENT_MATERIALIZATION_ENABLED=true`. The registry requires both

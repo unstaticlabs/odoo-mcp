@@ -4,7 +4,11 @@ import {
   type ToolAnnotations
 } from "@modelcontextprotocol/server";
 import { z } from "zod";
-import { toolFailureFromError } from "../odoo/client.js";
+import {
+  type FinalizedMutation,
+  isFinalizedMutation,
+  toolFailureFromError
+} from "../odoo/client.js";
 import type { ProfileName, RequestContext } from "../runtime/context.js";
 import { envelopeSchema, resultEnvelope, toolError, toolResult } from "../runtime/envelope.js";
 import { emitEvent } from "../runtime/logging.js";
@@ -45,6 +49,10 @@ export interface CapabilityMetadata {
 }
 
 type ObjectSchema = z.ZodObject<any> & StandardSchemaWithJSON;
+type CapabilityHandlerResult<O extends ObjectSchema> = {
+  data: z.infer<O>;
+  warnings?: string[];
+};
 
 export interface Capability {
   metadata: CapabilityMetadata;
@@ -61,7 +69,7 @@ export interface CapabilitySpec<I extends ObjectSchema, O extends ObjectSchema>
     input: z.infer<I>,
     context: RequestContext,
     signal: AbortSignal
-  ): Promise<{ data: z.infer<O>; warnings?: string[] }>;
+  ): Promise<CapabilityHandlerResult<O> | FinalizedMutation<CapabilityHandlerResult<O>>>;
 }
 
 function estimateSchemaTokens(input: z.ZodType, output: z.ZodType): number {
@@ -136,7 +144,15 @@ export function defineCapability<I extends ObjectSchema, O extends ObjectSchema>
           });
           try {
             const result = await spec.handler(input as z.infer<I>, context, signal);
-            const envelope = resultEnvelope(context, spec.id, result.data, result.warnings);
+            const render = (value: CapabilityHandlerResult<O>) => {
+              const envelope = envelopeSchema(spec.output).parse(
+                resultEnvelope(context, spec.id, value.data, value.warnings)
+              );
+              return toolResult(envelope);
+            };
+            const response = isFinalizedMutation(result)
+              ? await result.guard(render)
+              : render(result);
             emitEvent("mcp.tool.completed", {
               request_id: context.requestId,
               correlation_id: context.correlationId,
@@ -148,7 +164,7 @@ export function defineCapability<I extends ObjectSchema, O extends ObjectSchema>
               status: "ok",
               duration_ms: Date.now() - started
             });
-            return toolResult(envelope);
+            return response;
           } catch (error) {
             const failure = toolFailureFromError(error);
             emitEvent("mcp.tool.completed", {
@@ -269,8 +285,8 @@ export class CapabilityRegistry {
     );
     const availability = {
       modules: context.availableModules,
-      publicMethods: context.availablePublicMethods,
-      enabledFeatures: context.enabledFeatures
+      publicMethods: context.availablePublicMethods ?? null,
+      enabledFeatures: context.enabledFeatures ?? new Set<string>()
     };
     for (const capability of this.visible(context.profile, availability)) capability.register(server, context);
     emitEvent("mcp.tools.listed", {
