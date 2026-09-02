@@ -2,7 +2,7 @@
 
 ## Default gate
 
-Use Node 24 and npm:
+Use Node 26 and npm:
 
 ```bash
 npm ci

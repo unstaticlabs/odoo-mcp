@@ -15,7 +15,7 @@ This repository is the canonical MCP for the self-hosted USL Odoo Distribution. 
 
 ## Development
 
-- Runtime: Node 24, npm, TypeScript NodeNext, strict Zod schemas, Vitest.
+- Runtime: Node 26, npm, TypeScript NodeNext, strict Zod schemas, Vitest.
 - Use `.js` extensions in relative TypeScript imports.
 - Keep schemas strict and bounded; return structured envelopes and canonical Odoo record references.
 - Add or update registry, schema, adapter, protocol, and evaluation tests with contract changes.
