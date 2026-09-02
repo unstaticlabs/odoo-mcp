@@ -1,6 +1,6 @@
 # Authentication and credential operations
 
-The MCP supports direct request credentials, environment credentials for stdio, and OAuth enrollment for hosted clients. All three resolve to the same `OdooPrincipal` and capability registry.
+The MCP supports direct request credentials, environment credentials for stdio, and OAuth enrollment for hosted clients. All three require an active governed Odoo Agent and resolve to the same `OdooPrincipal` and capability registry. Human API keys are rejected.
 
 Odoo remains authoritative for identity, ACLs, record rules, field access, company scope, public methods, workflow state, and irreversible-action policy. The MCP never treats tool visibility or model output as permission.
 
@@ -36,6 +36,10 @@ X-Odoo-Api-Key: <key>
 
 Do not put the Odoo key in `Authorization`; that header is reserved for MCP OAuth. Direct keys are request-local and are not persisted by the MCP.
 
+Create the Agent and its credential in Odoo **My Agents**. The key authenticates
+the Agent, not its owner. Odoo continuously intersects the Agent's delegated
+access with the owner's current authority and the platform safety policy.
+
 ## stdio
 
 Set `ODOO_URL`, `ODOO_DATABASE`, and `ODOO_API_KEY` in the local client process. `ODOO_URL` and the database must still match configured targets. The stdio transport exposes the default profile.
@@ -65,7 +69,7 @@ The credential-encryption value must decode to exactly 32 bytes. Enrollment:
 
 1. receives the configured Odoo URL/database/key tuple;
 2. validates the target mapping;
-3. calls `res.users.context_get` and reads the authenticated user;
+3. calls `usl.agent.current_identity` and requires an active Agent credential;
 4. encrypts the API key with AES-256-GCM;
 5. stores the enrollment in the SQLite volume;
 6. continues the authorization-code/PKCE flow.
@@ -87,12 +91,12 @@ npm run oauth:backup -- /backups/odoo-mcp-oauth-2026-08-30.sqlite
 
 Back up the secret files separately. Restoring the database without the same credential-encryption key makes enrolled API keys unreadable. Changing the Better Auth secret invalidates existing token material.
 
-No grants from the previous deployment architecture are imported. Each hosted client reconnects once after migration.
+No grants from the previous deployment architecture are imported. Each hosted client reconnects once after migration. The human authorizes the hosted client, while the enrolled Agent performs the Odoo work and owns its audit trail.
 
 ## Operational handling
 
-- Prefer dedicated Odoo agent identities with the minimum appropriate groups and companies.
+- Use a dedicated governed Agent with the minimum appropriate application access and companies.
 - Grant broad read/write access only when the workflow requires it; irreversible authority is a separate Odoo permission.
-- Rotate an Odoo API key by reconnecting the enrollment, then revoke the old one in Odoo.
+- Rotate safely with **Create replacement**, reconnect the enrollment, confirm the new key's last use, then revoke the old key.
 - Do not log or pass secret values through shell history, issue descriptions, evaluation fixtures, or MCP arguments.
 - Return `401` for invalid/missing MCP authentication and let Odoo return record/method permission failures through structured tool errors.
