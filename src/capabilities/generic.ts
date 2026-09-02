@@ -536,7 +536,7 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
     effect: "read",
     annotations: readAnnotations,
     keywords: ["user", "companies", "multi-company", "modules", "locale", "timezone"],
-    requiredModules: [],
+    requiredModules: ["usl_access_control"],
     defaultVisible: true,
     alwaysLoad: false,
     sortOrder: 70,
@@ -545,9 +545,27 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
       user: RecordSchema,
       companies: RecordsSchema,
       modules: z.array(z.string()),
-      locale: z.object({ lang: z.string().optional(), tz: z.string().optional() }).strict()
+      locale: z.object({ lang: z.string().optional(), tz: z.string().optional() }).strict(),
+      principal_kind: z.literal("agent"),
+      agent: z.object({
+        id: z.number().int().positive(),
+        name: z.string(),
+        purpose: z.string()
+      }).strict(),
+      owner: z.object({
+        id: z.number().int().positive(),
+        name: z.string()
+      }).strict(),
+      credential: z.object({
+        id: z.number().int().positive(),
+        name: z.string(),
+        expires_at: z.string()
+      }).strict(),
+      effective_company_ids: z.array(z.number().int().positive())
     }).strict(),
     async handler(_input, context, signal) {
+      const identity = context.agentIdentity;
+      if (!identity) throw new Error("The governed Agent identity was not resolved");
       const userContext = await client.call<Record<string, unknown>>(context, "res.users", "context_get", {}, { signal });
       const userId = userContext.uid;
       if (!Number.isInteger(userId) || (userId as number) <= 0) throw new Error("Odoo did not return the authenticated user id");
@@ -581,7 +599,16 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
           locale: {
             ...(typeof userContext.lang === "string" ? { lang: userContext.lang } : {}),
             ...(typeof userContext.tz === "string" ? { tz: userContext.tz } : {})
-          }
+          },
+          principal_kind: identity.principal_kind,
+          agent: {
+            id: identity.agent.id,
+            name: identity.agent.name,
+            purpose: identity.agent.purpose
+          },
+          owner: identity.owner,
+          credential: identity.credential,
+          effective_company_ids: identity.company_ids
         },
         ...(modules.length === 0 ? { warnings: ["Installed module metadata was unavailable for this identity."] } : {})
       };

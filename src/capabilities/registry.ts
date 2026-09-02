@@ -118,6 +118,10 @@ export function defineCapability<I extends ObjectSchema, O extends ObjectSchema>
             effect: spec.effect
           });
           try {
+            if (!context.validateAgentIdentity) {
+              throw new Error("The MCP runtime did not install its Agent identity validator");
+            }
+            await context.validateAgentIdentity(signal);
             const result = await spec.handler(input as z.infer<I>, context, signal);
             const envelope = resultEnvelope(context, spec.id, result.data, result.warnings);
             emitEvent("mcp.tool.completed", {

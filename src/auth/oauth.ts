@@ -12,6 +12,7 @@ import { createRequestContext, type ProfileName } from "../runtime/context.js";
 import { resolveDirectConnection, type RuntimeConfig } from "../runtime/config.js";
 import { emitEvent } from "../runtime/logging.js";
 import type { RuntimeServices } from "../runtime/server.js";
+import { loadAgentIdentity } from "../odoo/agent_identity.js";
 import { CredentialVault, type ValidatedEnrollment } from "./vault.js";
 
 // Node enables socket family autoselection (RFC 8305) by default since v20.
@@ -33,15 +34,6 @@ const EnrollmentInputSchema = z.object({
   apiKey: z.string().min(1).max(8192),
   oauthQuery: z.string().min(1).max(16_384)
 }).strict();
-
-interface UserContext {
-  uid?: unknown;
-}
-
-interface UserRecord {
-  id?: unknown;
-  name?: unknown;
-}
 
 export interface OAuthService {
   readonly vault: CredentialVault;
@@ -101,11 +93,19 @@ function page(title: string, content: string, script: string, nonce: string): st
 </html>`;
 }
 
-function redirectFromAuthPayload(payload: unknown): string | null {
+export function redirectFromAuthPayload(payload: unknown): string | null {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
   const record = payload as Record<string, unknown>;
   for (const key of ["url", "redirect_uri", "redirectUri"]) {
-    if (typeof record[key] === "string") return record[key];
+    if (typeof record[key] !== "string") continue;
+    const value = record[key].trim();
+    if (/^\/(?!\/)/.test(value)) return value;
+    try {
+      const destination = new URL(value);
+      if (destination.protocol === "https:" || destination.protocol === "http:") return value;
+    } catch {
+      // Try the next supported response field.
+    }
   }
   return null;
 }
@@ -197,28 +197,15 @@ export function createOAuthService(config: RuntimeConfig, services: RuntimeServi
     }));
     if (!principal) throw new Error("Unable to resolve the Odoo connection");
     const context = createRequestContext("default", principal);
-    const odooContext = await services.client.call<UserContext>(context, "res.users", "context_get", {}, {
-      signal: request.signal
-    });
-    const userId = typeof odooContext.uid === "number" && Number.isInteger(odooContext.uid) && odooContext.uid > 0
-      ? odooContext.uid
-      : null;
-    if (!userId) throw new Error("Odoo authenticated the key but did not identify its user");
-    const users = await services.client.call<UserRecord[]>(context, "res.users", "read", {
-      ids: [userId],
-      fields: ["id", "name"]
-    }, { signal: request.signal });
-    const displayName = typeof users[0]?.name === "string" && users[0].name.trim()
-      ? users[0].name.trim().slice(0, 200)
-      : `Odoo user ${userId}`;
+    const identity = await loadAgentIdentity(services.client, context, request.signal);
     return {
-      enrollmentId: vault.stableEnrollmentId(principal.targetId, principal.database, userId),
+      enrollmentId: vault.stableEnrollmentId(principal.targetId, principal.database, identity.user_id),
       targetId: principal.targetId,
       publicOrigin: principal.publicOrigin,
       database: principal.database,
       apiKey: principal.apiKey,
-      odooUserId: userId,
-      displayName
+      odooUserId: identity.user_id,
+      displayName: identity.agent.name
     };
   }
 
@@ -227,8 +214,8 @@ export function createOAuthService(config: RuntimeConfig, services: RuntimeServi
       const nonce = randomBytes(18).toString("base64url");
       return html(page(
         "Connect Odoo",
-        `<h1>Connect your USL Odoo account</h1>
-<p>The MCP will use this Odoo identity and its existing companies, access rights, record rules, and workflow permissions.</p>
+        `<h1>Connect an Odoo Agent</h1>
+<p>Create an Agent in <strong>My Agents</strong>, then enter that Agent's API key. Your ChatGPT authorization remains separate from the Odoo identity that performs the work.</p>
 <form id="enroll">
   <label>Odoo URL<input name="odooUrl" type="url" autocomplete="url" required placeholder="https://odoo.example"></label>
   <label>Database<input name="database" autocomplete="organization" required></label>
@@ -254,9 +241,11 @@ form.addEventListener('submit', async (event) => {
     });
     const data = await response.json();
     if (!response.ok) throw new Error(data.message || data.error || 'Connection failed');
-    const destination = data.url || data.redirect_uri || data.redirectUri;
-    if (!destination) throw new Error('The authorization server did not provide a continuation URL');
-    location.assign(destination);
+    const candidate = data.url || data.redirect_uri || data.redirectUri;
+    if (!candidate) throw new Error('The authorization server did not provide a continuation URL');
+    const destination = new URL(candidate, location.origin);
+    if (!['http:', 'https:'].includes(destination.protocol)) throw new Error('The authorization server returned an invalid continuation URL');
+    location.assign(destination.href);
   } catch (error) { message.textContent = error instanceof Error ? error.message : String(error); button.disabled = false; }
 });`,
         nonce
@@ -327,7 +316,11 @@ button.addEventListener('click', async () => {
     });
     const data = await response.json();
     if (!response.ok) throw new Error(data.message || data.error || 'Authorization failed');
-    location.assign(data.redirect_uri);
+    const candidate = data.url || data.redirect_uri || data.redirectUri;
+    if (!candidate) throw new Error('The authorization server did not provide a continuation URL');
+    const destination = new URL(candidate, location.origin);
+    if (!['http:', 'https:'].includes(destination.protocol)) throw new Error('The authorization server returned an invalid continuation URL');
+    location.assign(destination.href);
   } catch (error) { message.textContent = error instanceof Error ? error.message : String(error); button.disabled = false; }
 });`,
       nonce
@@ -378,6 +371,11 @@ button.addEventListener('click', async () => { button.disabled = true; const res
       try {
         const principal = vault.resolve(enrollmentId);
         const authInfo = bearerAuthInfo(claims, principal, request);
+        await loadAgentIdentity(
+          services.client,
+          createRequestContext(profile, principal, authInfo),
+          request.signal,
+        );
         const requestId = typeof authInfo.extra?.requestId === "string" ? authInfo.extra.requestId : undefined;
         const correlationId = typeof authInfo.extra?.correlationId === "string" ? authInfo.extra.correlationId : undefined;
         emitEvent("auth.resolved", {

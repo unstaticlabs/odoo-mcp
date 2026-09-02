@@ -1,5 +1,6 @@
 import type { AuthInfo } from "@modelcontextprotocol/server";
 import { z } from "zod";
+import type { AgentIdentity } from "../odoo/agent_identity.js";
 
 export const ProfileNameSchema = z.enum([
   "default",
@@ -30,6 +31,8 @@ export interface RequestContext {
   profile: ProfileName;
   principal: OdooPrincipal;
   availableModules?: ReadonlySet<string> | null;
+  agentIdentity?: AgentIdentity;
+  validateAgentIdentity?: (signal?: AbortSignal) => Promise<AgentIdentity>;
   authInfo?: AuthInfo;
 }
 

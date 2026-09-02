@@ -1,5 +1,6 @@
 import type { AuthInfo, McpRequestContext } from "@modelcontextprotocol/server";
 import { OdooClient } from "../odoo/client.js";
+import { loadAgentIdentity } from "../odoo/agent_identity.js";
 import { createCapabilityRegistry } from "../capabilities/index.js";
 import type { CapabilityRegistry } from "../capabilities/registry.js";
 import type { RuntimeConfig } from "./config.js";
@@ -37,6 +38,12 @@ export function createHttpServerFactory(services: RuntimeServices, profile: Prof
   return async (mcpContext: McpRequestContext) => {
     const principal = principalFromAuthInfo(mcpContext.authInfo);
     const context = createRequestContext(profile, principal, mcpContext.authInfo);
+    context.validateAgentIdentity = async (signal) => {
+      const identity = await loadAgentIdentity(services.client, context, signal);
+      context.agentIdentity = identity;
+      return identity;
+    };
+    await context.validateAgentIdentity(mcpContext.requestInfo?.signal);
     context.availableModules = await services.client.installedModules(context, mcpContext.requestInfo?.signal);
     return services.registry.createServer(context);
   };
@@ -49,6 +56,12 @@ export function createStdioServerFactory(
 ) {
   return async () => {
     const context = createRequestContext(profile, principal);
+    context.validateAgentIdentity = async (signal) => {
+      const identity = await loadAgentIdentity(services.client, context, signal);
+      context.agentIdentity = identity;
+      return identity;
+    };
+    await context.validateAgentIdentity();
     context.availableModules = await services.client.installedModules(context);
     return services.registry.createServer(context);
   };
