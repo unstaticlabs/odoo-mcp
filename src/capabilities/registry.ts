@@ -222,6 +222,12 @@ export class CapabilityRegistry {
       if (availableModules && capability.metadata.requiredModules.some((module) => !availableModules.has(module))) {
         return false;
       }
+      if (
+        accessMode === "read_only"
+        && READONLY_AGENT_COLLABORATION_CAPABILITIES.has(capability.metadata.name)
+      ) {
+        return true;
+      }
       if (profile === "all") return true;
       if (profile === "read-only") return capability.metadata.effect === "read";
       if (profile === "default") return capability.metadata.defaultVisible;

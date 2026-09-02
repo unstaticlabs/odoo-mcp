@@ -116,9 +116,16 @@ describe("canonical capability registry", () => {
       await server.close();
     });
     const tools = await client.listTools();
-    expect(tools.tools.map((tool) => tool.name)).toContain("odoo_set_self_following");
-    expect(tools.tools.map((tool) => tool.name)).not.toContain("expense_batches_get_context");
-    expect(tools.tools.map((tool) => tool.name)).not.toContain("odoo_create_records");
+    const names = tools.tools.map((tool) => tool.name);
+    expect(names).toEqual(expect.arrayContaining([
+      "activities_schedule",
+      "documents_create_download_url",
+      "documents_revoke_download_url",
+      "odoo_post_message",
+      "odoo_set_self_following"
+    ]));
+    expect(names).not.toContain("expense_batches_get_context");
+    expect(names).not.toContain("odoo_create_records");
   });
 
   it("registers valid MCP v2 schemas and structured tool metadata", async () => {
