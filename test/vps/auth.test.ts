@@ -13,7 +13,11 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createOAuthService, redirectFromAuthPayload } from "../../src/auth/oauth.js";
+import {
+  createOAuthService,
+  credentialEndpointHeaders,
+  redirectFromAuthPayload
+} from "../../src/auth/oauth.js";
 import { CredentialVault } from "../../src/auth/vault.js";
 import { createCapabilityRegistry } from "../../src/capabilities/index.js";
 import { OdooClient } from "../../src/odoo/client.js";
@@ -189,6 +193,22 @@ describe("OAuth continuation", () => {
     expect(redirectFromAuthPayload({ url: 42 })).toBeNull();
     expect(redirectFromAuthPayload({ url: "javascript:alert(1)" })).toBeNull();
     expect(redirectFromAuthPayload({ url: "//untrusted.example" })).toBeNull();
+  });
+});
+
+describe("OAuth enrollment credentials", () => {
+  it("uses the configured trusted origin for internal Better Auth requests", () => {
+    const source = new Request("https://mcp.example/oauth/enroll", {
+      headers: {
+        Cookie: "session=opaque",
+        Origin: "https://untrusted.example"
+      }
+    });
+    const headers = credentialEndpointHeaders("https://mcp.example", source);
+
+    expect(headers.get("Origin")).toBe("https://mcp.example");
+    expect(headers.get("Cookie")).toBe("session=opaque");
+    expect(headers.get("Content-Type")).toBe("application/json");
   });
 });
 
