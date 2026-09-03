@@ -110,6 +110,20 @@ export function redirectFromAuthPayload(payload: unknown): string | null {
   return null;
 }
 
+export function credentialEndpointHeaders(publicOrigin: string, source: Request): Headers {
+  const headers = new Headers({
+    Accept: "application/json",
+    "Content-Type": "application/json",
+    // This is a server-side request to our own Better Auth endpoint. It does
+    // not inherit browser headers automatically, but Better Auth still
+    // requires the configured trusted origin for CSRF validation.
+    Origin: publicOrigin
+  });
+  const cookie = source.headers.get("Cookie");
+  if (cookie) headers.set("Cookie", cookie);
+  return headers;
+}
+
 function bearerAuthInfo(claims: JWTPayload, principal: ReturnType<CredentialVault["resolve"]>, request: Request): AuthInfo {
   const scope = typeof claims.scope === "string" ? claims.scope.split(/\s+/).filter(Boolean) : [];
   const clientId = typeof claims.client_id === "string"
@@ -175,15 +189,9 @@ export function createOAuthService(config: RuntimeConfig, services: RuntimeServi
     .then(async () => { await auth.$context; });
 
   async function callCredentialEndpoint(path: "/sign-up/email" | "/sign-in/email", body: object, source: Request): Promise<Response> {
-    const headers = new Headers({
-      Accept: "application/json",
-      "Content-Type": "application/json"
-    });
-    const cookie = source.headers.get("Cookie");
-    if (cookie) headers.set("Cookie", cookie);
     return await auth.handler(new Request(`${config.publicOrigin}/api/auth${path}`, {
       method: "POST",
-      headers,
+      headers: credentialEndpointHeaders(config.publicOrigin, source),
       body: JSON.stringify(body),
       signal: source.signal
     }));
