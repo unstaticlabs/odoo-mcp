@@ -4,7 +4,7 @@ The executable source of truth is the canonical registry created in `src/capabil
 
 ## Universal core
 
-The five non-deferred tools are:
+The five preferred discovery and read tools are:
 
 | Tool | Selection rule |
 | --- | --- |
@@ -14,7 +14,7 @@ The five non-deferred tools are:
 | `odoo_search_records` | Perform bounded cross-domain or long-tail search. |
 | `odoo_read_records` | Read selected fields from known record IDs. |
 
-Further generic substrate tools are available in every writable profile but may be deferred by clients:
+Further generic substrate tools are available in every writable profile:
 
 - `odoo_expand_record`, `odoo_aggregate_records`, and `odoo_describe_environment`;
 - `odoo_create_records`, `odoo_update_records`, `odoo_archive_records`, `odoo_post_message`, and `odoo_call_method`.
@@ -49,7 +49,7 @@ Actions do not bypass Odoo state or permissions. The agent should read the relev
 
 | URL | Intended visible surface |
 | --- | --- |
-| `/mcp` | Broad default for general agents; maximum 21 tools/15k estimated schema tokens. |
+| `/mcp` | Static broad default for general agents; maximum 21 tools/15k estimated schema tokens. |
 | `/mcp/all` | Complete catalogue with deferred-loading metadata. |
 | `/mcp/read-only` | Every read capability currently available. |
 | `/mcp/accounting` | Universal core plus accounting, expenses, and related document actions. |
@@ -58,7 +58,19 @@ Actions do not bypass Odoo state or permissions. The agent should read the relev
 | `/mcp/b2c` | Universal core plus B2C context. |
 | `/mcp/advanced` | Default plus permanent deletion. |
 
-Clients should use `/mcp` or a fitting profile. `/mcp/all` is available only when a client deliberately wants the complete catalogue. Per-tool `_meta.defer_loading` is a selection hint; it does not make a schema callable unless the client actually loaded that tool definition.
+Clients should use `/mcp` or a fitting profile. These named profiles omit `_meta.defer_loading` so hosted clients receive every listed schema as a static callable surface. `/mcp/all` is available only when a client deliberately wants the complete catalogue and emits per-tool deferred-loading hints. Those hints do not make a schema callable unless the client actually loads that tool definition.
+
+### Progressive-discovery client compatibility
+
+Progressive discovery is a host capability, not an MCP server-side profile switch. Use `/mcp/all` only with a host that searches and materializes MCP tool definitions itself:
+
+- OpenAI Responses API agents support tool search with GPT-5.4 and later when the request includes `tool_search` and marks the hosted MCP server `defer_loading: true`. OpenAI documents deferral on the Responses API MCP-server tool definition, not automatic interpretation of arbitrary per-tool MCP result metadata.
+- Claude Code and the Claude Agent SDK enable MCP tool search by default with Sonnet 4+ and Opus 4+; Haiku does not support it. Their host defers and materializes registered MCP tools.
+- GitHub Copilot CLI enables on-demand tool loading on supported Claude and GPT-5.4+ models when its tool-count threshold is reached. Its `deferTools` setting is host configuration.
+
+Hosted ChatGPT plugin connections are not documented as providing that host-controlled materialization flow, and production testing currently shows catalogue discovery without callable-schema materialization. Keep those connections on the static `/mcp` endpoint.
+
+References: [OpenAI tool search](https://developers.openai.com/api/docs/guides/tools-tool-search), [Claude Code MCP tool search](https://code.claude.com/docs/en/mcp#scale-with-mcp-tool-search), and [GitHub Copilot CLI tool search](https://docs.github.com/en/copilot/concepts/agents/copilot-cli/tool-search).
 
 Module, public-method, model-access, and feature predicates remove specialized tools from `tools/list` unless positive availability is known. Capability search evaluates the complete canonical catalogue: it omits entries proven unavailable, retains unknown candidates, and returns `availability`, `visible_in_current_profile`, and `callable_now`. On writable profiles its optional fallback prefers a matching callable tool, then `odoo_call_method`; on `read-only` it always recommends generic record search and never method invocation. Search metadata is advisory and never activates a tool, changes a profile, or alters `tools/list`.
 

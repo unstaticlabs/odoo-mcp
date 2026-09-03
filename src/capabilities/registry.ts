@@ -88,7 +88,11 @@ type CapabilityHandlerResult<O extends ObjectSchema> = {
 
 export interface Capability {
   metadata: CapabilityMetadata;
-  register(server: McpServer, context: RequestContext): RegisteredTool;
+  register(
+    server: McpServer,
+    context: RequestContext,
+    options?: { deferLoading?: boolean }
+  ): RegisteredTool;
 }
 
 export interface CapabilitySpec<I extends ObjectSchema, O extends ObjectSchema>
@@ -157,9 +161,17 @@ export function defineCapability<I extends ObjectSchema, O extends ObjectSchema>
   };
   return {
     metadata,
-    register(server, context) {
+    register(server, context, options = {}) {
       const inputSchema: StandardSchemaWithJSON = spec.input;
       const outputSchema: StandardSchemaWithJSON = envelopeSchema(spec.output);
+      const toolMeta: Record<string, unknown> = {
+        "odoo/capabilityId": spec.id,
+        "odoo/layer": spec.layer,
+        "odoo/toolsets": [...spec.toolsets],
+        "odoo/effect": spec.effect,
+        "odoo/alwaysLoad": spec.alwaysLoad
+      };
+      if (options.deferLoading !== undefined) toolMeta.defer_loading = options.deferLoading;
       return server.registerTool(
         spec.name,
         {
@@ -168,14 +180,7 @@ export function defineCapability<I extends ObjectSchema, O extends ObjectSchema>
           inputSchema,
           outputSchema,
           annotations: spec.annotations,
-          _meta: {
-            "odoo/capabilityId": spec.id,
-            "odoo/layer": spec.layer,
-            "odoo/toolsets": [...spec.toolsets],
-            "odoo/effect": spec.effect,
-            "odoo/alwaysLoad": spec.alwaysLoad,
-            "defer_loading": !spec.alwaysLoad
-          }
+          _meta: toolMeta
         },
         async (input, mcpContext) => {
           context.touchAgentAccess?.();
@@ -549,7 +554,15 @@ export class CapabilityRegistry {
       ? this.visible(context.profile, { enabledFeatures: context.enabledFeatures })
       : this.visible(context.profile, availability);
     const handles = new Map<string, RegisteredTool>();
-    for (const capability of candidates) handles.set(capability.metadata.name, capability.register(server, context));
+    for (const capability of candidates) {
+      handles.set(capability.metadata.name, capability.register(server, context, {
+        // ChatGPT currently retains only a small subset of tools carrying the
+        // non-standard defer_loading hint and does not reliably materialize
+        // the rest. Named profiles are deliberately static surfaces; reserve
+        // deferred metadata for the explicit full-catalogue endpoint.
+        deferLoading: context.profile === "all" ? !capability.metadata.alwaysLoad : undefined
+      }));
+    }
     const updateDynamicTools = (state: AgentAccessState): boolean => {
       this.applyState(context, state);
       const desired = state.available

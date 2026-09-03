@@ -76,7 +76,7 @@ Profiles are views over the same registry:
 | `accounting`, `projects`, `documents`, `b2c` | Universal core plus tools carrying the corresponding tag |
 | `advanced` | Default plus deletion and administration tools |
 
-The five recommended non-deferred tools are `odoo_search_capabilities`, `odoo_search_models`, `odoo_describe_model`, `odoo_search_records`, and `odoo_read_records`. Capability search operates at tool level and may return tools from several domains. It searches unknown-availability catalogue entries but actual exposure remains fail-closed. It is not a mandatory router and does not activate tools through mutable connection state.
+The five preferred discovery and read tools are `odoo_search_capabilities`, `odoo_search_models`, `odoo_describe_model`, `odoo_search_records`, and `odoo_read_records`. Named profiles advertise their complete bounded surface without deferred-loading hints because hosted ChatGPT connections do not reliably materialize hinted schemas; the explicit `all` profile retains native tool-search metadata. Capability search operates at tool level and may return tools from several domains. It searches unknown-availability catalogue entries but actual exposure remains fail-closed. It is not a mandatory router and does not activate tools through mutable connection state.
 
 Capability search normalizes case, punctuation, dots, hyphens, underscores, common stopwords, and simple plurals. Ranking is additive and deterministic: exact tool name 100, exact capability ID 90, phrase match 25, keyword/toolset token 20, title token 10, and description token 3. A non-empty query must contain and match at least one meaningful term; empty queries retain registry order, which is also the final tie-breaker.
 
@@ -97,7 +97,7 @@ Capability search normalizes case, punctuation, dots, hyphens, underscores, comm
 | `odoo_archive_records` | Inherited `action_archive`; unsupported when the model has no active field |
 | `odoo_post_message` | One message on one record |
 | `odoo_delete_records` | Advanced `unlink` in one transaction |
-| `odoo_call_method` | Deferred public JSON-2 method invocation in every writable profile |
+| `odoo_call_method` | Public JSON-2 method invocation in every writable profile; deferred only on `all` |
 
 Every returned record includes a stable `{model, id, display_name, url}` reference. Inputs use strict schemas, bounded domains/JSON, explicit field selection, and cursor pagination. Responses provide structured content plus a concise text representation for older clients. Errors use stable codes, a redacted explanation, recoverability, and an actionable next step. Mutation failures distinguish request rejection, ambiguous completion, and post-success response processing. Unknown outcomes explicitly prohibit blind retries, report request/response/result evidence as `yes`, `no`, or `unknown`, preserve sanitized known record or grant identifiers, and give a reconciliation read plus minimal-correction guidance.
 

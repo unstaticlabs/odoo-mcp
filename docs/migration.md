@@ -49,7 +49,7 @@ Old offset pagination, heterogeneous batch writes, duplicated server-specific to
 
 ## Client profile choice
 
-- General static agents: `/mcp`.
+- General static agents, including hosted ChatGPT: `/mcp` (no deferred-loading hints).
 - Native tool-search/deferred clients: `/mcp/all`.
 - Specialized static agents: a thematic profile URL.
 - Public-method workflows: any writable profile, including `/mcp`.

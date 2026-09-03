@@ -500,8 +500,10 @@ describe("canonical capability registry", () => {
     expect(search?.inputSchema).toMatchObject({ type: "object", additionalProperties: false });
     expect(search?.outputSchema).toMatchObject({ type: "object", additionalProperties: false });
     expect(search?._meta).toMatchObject({ "odoo/layer": "generic" });
+    expect(search?._meta).not.toHaveProperty("defer_loading");
     const semantic = tools.tools.find((tool) => tool.name === "projects_get_task_context");
-    expect(semantic?._meta).toMatchObject({ defer_loading: true, "odoo/toolsets": expect.arrayContaining(["projects"]) });
+    expect(semantic?._meta).toMatchObject({ "odoo/toolsets": expect.arrayContaining(["projects"]) });
+    expect(semantic?._meta).not.toHaveProperty("defer_loading");
     const method = tools.tools.find((tool) => tool.name === "odoo_call_method");
     expect(method).toMatchObject({
       inputSchema: {
@@ -517,10 +519,10 @@ describe("canonical capability registry", () => {
       },
       annotations: { destructiveHint: true, idempotentHint: false },
       _meta: {
-        defer_loading: true,
         "odoo/toolsets": expect.arrayContaining(["core", "advanced"])
       }
     });
+    expect(method?._meta).not.toHaveProperty("defer_loading");
 
     const searchResult = await client.callTool({
       name: "odoo_search_capabilities",
@@ -540,5 +542,24 @@ describe("canonical capability registry", () => {
         selection_note: expect.stringContaining("does not activate tools")
       }
     });
+  });
+
+  it("reserves deferred-loading metadata for the explicit all profile", async () => {
+    const registry = createCapabilityRegistry(new OdooClient());
+    const server = registry.createServer({ ...requestContext(), profile: "all" });
+    const client = new Client({ name: "all-profile-registry-test", version: "1.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    connections.push(async () => {
+      await client.close();
+      await server.close();
+    });
+
+    const tools = await client.listTools();
+    const search = tools.tools.find((tool) => tool.name === "odoo_search_capabilities");
+    const semantic = tools.tools.find((tool) => tool.name === "projects_get_task_context");
+    expect(search?._meta).toMatchObject({ defer_loading: false });
+    expect(semantic?._meta).toMatchObject({ defer_loading: true });
   });
 });

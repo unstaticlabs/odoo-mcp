@@ -26,11 +26,11 @@ Every capability records a stable ID/name, layer, toolsets, profiles, effect, an
 
 ## Profiles and discovery
 
-- `/mcp` is the broad default static view, capped at 21 tools and 15,000 estimated schema tokens.
-- `/mcp/all` exposes the canonical catalogue with `defer_loading` metadata for capable clients.
+- `/mcp` is the broad default static view, capped at 21 tools and 15,000 estimated schema tokens; it omits deferred-loading hints so hosted clients retain every listed schema.
+- `/mcp/all` exposes the canonical catalogue with advisory `defer_loading` metadata for capable clients. The host remains responsible for enabling its native MCP tool-search flow and materializing schemas.
 - `/mcp/read-only`, `/mcp/accounting`, `/mcp/projects`, `/mcp/documents`, `/mcp/b2c`, and `/mcp/advanced` are filtered views over the same registry.
 
-Thematic writable profiles include the universal core, including the deferred `odoo_call_method`, and may span multiple toolsets. `odoo_search_capabilities` searches individual capability metadata and can return several domains in one result. It is not a domain router, profile switch, or MCP tool-loading mechanism.
+Thematic writable profiles are also static and include the universal core, including `odoo_call_method`, and may span multiple toolsets. Only the explicit `all` profile emits deferred-loading hints. `odoo_search_capabilities` searches individual capability metadata and can return several domains in one result. It is not a domain router, profile switch, or MCP tool-loading mechanism.
 
 Profiles do not alter credentials or authorize operations. A hidden tool can still correspond to an Odoo operation the credential may perform elsewhere; a visible tool can still be denied by Odoo.
 
