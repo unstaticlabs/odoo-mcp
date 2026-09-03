@@ -57,7 +57,7 @@ Use separate identities for broad read, normal agent write, accounting approval,
 Qualify the built image with MCP Inspector or an equivalent protocol client:
 
 1. initialize `/mcp`, `/mcp/all`, and each profile;
-2. verify deterministic `tools/list`, strict input/output schemas, and `_meta.defer_loading`;
+2. verify deterministic `tools/list`, strict input/output schemas, no deferred-loading hints on named profiles, and `_meta.defer_loading` only on `/mcp/all`;
 3. submit invalid inputs, an unknown profile, cancelled requests, and response-overflow fixtures;
 4. run at least eight concurrent reads against one target and two independent target mappings;
 5. start `dist/stdio.js` as a subprocess and execute discovery/read;

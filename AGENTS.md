@@ -9,7 +9,7 @@ This repository is the canonical MCP for the self-hosted USL Odoo Distribution. 
 - Treat profiles and `defer_loading` metadata as visibility controls only. Odoo credentials, ACLs, record rules, field access, company context, public-method dispatch, and workflow validation are the authority.
 - Keep transport details behind `src/odoo/client.ts`. MCP contracts must not mirror incidental HTTP routes.
 - One MCP business action must map to one Odoo-side transaction. Do not simulate atomicity by chaining mutations.
-- Preserve `odoo_call_method` as an advanced, deferred, one-shot public-method escape hatch. Do not add an MCP allowlist or claim arbitrary method idempotency.
+- Preserve `odoo_call_method` as a consequential, one-shot public-method escape hatch. Advertise it statically on writable named profiles and defer it only on the explicit `/mcp/all` discovery surface. Do not add an MCP allowlist or claim arbitrary method idempotency.
 - Mutations receive one transport attempt. An ambiguous completion is `outcome: unknown`; never retry it automatically.
 - Never log credentials, domains, prompts, tool arguments, record values, or tool output.
 

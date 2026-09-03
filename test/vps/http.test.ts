@@ -141,6 +141,7 @@ describe("VPS HTTP MCP transport", () => {
     expect(tools.tools.map((tool) => tool.name)).toContain("odoo_search_records");
     expect(tools.tools.map((tool) => tool.name)).toContain("odoo_call_method");
     expect(tools.tools.map((tool) => tool.name)).not.toContain("odoo_delete_records");
+    expect(tools.tools.every((tool) => !("defer_loading" in (tool._meta ?? {})))).toBe(true);
   });
 
   it("performs setup once while warm list and tool requests add only the business call", async () => {
