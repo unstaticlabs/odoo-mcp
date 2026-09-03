@@ -11,6 +11,11 @@ describe("MCP release contract", () => {
     expect(release.schema).toBe("usl-odoo-mcp-oci-release/v2");
     expect(release.compatibility.sha256).toBe(loadCompatibility().digest);
     expect(release.compatibility.oauth_vault.schema_version).toBe(1);
+    expect(release.compatibility.required_agent_identity).toMatchObject({
+      method: "usl.agent.current_identity",
+      principal_kind: "agent",
+      schema_version: 3,
+    });
   });
 
   it("rejects mutable image tags", () => {

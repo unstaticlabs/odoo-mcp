@@ -13,7 +13,7 @@ export function loadCompatibility(root = process.cwd()) {
   const path = resolve(root, "release/compatibility.json");
   const raw = readFileSync(path, "utf8");
   const value = JSON.parse(raw);
-  const expected = ["oauth_vault", "required_actions", "required_modules", "required_public_methods", "schema", "server_version", "supported_odoo_series"];
+  const expected = ["oauth_vault", "required_actions", "required_agent_identity", "required_modules", "required_public_methods", "schema", "server_version", "supported_odoo_series"];
   if (JSON.stringify(Object.keys(value).sort()) !== JSON.stringify(expected)) fail("compatibility fields differ");
   if (value.schema !== "usl-odoo-mcp-compatibility/v2") fail("compatibility schema is invalid");
   const pkg = JSON.parse(readFileSync(resolve(root, "package.json"), "utf8"));
@@ -21,6 +21,11 @@ export function loadCompatibility(root = process.cwd()) {
   for (const key of ["supported_odoo_series", "required_modules", "required_public_methods", "required_actions"]) {
     if (!sortedUnique(value[key])) fail(`${key} must be sorted and unique`);
   }
+  const identity = value.required_agent_identity;
+  const identityKeys = ["fields", "method", "principal_kind", "schema_version"];
+  if (!identity || JSON.stringify(Object.keys(identity).sort()) !== JSON.stringify(identityKeys)) fail("required_agent_identity fields differ");
+  if (identity.method !== "usl.agent.current_identity" || identity.principal_kind !== "agent" || !Number.isInteger(identity.schema_version) || identity.schema_version < 1) fail("required_agent_identity is invalid");
+  if (!sortedUnique(identity.fields) || !identity.fields.includes("owner") || !identity.fields.includes("effective_applications")) fail("required_agent_identity fields are invalid");
   const sourceActions = new Set();
   for (const name of readdirSync(resolve(root, "src/capabilities"))) {
     if (!name.endsWith(".ts")) continue;
