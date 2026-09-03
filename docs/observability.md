@@ -66,6 +66,21 @@ and its SDK is a `0.x` release, which is why this repository pins its version.
 Use the built-in [MCP Analytics views](https://posthog.com/docs/mcp-analytics)
 instead of creating a parallel analytics stack.
 
+### Production decision (2026-09-03)
+
+The deployment owner selected and documented the following:
+
+- Project: `odoo-mcp` (id 264805) in organization Unstatic Labs, PostHog EU
+  Cloud. Ingestion origin: `https://eu.i.posthog.com`.
+- Retention: the paid-plan event retention of 7 years is accepted. There is no
+  per-project retention control for events, and no purge is scheduled.
+- Deletion: on request through the PostHog API or support. Rotation of the
+  pseudonymization key severs history from future events; it does not delete.
+- Access: the project stays open to all organization members. Enable project
+  access control when membership grows beyond the core team.
+- Rotation: the ingestion key record and procedure live in the operator's
+  credential inventory. The pseudonymization key rotates only for a compromise.
+
 After deployment, verify:
 
 1. `/readyz` reports `analytics: ready`.
