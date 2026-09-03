@@ -27,7 +27,7 @@ The most common mappings are:
 | create/update variants | `odoo_create_records`, `odoo_update_records` |
 | deletion | default `odoo_archive_records`; advanced `odoo_delete_records` |
 | chatter message variants | `odoo_post_message` |
-| arbitrary model method | `odoo_call_method` in `advanced`/`all` |
+| arbitrary model method | deferred `odoo_call_method` in every writable profile |
 | thin project list/get wrappers | generic search/read or `projects_get_task_context` |
 | legacy document model access | `documents_*` capabilities backed by `usl.document` |
 | expense/batch workflow chains | fixed-intent `expenses_*` and `expense_batches_*` actions |
@@ -52,7 +52,8 @@ Old offset pagination, heterogeneous batch writes, duplicated server-specific to
 - General static agents: `/mcp`.
 - Native tool-search/deferred clients: `/mcp/all`.
 - Specialized static agents: a thematic profile URL.
-- Public-method or permanent-delete workflows: `/mcp/advanced` or dynamic retrieval from `/mcp/all`.
+- Public-method workflows: any writable profile, including `/mcp`.
+- Permanent-delete workflows: `/mcp/advanced`.
 
 Do not use a narrower profile as a permission boundary. Preserve the intended Odoo identity and company access independently.
 

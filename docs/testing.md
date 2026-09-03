@@ -18,10 +18,10 @@ The default suite covers:
 - strict schemas, bounded JSON/domain/context values, cursor behavior, canonical URLs, and serialization;
 - target normalization/mapping, secret file handling, request size, CORS/host controls, semaphores, retries, cancellation, and error translation;
 - direct auth, OAuth enrollment/vault/revocation, HTTP Streamable MCP, legacy stateless compatibility, and stdio;
-- deterministic profiles, module availability, schema-token budgets, deferred metadata, and structured tool outputs;
+- deterministic profiles, fail-closed exposure, unknown-aware catalogue search, schema-token budgets, deferred metadata, and structured tool outputs;
 - generic substrate behavior, one-shot mutation outcomes, document facade calls, semantic context, rebuilt Accounting views, and fixed-intent actions;
 - property-based cursor/domain/JSON/context invariants;
-- the 60-task evaluation corpus and A/B/C/D/E surface generator.
+- the 60-task evaluation corpus, six ChatGPT golden prompts, and A/B/C/D/E surface generator.
 
 ## Live Distribution smoke suite
 
@@ -62,7 +62,8 @@ Qualify the built image with MCP Inspector or an equivalent protocol client:
 4. run at least eight concurrent reads against one target and two independent target mappings;
 5. start `dist/stdio.js` as a subprocess and execute discovery/read;
 6. connect current Codex and Claude Code/Desktop clients;
-7. complete hosted ChatGPT and Claude OAuth enrollment, refresh, reconnect, and revoke flows.
+7. complete hosted ChatGPT and Claude OAuth enrollment, refresh, reconnect, and revoke flows;
+8. rescan/reconnect the ChatGPT connector, verify the default 21-tool and degraded 8-tool surfaces, and run the six golden prompts.
 
 Record client versions, MCP protocol negotiation, model IDs, date, image SHA, Distribution SHA, profile URL, and whether native tool search was enabled.
 
@@ -72,7 +73,7 @@ Tests must assert behavior rather than treating annotations as controls:
 
 - unauthorized tool execution reaches Odoo and is denied by the intended ACL/rule/policy;
 - private or `@api.private` methods cannot pass the Odoo JSON-2 dispatcher;
-- permanent deletion remains absent from default/thematic profiles;
+- permanent deletion remains absent from default/thematic profiles and the public-method fallback is not used to disguise deletion;
 - record-content prompt injection is returned as untrusted data and never executed;
 - searches, fields, relations, attachments, arguments, depth, keys, bodies, and outputs stay bounded;
 - credentials and sensitive Odoo values do not appear in structured logs;
@@ -82,7 +83,7 @@ Tests must assert behavior rather than treating annotations as controls:
 - unknown mutations expose sanitized known facts and a concrete reconciliation read while setting `retryable=false`;
 - the Agent access cache stays at 50 LRU entries, coalesces cold loads and refreshes, stores failures only as unavailable status, and cancels timers and refreshes at shutdown;
 - a cold connection makes exactly one identity request and one API-document request, while warm listing, search, and execution add no preflight calls;
-- capability visibility requires Odoo-advertised model operations or public methods plus enabled staged features, and stdio emits one list-change notification only when visible names change;
+- capability visibility requires Odoo-advertised model operations or public methods plus enabled staged features, while search retains unknown candidates without claiming to activate them, and stdio emits one list-change notification only when visible names change;
 - the configured MCP public hostname remains same-origin allowed and OAuth vault files remain mode `0600` under a mode `0700` directory.
 
 ## Release evidence

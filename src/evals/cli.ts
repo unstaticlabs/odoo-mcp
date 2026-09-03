@@ -1,12 +1,13 @@
 import { createCapabilityRegistry } from "../capabilities/index.js";
 import { OdooClient } from "../odoo/client.js";
-import { loadEvalCorpus, loadFixtureManifest } from "./schema.js";
+import { loadChatGptGoldenPrompts, loadEvalCorpus, loadFixtureManifest } from "./schema.js";
 import { generateAllEvalSurfaces } from "./surfaces.js";
 
 async function main(): Promise<void> {
   const command = process.argv[2] ?? "validate";
   const corpus = await loadEvalCorpus();
   const fixtures = await loadFixtureManifest();
+  const golden = await loadChatGptGoldenPrompts();
   const fixtureRefs = new Set(Object.keys(fixtures.refs));
   const unknownRefs = corpus.tasks.flatMap((task) => task.fixture_refs.filter((ref) => !fixtureRefs.has(ref)));
   if (unknownRefs.length) throw new Error(`Unknown fixture references: ${[...new Set(unknownRefs)].join(", ")}`);
@@ -16,6 +17,7 @@ async function main(): Promise<void> {
       version: corpus.version,
       fixture_version: fixtures.version,
       tasks: corpus.tasks.length,
+      chatgpt_golden_prompts: golden.prompts.length,
       categories: Object.fromEntries(
         [...new Set(corpus.tasks.map((task) => task.category))].sort().map((category) => [
           category,

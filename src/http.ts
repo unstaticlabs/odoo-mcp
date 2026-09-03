@@ -183,7 +183,7 @@ export function createHttpApp(
         oauthStatus = "error";
       }
     }
-    const ready = budget.tools <= 20 && budget.schemaTokens <= 15_000 && oauthStatus !== "error";
+    const ready = budget.tools <= 21 && budget.schemaTokens <= 15_000 && oauthStatus !== "error";
     response.json({
       status: ready ? "ready" : "not_ready",
       targets: config.targets.length,
