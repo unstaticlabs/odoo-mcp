@@ -17,6 +17,7 @@ Required runtime configuration:
 
 - `MCP_PUBLIC_ORIGIN`, `MCP_ALLOWED_HOSTS`, and `MCP_ALLOWED_ORIGINS`;
 - `MCP_DOCUMENT_MATERIALIZATION_ENABLED=false` until its coordinated Odoo backend is deployed;
+- `MCP_ACCESS_SNAPSHOT_MAX_STALE_SECONDS=86400` and `MCP_ACCESS_REFRESH_TIMEOUT_SECONDS=120` for persistent OAuth surface hydration and bounded refresh;
 - one or more Odoo targets;
 - request/response bounds and per-target concurrency if defaults are unsuitable;
 - OAuth database/secrets/trusted origins when hosted clients are enabled.
@@ -30,7 +31,7 @@ Required runtime configuration:
 
 1. Build an immutable image tagged with the Git SHA.
 2. Back up the OAuth SQLite database and both secret files.
-3. Run `oauth:migrate` with the candidate image and production mounts.
+3. Run `node dist/auth/cli.js prepare` with the candidate image and production mounts so migrations complete and active OAuth access snapshots are warm.
 4. Start the candidate container without removing the preceding image.
 5. Require `GET /healthz` to return `status=ok`.
 6. Require `GET /readyz` to return `status=ready`, the default tool budget within 21/15,000, OAuth `ready` or deliberately `disabled`, and analytics `ready` or deliberately `disabled`. Analytics `degraded` does not make the MCP unavailable, but fix it before treating telemetry as complete.
@@ -52,7 +53,7 @@ The process handles `SIGTERM`/`SIGINT` by closing the listener and OAuth vault, 
 
 ## Data and backup
 
-The only MCP persistent state is the optional SQLite OAuth vault. Use a durable mounted volume, monitor free disk, and back up with `npm run oauth:backup`. Its parent directory must be dedicated to the MCP process, owned by that process user, and mode `0700`; startup creates a missing directory but refuses to modify an existing unsafe or shared directory. The SQLite database uses WAL mode. Never copy only a live database file with a naive file copy while writes are active.
+The only MCP persistent state is the optional SQLite OAuth vault, including its encrypted per-enrollment access snapshots. Use a durable mounted volume, monitor free disk, and back up with `npm run oauth:backup`. Its parent directory must be dedicated to the MCP process, owned by that process user, and mode `0700`; startup creates a missing directory but refuses to modify an existing unsafe or shared directory. The SQLite database uses WAL mode. Never copy only a live database file with a naive file copy while writes are active.
 
 Odoo records, authorization, and business audit history remain in Odoo and follow the Distribution's backup procedures.
 

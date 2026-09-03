@@ -3,11 +3,60 @@ import { OdooClient, OdooError } from "../../src/odoo/client.js";
 import {
   AgentAccessSnapshotCache,
   AgentAccessUnavailableError,
+  AgentAccessWarmingError,
+  type AgentAccessSnapshot,
+  type AgentAccessSnapshotStore,
   agentCredentialFingerprint
 } from "../../src/runtime/agent_access_cache.js";
+import type { RequestContext } from "../../src/runtime/context.js";
 import { requestContext } from "./fixtures.js";
 
 const identity = requestContext().agentIdentity!;
+
+function oauthContext(): RequestContext {
+  const context = requestContext();
+  return {
+    ...context,
+    principal: {
+      ...context.principal,
+      authMode: "oauth",
+      enrollmentId: "enrollment-test"
+    }
+  };
+}
+
+function completeSnapshot(refreshedAt = Date.now()): AgentAccessSnapshot {
+  return {
+    identity,
+    refreshedAt,
+    surface: {
+      etag: '"agent-access-v1"',
+      modules: new Set(["base", "api_doc", "contacts"]),
+      publicMethods: new Map([["res.partner", new Set(["read", "search_read", "write"])]]),
+      modelAccess: new Map([["res.partner", {
+        read: true,
+        create: true,
+        write: true,
+        unlink: true
+      }]])
+    }
+  };
+}
+
+class MemorySnapshotStore implements AgentAccessSnapshotStore {
+  snapshot: AgentAccessSnapshot | null;
+  readonly load = vi.fn((_: RequestContext["principal"]) => this.snapshot);
+  readonly save = vi.fn((_: RequestContext["principal"], snapshot: AgentAccessSnapshot) => {
+    this.snapshot = snapshot;
+  });
+  readonly remove = vi.fn(() => {
+    this.snapshot = null;
+  });
+
+  constructor(snapshot: AgentAccessSnapshot | null) {
+    this.snapshot = snapshot;
+  }
+}
 
 function surfaceDocument(write = true) {
   return {
@@ -47,6 +96,123 @@ afterEach(() => {
 });
 
 describe("Agent access snapshot cache", () => {
+  it("hydrates a complete OAuth snapshot immediately and revalidates it in the background", async () => {
+    const stored = completeSnapshot();
+    const store = new MemorySnapshotStore(stored);
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    const fetcher = vi.fn<typeof fetch>(async () => {
+      await blocked;
+      return Response.json({ error: { message: "temporary outage" } }, { status: 503 });
+    });
+    const cache = new AgentAccessSnapshotCache(new OdooClient(8, 1024 * 1024, fetcher), { store });
+    const snapshot = await cache.initialize(oauthContext(), undefined, { requireSurface: true });
+    expect(snapshot).toBe(stored);
+    expect(store.load).toHaveBeenCalledTimes(1);
+    expect(cache.get(oauthContext().principal)).toBe(stored);
+    release();
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalled());
+    expect(cache.get(oauthContext().principal)).toBe(stored);
+    await cache.close();
+  });
+
+  it("reports a valid cached snapshot when prepare revalidation fails transiently", async () => {
+    const stored = completeSnapshot();
+    const store = new MemorySnapshotStore(stored);
+    const fetcher = vi.fn<typeof fetch>(async (input) => String(input).includes("current_identity")
+      ? Response.json(identity)
+      : Response.json({ error: { message: "temporary outage" } }, { status: 503 }));
+    const cache = new AgentAccessSnapshotCache(new OdooClient(8, 1024 * 1024, fetcher), { store });
+
+    await expect(cache.warm(oauthContext())).resolves.toEqual({
+      snapshot: stored,
+      refreshed: false
+    });
+    expect(cache.get(oauthContext().principal)).toBe(stored);
+    await cache.close();
+  });
+
+  it("expires stale OAuth snapshots and returns retryable warming instead of a partial surface", async () => {
+    const now = Date.parse("2026-09-03T12:00:00Z");
+    const store = new MemorySnapshotStore(completeSnapshot(now - 24 * 60 * 60_000 - 1));
+    const fetcher = vi.fn<typeof fetch>(async (input) => String(input).includes("current_identity")
+      ? Response.json(identity)
+      : Response.json({ error: { message: "upstream unavailable" } }, { status: 503 }));
+    const cache = new AgentAccessSnapshotCache(new OdooClient(8, 1024 * 1024, fetcher), {
+      store,
+      now: () => now,
+      maximumStaleMs: 24 * 60 * 60_000
+    });
+
+    await expect(cache.initialize(oauthContext(), undefined, {
+      requireSurface: true,
+      timeoutMs: 100
+    })).rejects.toBeInstanceOf(AgentAccessWarmingError);
+    expect(store.remove).toHaveBeenCalledTimes(1);
+    expect(() => cache.get(oauthContext().principal)).toThrow(AgentAccessWarmingError);
+    await cache.close();
+  });
+
+  it("maps a cold OAuth identity timeout to retryable warming within one attempt", async () => {
+    const fetcher = vi.fn<typeof fetch>(async (_input, init) => await new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+    }));
+    const cache = new AgentAccessSnapshotCache(new OdooClient(8, 1024 * 1024, fetcher), {
+      store: new MemorySnapshotStore(null)
+    });
+
+    await expect(cache.initialize(oauthContext(), undefined, {
+      requireSurface: true,
+      timeoutMs: 20
+    })).rejects.toBeInstanceOf(AgentAccessWarmingError);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    await cache.close();
+  });
+
+  it("preserves a fresh snapshot after transient refresh failure but discards it after an authority change", async () => {
+    const store = new MemorySnapshotStore(completeSnapshot());
+    let changed = false;
+    const changedIdentity = {
+      ...identity,
+      effective_group_ids: [...identity.effective_group_ids, 99]
+    };
+    const fetcher = vi.fn<typeof fetch>(async (input) => {
+      if (String(input).includes("current_identity")) {
+        return Response.json(changed ? changedIdentity : identity);
+      }
+      return Response.json({ error: { message: "temporary outage" } }, { status: 503 });
+    });
+    const cache = new AgentAccessSnapshotCache(new OdooClient(8, 1024 * 1024, fetcher), { store });
+    const context = oauthContext();
+    const initial = await cache.initialize(context, undefined, { requireSurface: true });
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(2));
+    expect(cache.get(context.principal)).toBe(initial);
+
+    changed = true;
+    cache.noteAccessFailure(context, new OdooError(
+      "Access changed", "permission_denied", 403, undefined, undefined, false, "not_applied"
+    ));
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(4));
+    expect(store.remove).toHaveBeenCalledTimes(1);
+    expect(() => cache.get(context.principal)).toThrow(AgentAccessWarmingError);
+    await cache.close();
+  });
+
+  it("invalidates a persisted snapshot when API-document authorization is denied", async () => {
+    const store = new MemorySnapshotStore(completeSnapshot());
+    const fetcher = vi.fn<typeof fetch>(async (input) => String(input).includes("current_identity")
+      ? Response.json(identity)
+      : Response.json({ error: { message: "documentation access revoked" } }, { status: 403 }));
+    const cache = new AgentAccessSnapshotCache(new OdooClient(8, 1024 * 1024, fetcher), { store });
+    const context = oauthContext();
+    await cache.initialize(context, undefined, { requireSurface: true });
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(2));
+
+    expect(store.remove).toHaveBeenCalledTimes(1);
+    expect(() => cache.get(context.principal)).toThrow(AgentAccessUnavailableError);
+    await cache.close();
+  });
+
   it("loads identity and discovery exactly once, then serves warm consumers without Odoo traffic", async () => {
     const { cache, calls } = cacheHarness({ random: () => 0.5 });
     const context = requestContext();

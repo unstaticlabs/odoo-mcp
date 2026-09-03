@@ -14,7 +14,7 @@ HTTP or stdio
 
 `src/capabilities/index.ts` is the only composition root. Generic, semantic, accounting, document, and business-action modules contribute metadata and handlers to the same `CapabilityRegistry`; the registry creates every MCP server/profile view in deterministic order.
 
-The runtime has no global business transaction or session state. An HTTP MCP request gets a fresh stateless server view. A process-wide, memory-only Agent access cache holds at most 50 credential-scoped snapshots; it is discarded on restart.
+The runtime has no global business transaction or session state. An HTTP MCP request gets a fresh stateless server view. A process-wide Agent access cache holds at most 50 credential-scoped snapshots. OAuth enrollments persist only their encrypted last-complete access snapshot across restarts; direct HTTP and stdio snapshots remain memory-only.
 
 ## Capability layers
 
@@ -56,7 +56,7 @@ Read calls retry transient network failures and HTTP 429/502/503/504 at most thr
 
 Calls use a per-target semaphore, defaulting to eight concurrent requests. Foreground business calls are dequeued before background access refreshes, and each target runs at most one background request at a time.
 
-The first use of a credential loads `current_identity` and `/doc-bearer/index.json` once. Warm HTTP requests, tool listing, capability search, and tool execution use the cached snapshot without an identity or discovery preflight. Activity queues a non-blocking refresh once a snapshot is at least one minute old; successful refreshes back off through 1, 2, 4, and progressively longer minute intervals to a one-day cap. Access denials queue a deduplicated refresh but never retry the denied business mutation. API-document refreshes revalidate with ETags. Stdio enables or disables already-registered tool handles and sends `notifications/tools/list_changed` only when the visible name set changes.
+The first use of a credential loads `current_identity` and `/doc-bearer/index.json` once. OAuth enrollments persist the last complete, encrypted identity and capability surface in the OAuth SQLite volume for at most 24 hours; direct HTTP and stdio remain memory-only. A restart hydrates that coherent snapshot before serving `tools/list`, then revalidates it in the background with the saved ETag. A transient timeout never replaces a complete surface with partial metadata. When no usable OAuth snapshot exists, the server returns retryable `503 surface_warming` instead of letting a hosted client freeze a degraded manifest. Warm HTTP requests, capability search, and tool execution use the cached snapshot without an identity or discovery preflight. Activity queues a non-blocking refresh once a snapshot is at least one minute old; successful refreshes back off through 1, 2, 4, and progressively longer minute intervals to a one-day cap. Access denials queue a deduplicated refresh but never retry the denied business mutation. Stdio enables or disables already-registered tool handles and sends `notifications/tools/list_changed` only when the visible name set changes.
 
 Content-free structured event hooks cover auth resolution, MCP request/list/search/execute boundaries, and Odoo call boundaries. Stable request, correlation, target, capability, tool, profile, deployment, build, and W3C trace identifiers support comparisons across revisions and clients.
 

@@ -8,7 +8,8 @@ import { betterAuth, type BetterAuthOptions, type JWTPayload } from "better-auth
 import { getMigrations } from "better-auth/db/migration";
 import { jwt } from "better-auth/plugins";
 import { z } from "zod";
-import { createRequestContext, type ProfileName } from "../runtime/context.js";
+import { AgentAccessWarmingError } from "../runtime/agent_access_cache.js";
+import { createRequestContext, type OdooPrincipal, type ProfileName } from "../runtime/context.js";
 import { resolveDirectConnection, type RuntimeConfig } from "../runtime/config.js";
 import { emitEvent } from "../runtime/logging.js";
 import type { RuntimeServices } from "../runtime/server.js";
@@ -149,6 +150,7 @@ export function createOAuthService(config: RuntimeConfig, services: RuntimeServi
   const oauth = config.oauth;
   if (!oauth) return null;
   const vault = new CredentialVault(oauth, config);
+  services.accessCache.setPersistentStore(vault);
   const resource = `${config.publicOrigin}/mcp`;
 
   const authOptions = {
@@ -206,7 +208,11 @@ export function createOAuthService(config: RuntimeConfig, services: RuntimeServi
     const context = createRequestContext("default", principal);
     context.eventObserver = services.observability;
     context.analyticsPrincipalId = services.observability.principalId(principal);
-    const identity = (await services.accessCache.initialize(context, request.signal)).identity;
+    const snapshot = await services.accessCache.initialize(context, request.signal, {
+      requireSurface: true,
+      timeoutMs: config.accessRefreshTimeoutMs
+    });
+    const identity = snapshot.identity;
     services.accessCache.touch(context);
     return {
       enrollmentId: vault.stableEnrollmentId(principal.targetId, principal.database, identity.user_id),
@@ -268,6 +274,16 @@ form.addEventListener('submit', async (event) => {
       const input = EnrollmentInputSchema.parse(await request.json());
       const enrollment = await validateEnrollment(input, request);
       vault.upsert(enrollment);
+      const enrolledPrincipal: OdooPrincipal = {
+        ...resolveDirectConnection(config, new Headers({
+          "X-Odoo-Url": input.odooUrl,
+          "X-Odoo-Database": input.database,
+          "X-Odoo-Api-Key": input.apiKey
+        }))!,
+        authMode: "oauth",
+        enrollmentId: enrollment.enrollmentId
+      };
+      services.accessCache.persistCurrent(createRequestContext("default", enrolledPrincipal));
       const email = vault.internalEmail(enrollment.enrollmentId);
       const credentials = {
         email,
@@ -299,6 +315,13 @@ form.addEventListener('submit', async (event) => {
         duration_ms: Date.now() - started,
         error_name: error instanceof Error ? error.name : "Error"
       });
+      if (error instanceof AgentAccessWarmingError) {
+        return json(
+          { error: "surface_warming", message: error.message },
+          503,
+          { "Retry-After": String(error.retryAfterSeconds) }
+        );
+      }
       return json({
         error: "invalid_odoo_enrollment",
         message: error instanceof Error ? error.message : "Unable to validate the Odoo connection"
@@ -384,7 +407,10 @@ button.addEventListener('click', async () => { button.disabled = true; const res
         const context = createRequestContext(profile, principal, authInfo);
         context.eventObserver = services.observability;
         context.analyticsPrincipalId = services.observability.principalId(principal);
-        await services.accessCache.initialize(context, request.signal);
+        await services.accessCache.initialize(context, request.signal, {
+          requireSurface: true,
+          timeoutMs: Math.min(5_000, config.accessRefreshTimeoutMs)
+        });
         services.accessCache.touch(context);
         const requestId = typeof authInfo.extra?.requestId === "string" ? authInfo.extra.requestId : undefined;
         const correlationId = typeof authInfo.extra?.correlationId === "string" ? authInfo.extra.correlationId : undefined;
@@ -406,6 +432,13 @@ button.addEventListener('click', async () => { button.disabled = true; const res
           duration_ms: Date.now() - started,
           error_name: error instanceof Error ? error.name : "Error"
         });
+        if (error instanceof AgentAccessWarmingError) {
+          return json(
+            { error: "surface_warming", message: error.message },
+            503,
+            { "Retry-After": String(error.retryAfterSeconds) }
+          );
+        }
         return json({ error: "invalid_token", message: error instanceof Error ? error.message : "Invalid Odoo enrollment" }, 401);
       }
     }, { resource, requiredScopes: ["odoo"] });

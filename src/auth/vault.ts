@@ -3,6 +3,9 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute } from "node:path";
 import BetterSqlite3, { type Database } from "better-sqlite3";
+import { z } from "zod";
+import { AgentIdentitySchema } from "../odoo/agent_identity.js";
+import { agentCredentialFingerprint, type AgentAccessSnapshot, type AgentAccessSnapshotStore } from "../runtime/agent_access_cache.js";
 import type { OdooPrincipal } from "../runtime/context.js";
 import type { OAuthRuntimeConfig, RuntimeConfig } from "../runtime/config.js";
 
@@ -20,6 +23,38 @@ interface EnrollmentRow {
   updated_at: number;
   grant_expires_at: number;
 }
+
+interface AccessSnapshotRow {
+  credential_fingerprint: string;
+  schema_version: number;
+  encrypted_snapshot: string;
+}
+
+const StoredAccessSnapshotSchema = z.object({
+  schema_version: z.literal(1),
+  refreshed_at: z.number().int().nonnegative(),
+  identity: AgentIdentitySchema,
+  surface: z.object({
+    etag: z.string().max(512).optional(),
+    modules: z.array(z.string().min(1).max(255)).max(10_000),
+    public_methods: z.array(z.tuple([
+      z.string().min(1).max(255),
+      z.array(z.string().min(1).max(255)).max(10_000)
+    ])).max(10_000),
+    model_access: z.array(z.tuple([
+      z.string().min(1).max(255),
+      z.object({
+        read: z.boolean(),
+        create: z.boolean(),
+        write: z.boolean(),
+        unlink: z.boolean()
+      }).strict()
+    ])).max(10_000)
+  }).strict()
+}).strict();
+
+const MAX_ENCRYPTED_SNAPSHOT_BYTES = 4 * 1024 * 1024;
+const SNAPSHOT_AAD_PREFIX = "usl-odoo-mcp-agent-access-snapshot-v1\0";
 
 export interface ValidatedEnrollment {
   enrollmentId: string;
@@ -106,7 +141,7 @@ function secureSqliteFiles(databasePath: string, uid: number): void {
   }
 }
 
-export class CredentialVault {
+export class CredentialVault implements AgentAccessSnapshotStore {
   readonly database: Database;
   private readonly key: Buffer;
 
@@ -159,7 +194,21 @@ export class CredentialVault {
         ON odoo_enrollment(user_id) WHERE user_id IS NOT NULL;
       CREATE UNIQUE INDEX IF NOT EXISTS odoo_enrollment_internal_email
         ON odoo_enrollment(internal_email);
+      CREATE TABLE IF NOT EXISTS odoo_agent_access_snapshot (
+        enrollment_id TEXT PRIMARY KEY REFERENCES odoo_enrollment(enrollment_id) ON DELETE CASCADE,
+        credential_fingerprint TEXT NOT NULL,
+        schema_version INTEGER NOT NULL,
+        encrypted_snapshot TEXT NOT NULL,
+        refreshed_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
     `);
+    this.database.prepare(`
+      DELETE FROM odoo_agent_access_snapshot
+      WHERE enrollment_id IN (
+        SELECT enrollment_id FROM odoo_enrollment WHERE grant_expires_at <= ?
+      )
+    `).run(Math.floor(Date.now() / 1000));
   }
 
   stableEnrollmentId(targetId: string, database: string, odooUserId: number): string {
@@ -234,6 +283,9 @@ export class CredentialVault {
     ).get(enrollmentId) as EnrollmentRow | undefined;
     if (!row) throw new Error("The Odoo enrollment was revoked or no longer exists");
     if (row.grant_expires_at <= Math.floor(Date.now() / 1000)) {
+      this.database.prepare(
+        "DELETE FROM odoo_agent_access_snapshot WHERE enrollment_id = ?"
+      ).run(enrollmentId);
       throw new Error("The Odoo enrollment reached its one-year grant ceiling; reconnect it");
     }
     const target = this.runtime.targets.find(
@@ -241,15 +293,121 @@ export class CredentialVault {
         && candidate.publicOrigin === row.public_origin
         && candidate.databases.includes(row.database_name)
     );
-    if (!target) throw new Error("The enrolled Odoo target is no longer configured");
+    if (!target) {
+      this.database.prepare(
+        "DELETE FROM odoo_agent_access_snapshot WHERE enrollment_id = ?"
+      ).run(enrollmentId);
+      throw new Error("The enrolled Odoo target is no longer configured");
+    }
     return {
       targetId: target.id,
       publicOrigin: target.publicOrigin,
       internalOrigin: target.internalOrigin,
       database: row.database_name,
       apiKey: this.decrypt(row.encrypted_api_key),
-      authMode: "oauth"
+      authMode: "oauth",
+      enrollmentId
     };
+  }
+
+  activePrincipals(): { principals: OdooPrincipal[]; unavailable: number } {
+    const rows = this.database.prepare(
+      "SELECT enrollment_id FROM odoo_enrollment WHERE grant_expires_at > ? ORDER BY enrollment_id"
+    ).all(Math.floor(Date.now() / 1000)) as Array<{ enrollment_id: string }>;
+    const principals: OdooPrincipal[] = [];
+    let unavailable = 0;
+    for (const row of rows) {
+      try {
+        principals.push(this.resolve(row.enrollment_id));
+      } catch {
+        this.database.prepare(
+          "DELETE FROM odoo_agent_access_snapshot WHERE enrollment_id = ?"
+        ).run(row.enrollment_id);
+        unavailable += 1;
+      }
+    }
+    return { principals, unavailable };
+  }
+
+  load(principal: OdooPrincipal): AgentAccessSnapshot | null {
+    const enrollmentId = principal.enrollmentId;
+    if (!enrollmentId || principal.authMode !== "oauth") return null;
+    const row = this.database.prepare(
+      "SELECT credential_fingerprint, schema_version, encrypted_snapshot FROM odoo_agent_access_snapshot WHERE enrollment_id = ?"
+    ).get(enrollmentId) as AccessSnapshotRow | undefined;
+    if (!row) return null;
+    if (row.schema_version !== 1
+      || row.credential_fingerprint !== agentCredentialFingerprint(principal)
+      || Buffer.byteLength(row.encrypted_snapshot) > MAX_ENCRYPTED_SNAPSHOT_BYTES) {
+      this.remove(principal);
+      return null;
+    }
+    try {
+      const parsed = StoredAccessSnapshotSchema.parse(JSON.parse(
+        this.decryptSnapshot(enrollmentId, row.encrypted_snapshot)
+      ));
+      return {
+        identity: parsed.identity,
+        refreshedAt: parsed.refreshed_at,
+        surface: {
+          modules: new Set(parsed.surface.modules),
+          publicMethods: new Map(parsed.surface.public_methods.map(([model, methods]) => [model, new Set(methods)])),
+          modelAccess: new Map(parsed.surface.model_access),
+          ...(parsed.surface.etag ? { etag: parsed.surface.etag } : {})
+        }
+      };
+    } catch {
+      this.remove(principal);
+      return null;
+    }
+  }
+
+  save(principal: OdooPrincipal, snapshot: AgentAccessSnapshot): void {
+    const enrollmentId = principal.enrollmentId;
+    if (!enrollmentId || principal.authMode !== "oauth" || !snapshot.surface) return;
+    const payload = JSON.stringify(StoredAccessSnapshotSchema.parse({
+      schema_version: 1,
+      refreshed_at: snapshot.refreshedAt,
+      identity: snapshot.identity,
+      surface: {
+        ...(snapshot.surface.etag ? { etag: snapshot.surface.etag } : {}),
+        modules: [...snapshot.surface.modules].sort(),
+        public_methods: [...snapshot.surface.publicMethods]
+          .map(([model, methods]) => [model, [...methods].sort()] as const)
+          .sort(([left], [right]) => left.localeCompare(right)),
+        model_access: [...snapshot.surface.modelAccess]
+          .sort(([left], [right]) => left.localeCompare(right))
+      }
+    }));
+    const encrypted = this.encryptSnapshot(enrollmentId, payload);
+    if (Buffer.byteLength(encrypted) > MAX_ENCRYPTED_SNAPSHOT_BYTES) {
+      throw new Error("The encrypted Agent access snapshot exceeds its storage limit");
+    }
+    const now = Math.floor(Date.now() / 1000);
+    this.database.prepare(`
+      INSERT INTO odoo_agent_access_snapshot (
+        enrollment_id, credential_fingerprint, schema_version, encrypted_snapshot, refreshed_at, updated_at
+      ) VALUES (?, ?, 1, ?, ?, ?)
+      ON CONFLICT(enrollment_id) DO UPDATE SET
+        credential_fingerprint = excluded.credential_fingerprint,
+        schema_version = excluded.schema_version,
+        encrypted_snapshot = excluded.encrypted_snapshot,
+        refreshed_at = excluded.refreshed_at,
+        updated_at = excluded.updated_at
+    `).run(
+      enrollmentId,
+      agentCredentialFingerprint(principal),
+      encrypted,
+      Math.floor(snapshot.refreshedAt / 1000),
+      now
+    );
+  }
+
+  remove(principal: OdooPrincipal): void {
+    if (!principal.enrollmentId) return;
+    this.database.prepare(
+      "DELETE FROM odoo_agent_access_snapshot WHERE enrollment_id = ?"
+    ).run(principal.enrollmentId);
   }
 
   revokeUser(userId: string): boolean {
@@ -283,6 +441,29 @@ export class CredentialVault {
       throw new Error("The stored Odoo credential has an unsupported encryption format");
     }
     const decipher = createDecipheriv("aes-256-gcm", this.key, Buffer.from(ivRaw, "base64url"));
+    decipher.setAuthTag(Buffer.from(tagRaw, "base64url"));
+    return Buffer.concat([
+      decipher.update(Buffer.from(ciphertextRaw, "base64url")),
+      decipher.final()
+    ]).toString("utf8");
+  }
+
+  private encryptSnapshot(enrollmentId: string, plaintext: string): string {
+    const iv = randomBytes(12);
+    const cipher = createCipheriv("aes-256-gcm", this.key, iv);
+    cipher.setAAD(Buffer.from(`${SNAPSHOT_AAD_PREFIX}${enrollmentId}`, "utf8"));
+    const ciphertext = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
+    const tag = cipher.getAuthTag();
+    return `v1.${iv.toString("base64url")}.${ciphertext.toString("base64url")}.${tag.toString("base64url")}`;
+  }
+
+  private decryptSnapshot(enrollmentId: string, value: string): string {
+    const [version, ivRaw, ciphertextRaw, tagRaw] = value.split(".");
+    if (version !== "v1" || !ivRaw || !ciphertextRaw || !tagRaw) {
+      throw new Error("The stored Agent access snapshot has an unsupported encryption format");
+    }
+    const decipher = createDecipheriv("aes-256-gcm", this.key, Buffer.from(ivRaw, "base64url"));
+    decipher.setAAD(Buffer.from(`${SNAPSHOT_AAD_PREFIX}${enrollmentId}`, "utf8"));
     decipher.setAuthTag(Buffer.from(tagRaw, "base64url"));
     return Buffer.concat([
       decipher.update(Buffer.from(ciphertextRaw, "base64url")),

@@ -26,6 +26,7 @@ export interface OdooPrincipal {
   database: string;
   apiKey: string;
   authMode: OdooAuthMode;
+  enrollmentId?: string;
 }
 
 export interface RequestContext {
@@ -84,6 +85,7 @@ export function principalFromAuthInfo(authInfo: AuthInfo | undefined): OdooPrinc
     internalOrigin: z.string().url(),
     database: z.string().min(1).max(128),
     apiKey: z.string().min(1).max(8192),
-    authMode: z.enum(["direct", "oauth", "stdio"])
+    authMode: z.enum(["direct", "oauth", "stdio"]),
+    enrollmentId: z.string().min(1).max(128).optional()
   }).strict().parse(value);
 }

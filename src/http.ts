@@ -5,7 +5,7 @@ import { createMcpHandler, type AuthInfo } from "@modelcontextprotocol/server";
 import type { NextFunction, Request, Response } from "express";
 import { createOAuthService } from "./auth/oauth.js";
 import { OdooError } from "./odoo/client.js";
-import { AgentAccessUnavailableError } from "./runtime/agent_access_cache.js";
+import { AgentAccessUnavailableError, AgentAccessWarmingError } from "./runtime/agent_access_cache.js";
 import {
   createRequestContext,
   principalFromAuthInfo,
@@ -55,8 +55,8 @@ export function createHttpApp(
   });
   const oauth = createOAuthService(config, services);
   app.locals.closeRuntime = async () => {
-    oauth?.close();
     await services.accessCache.close();
+    oauth?.close();
     await services.observability.close();
   };
   const mcpHandlers = new Map<ProfileName, ReturnType<typeof createMcpHandler>>();
@@ -158,6 +158,11 @@ export function createHttpApp(
         duration_ms: Date.now() - started,
         error_name: error instanceof Error ? error.name : "Error"
       }, services.observability);
+      if (error instanceof AgentAccessWarmingError) {
+        response.setHeader("Retry-After", String(error.retryAfterSeconds));
+        response.status(503).json({ error: "surface_warming", message: error.message });
+        return;
+      }
       response.status(401).json({
         error: error instanceof OdooError
           ? error.policyCode ?? "invalid_odoo_credentials"
