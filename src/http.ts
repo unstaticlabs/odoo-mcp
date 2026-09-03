@@ -15,6 +15,7 @@ import {
 import { loadRuntimeConfig, resolveDirectConnection, type RuntimeConfig } from "./runtime/config.js";
 import { emitEvent } from "./runtime/logging.js";
 import { traceContextFromHttp } from "./runtime/observability.js";
+import { OAUTH_VAULT_SCHEMA_VERSION, SERVER_VERSION } from "./version.js";
 import {
   createHttpServerFactory,
   createRuntimeServices,
@@ -190,10 +191,15 @@ export function createHttpApp(
     }
     const ready = budget.tools <= 21 && budget.schemaTokens <= 15_000 && oauthStatus !== "error";
     response.json({
+      schema: "usl-odoo-mcp-readiness/v1",
       status: ready ? "ready" : "not_ready",
+      server_version: SERVER_VERSION,
       targets: config.targets.length,
       default_profile: budget,
-      oauth: oauthStatus,
+      oauth: {
+        status: oauthStatus,
+        schema_version: OAUTH_VAULT_SCHEMA_VERSION
+      },
       analytics: services.observability.status
     });
   });

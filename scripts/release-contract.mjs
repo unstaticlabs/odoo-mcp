@@ -18,6 +18,11 @@ export function loadCompatibility(root = process.cwd()) {
   if (value.schema !== "usl-odoo-mcp-compatibility/v2") fail("compatibility schema is invalid");
   const pkg = JSON.parse(readFileSync(resolve(root, "package.json"), "utf8"));
   if (value.server_version !== pkg.version) fail("server version differs from package.json");
+  const runtimeVersion = readFileSync(resolve(root, "src/version.ts"), "utf8");
+  const oauthSchema = runtimeVersion.match(/OAUTH_VAULT_SCHEMA_VERSION\s*=\s*(\d+)/);
+  if (!oauthSchema || Number(oauthSchema[1]) !== value.oauth_vault?.schema_version) {
+    fail("runtime OAuth-vault schema differs from compatibility contract");
+  }
   for (const key of ["supported_odoo_series", "required_modules", "required_public_methods", "required_actions"]) {
     if (!sortedUnique(value[key])) fail(`${key} must be sorted and unique`);
   }

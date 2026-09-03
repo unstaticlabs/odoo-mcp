@@ -129,6 +129,11 @@ describe("VPS HTTP MCP transport", () => {
     await expect(fetch(`${origin}/healthz`).then((response) => response.json())).resolves.toEqual({ status: "ok" });
     const readiness = await fetch(`${origin}/readyz`).then((response) => response.json()) as Record<string, unknown>;
     expect(readiness.status).toBe("ready");
+    expect(readiness).toMatchObject({
+      schema: "usl-odoo-mcp-readiness/v1",
+      server_version: "1.0.0",
+      oauth: { status: "disabled", schema_version: 1 }
+    });
 
     const transport = new StreamableHTTPClientTransport(new URL(`${origin}/mcp`), {
       requestInit: { headers: credentialHeaders }
