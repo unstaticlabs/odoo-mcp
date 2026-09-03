@@ -23,13 +23,47 @@ const testAgentIdentity = {
 };
 
 export function requestContext(accessMode: "read_only" | "read_write" | "mixed" = "read_write"): RequestContext {
+  const writeAccess = accessMode !== "read_only";
+  const expenseBatchMethods = accessMode === "read_only"
+    ? new Set(["get_review_summary"])
+    : new Set(["get_review_summary", "apply_context", "action_submit", "action_approve", "action_post"]);
+  const modelAccess = new Map([
+    "account.account",
+    "account.move",
+    "account.move.line",
+    "account.tax",
+    "hr.expense",
+    "ir.attachment",
+    "mail.activity",
+    "mail.message",
+    "project.project",
+    "project.task",
+    "rebuild.account.management.summary.line",
+    "rebuild.account.overview",
+    "rebuild.account.tax.report.line",
+    "res.partner",
+    "stock.picking",
+    "usl.b2c.order",
+    "usl.document",
+    "usl.expense.batch"
+  ].map((model) => [model, {
+    read: true,
+    create: writeAccess,
+    write: writeAccess,
+    unlink: writeAccess
+  }] as const));
   const identity = {
     ...testAgentIdentity,
     agent: { ...testAgentIdentity.agent, access_mode: accessMode },
-    effective_applications: testAgentIdentity.effective_applications.map((application) => ({
-      ...application,
-      access: accessMode
-    }))
+    effective_applications: accessMode === "mixed"
+      ? [
+          { id: 10, name: "Accounting", access: "read_only" as const },
+          { id: 11, name: "Projects", access: "read_write" as const }
+        ]
+      : testAgentIdentity.effective_applications.map((application) => ({
+          ...application,
+          access: accessMode
+        }))
   };
   return {
     requestId: "request-test",
@@ -52,15 +86,22 @@ export function requestContext(accessMode: "read_only" | "read_write" | "mixed" 
         "mcp_create_download_grant",
         "mcp_revoke_download_grant"
       ])],
-      ["usl.expense.batch", new Set([
-        "get_review_summary",
-        "apply_context",
-        "action_submit",
-        "action_approve",
-        "action_post"
-      ])],
-      ["usl.home.service", new Set(["get_ai_attention"])]
+      ["usl.expense.batch", expenseBatchMethods],
+      ["usl.home.service", new Set(["get_ai_attention"])],
+      ["mail.activity", new Set(["activity_schedule"])],
+      ["mail.thread", new Set(["action_archive", "message_post", "message_subscribe", "message_unsubscribe"])],
+      ["hr.expense", writeAccess
+        ? new Set([
+            "action_reset",
+            "action_submit",
+            "action_approve",
+            "action_submit_expenses",
+            "action_approve_expenses",
+            "action_post_entries"
+          ])
+        : new Set<string>()]
     ]),
+    availableModelAccess: modelAccess,
     enabledFeatures: new Set(["document_materialization"]),
     principal: {
       targetId: "test",
@@ -70,7 +111,6 @@ export function requestContext(accessMode: "read_only" | "read_write" | "mixed" 
       apiKey: "test-key",
       authMode: "direct"
     },
-    agentIdentity: identity,
-    validateAgentIdentity: async () => identity
+    agentIdentity: identity
   };
 }

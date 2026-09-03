@@ -36,6 +36,7 @@ async function main(): Promise<void> {
     throw new Error("Usage: npm run oauth:migrate or npm run oauth:backup -- /absolute/path/to/backup.sqlite");
   } finally {
     oauth.close();
+    await services.accessCache.close();
     await services.observability.close();
   }
 }

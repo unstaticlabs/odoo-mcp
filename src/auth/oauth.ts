@@ -12,7 +12,6 @@ import { createRequestContext, type ProfileName } from "../runtime/context.js";
 import { resolveDirectConnection, type RuntimeConfig } from "../runtime/config.js";
 import { emitEvent } from "../runtime/logging.js";
 import type { RuntimeServices } from "../runtime/server.js";
-import { loadAgentIdentity } from "../odoo/agent_identity.js";
 import { CredentialVault, type ValidatedEnrollment } from "./vault.js";
 
 // Node enables socket family autoselection (RFC 8305) by default since v20.
@@ -205,7 +204,10 @@ export function createOAuthService(config: RuntimeConfig, services: RuntimeServi
     }));
     if (!principal) throw new Error("Unable to resolve the Odoo connection");
     const context = createRequestContext("default", principal);
-    const identity = await loadAgentIdentity(services.client, context, request.signal);
+    context.eventObserver = services.observability;
+    context.analyticsPrincipalId = services.observability.principalId(principal);
+    const identity = (await services.accessCache.initialize(context, request.signal)).identity;
+    services.accessCache.touch(context);
     return {
       enrollmentId: vault.stableEnrollmentId(principal.targetId, principal.database, identity.user_id),
       targetId: principal.targetId,
@@ -379,11 +381,11 @@ button.addEventListener('click', async () => { button.disabled = true; const res
       try {
         const principal = vault.resolve(enrollmentId);
         const authInfo = bearerAuthInfo(claims, principal, request);
-        await loadAgentIdentity(
-          services.client,
-          createRequestContext(profile, principal, authInfo),
-          request.signal,
-        );
+        const context = createRequestContext(profile, principal, authInfo);
+        context.eventObserver = services.observability;
+        context.analyticsPrincipalId = services.observability.principalId(principal);
+        await services.accessCache.initialize(context, request.signal);
+        services.accessCache.touch(context);
         const requestId = typeof authInfo.extra?.requestId === "string" ? authInfo.extra.requestId : undefined;
         const correlationId = typeof authInfo.extra?.correlationId === "string" ? authInfo.extra.correlationId : undefined;
         emitEvent("auth.resolved", {

@@ -558,6 +558,18 @@ class PostHogObservability implements Observability {
       }
       const duration = safeNumber(dimensions.duration_ms);
       if (duration !== undefined) properties.usl_duration_ms = duration;
+    } else if (event === "agent.snapshot.refresh") {
+      eventName = "usl_agent_snapshot_refresh";
+      for (const name of ["reason", "status"]) {
+        const value = safeIdentifier(dimensions[name], 32);
+        if (value) properties[`usl_${name}`] = value;
+      }
+      for (const name of ["queue_delay_ms", "duration_ms", "snapshot_age_ms"]) {
+        const value = safeNumber(dimensions[name]);
+        if (value !== undefined) properties[`usl_${name}`] = value;
+      }
+      const visibilityChanged = safeBoolean(dimensions.visibility_changed);
+      if (visibilityChanged !== undefined) properties.usl_visibility_changed = visibilityChanged;
     }
     if (!eventName) return;
     try {

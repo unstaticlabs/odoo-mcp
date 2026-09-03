@@ -4,8 +4,8 @@ import { toNodeHandler } from "@modelcontextprotocol/node";
 import { createMcpHandler, type AuthInfo } from "@modelcontextprotocol/server";
 import type { NextFunction, Request, Response } from "express";
 import { createOAuthService } from "./auth/oauth.js";
-import { loadAgentIdentity } from "./odoo/agent_identity.js";
 import { OdooError } from "./odoo/client.js";
+import { AgentAccessUnavailableError } from "./runtime/agent_access_cache.js";
 import {
   createRequestContext,
   principalFromAuthInfo,
@@ -56,6 +56,7 @@ export function createHttpApp(
   const oauth = createOAuthService(config, services);
   app.locals.closeRuntime = async () => {
     oauth?.close();
+    await services.accessCache.close();
     await services.observability.close();
   };
   const mcpHandlers = new Map<ProfileName, ReturnType<typeof createMcpHandler>>();
@@ -136,10 +137,11 @@ export function createHttpApp(
       const requestId = crypto.randomUUID();
       const correlationId = correlationIdFromRequest(request);
       request.auth = directAuthInfo(principal, requestId, correlationId);
-      await loadAgentIdentity(
-        services.client,
-        createRequestContext("default", principal, request.auth),
-      );
+      const context = createRequestContext("default", principal, request.auth);
+      context.eventObserver = services.observability;
+      context.analyticsPrincipalId = services.observability.principalId(principal);
+      await services.accessCache.initialize(context);
+      services.accessCache.touch(context);
       emitEvent("auth.resolved", {
         request_id: requestId,
         correlation_id: correlationId,
@@ -159,6 +161,8 @@ export function createHttpApp(
       response.status(401).json({
         error: error instanceof OdooError
           ? error.policyCode ?? "invalid_odoo_credentials"
+          : error instanceof AgentAccessUnavailableError
+            ? error.policyCode ?? "agent_principal_required"
           : "agent_principal_required",
         message: error instanceof Error ? error.message : "Invalid Odoo connection"
       });

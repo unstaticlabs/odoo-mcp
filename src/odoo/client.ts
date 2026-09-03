@@ -6,6 +6,7 @@ import { Semaphore } from "../runtime/semaphore.js";
 import { assertBoundedJson, ModelNameSchema, MethodNameSchema } from "./schemas.js";
 
 export type OdooCallKind = "read" | "mutation";
+export type OdooRequestPriority = "foreground" | "background";
 export type MutationOutcome = "not_applied" | "unknown";
 export type MutationStage = "request_rejected" | "completion_ambiguous" | "response_processing";
 
@@ -69,6 +70,8 @@ interface SharedCallOptions {
   signal?: AbortSignal;
   timeoutMs?: number;
   responseBytes?: number;
+  priority?: OdooRequestPriority;
+  maxAttempts?: 1 | 2 | 3;
 }
 
 interface ReadCallOptions extends SharedCallOptions {
@@ -91,6 +94,20 @@ interface ApiDocumentCacheEntry {
 export interface OdooSurface {
   modules: ReadonlySet<string>;
   publicMethods: ReadonlyMap<string, ReadonlySet<string>>;
+  modelAccess: ReadonlyMap<string, OdooModelAccess>;
+}
+
+export interface OdooModelAccess {
+  read: boolean;
+  create: boolean;
+  write: boolean;
+  unlink: boolean;
+}
+
+export interface ApiDocumentOptions {
+  forceRevalidate?: boolean;
+  priority?: OdooRequestPriority;
+  timeoutMs?: number;
 }
 
 const RETRYABLE_STATUS = new Set([429, 502, 503, 504]);
@@ -328,6 +345,7 @@ function delay(milliseconds: number, signal?: AbortSignal): Promise<void> {
 
 export class OdooClient {
   private readonly semaphores = new Map<string, Semaphore>();
+  private readonly backgroundSemaphores = new Map<string, Semaphore>();
   private readonly apiDocumentCache = new Map<string, ApiDocumentCacheEntry>();
 
   constructor(
@@ -343,6 +361,27 @@ export class OdooClient {
       this.semaphores.set(targetId, semaphore);
     }
     return semaphore;
+  }
+
+  private backgroundSemaphore(targetId: string): Semaphore {
+    let semaphore = this.backgroundSemaphores.get(targetId);
+    if (!semaphore) {
+      semaphore = new Semaphore(1);
+      this.backgroundSemaphores.set(targetId, semaphore);
+    }
+    return semaphore;
+  }
+
+  private async runForTarget<T>(
+    context: RequestContext,
+    priority: OdooRequestPriority,
+    operation: () => Promise<T>,
+    signal?: AbortSignal
+  ): Promise<T> {
+    const run = () => this.semaphore(context.principal.targetId).run(operation, signal, priority);
+    return priority === "background"
+      ? await this.backgroundSemaphore(context.principal.targetId).run(run, signal, "background")
+      : await run();
   }
 
   async call<T>(
@@ -371,12 +410,12 @@ export class OdooClient {
     assertBoundedJson(kwargs);
     const mutationOptions = options.kind === "mutation" ? options : undefined;
     const kind = mutationOptions ? "mutation" : "read";
-    const maximumAttempts = kind === "read" ? 3 : 1;
+    const maximumAttempts = kind === "read" ? options.maxAttempts ?? 3 : 1;
     const responseBytes = options.responseBytes ?? this.defaultResponseBytes;
     const body = JSON.stringify(kwargs);
     const traceHeaders = injectTraceHeaders(context.trace?.context);
 
-    return await this.semaphore(context.principal.targetId).run(async () => {
+    return await this.runForTarget(context, options.priority ?? "foreground", async () => {
       for (let attempt = 1; attempt <= maximumAttempts; attempt++) {
         const started = Date.now();
         emitEvent("odoo.call.started", {
@@ -577,14 +616,19 @@ export class OdooClient {
     }, options.signal);
   }
 
-  async fetchApiDocument<T>(context: RequestContext, model?: string, signal?: AbortSignal): Promise<T> {
+  async fetchApiDocument<T>(
+    context: RequestContext,
+    model?: string,
+    signal?: AbortSignal,
+    options: ApiDocumentOptions = {}
+  ): Promise<T> {
     const path = model ? `/doc-bearer/${encodeURIComponent(ModelNameSchema.parse(model))}.json` : "/doc-bearer/index.json";
     const identity = createHash("sha256")
       .update(`${context.principal.targetId}\0${context.principal.database}\0${context.principal.apiKey}`)
       .digest("base64url");
     const cacheKey = `${identity}:${path}`;
     const cached = this.apiDocumentCache.get(cacheKey);
-    if (cached && cached.expiresAt > Date.now()) {
+    if (!options.forceRevalidate && cached && cached.expiresAt > Date.now()) {
       this.apiDocumentCache.delete(cacheKey);
       this.apiDocumentCache.set(cacheKey, cached);
       return cached.value as T;
@@ -597,11 +641,18 @@ export class OdooClient {
       ...injectTraceHeaders(context.trace?.context)
     };
     if (cached?.etag) headers["If-None-Match"] = cached.etag;
-    const response = await this.fetcher(`${context.principal.internalOrigin}${path}`, {
-      headers,
-      redirect: "manual",
-      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(8_000)]) : AbortSignal.timeout(8_000)
-    });
+    const response = await this.runForTarget(
+      context,
+      options.priority ?? "foreground",
+      async () => await this.fetcher(`${context.principal.internalOrigin}${path}`, {
+        headers,
+        redirect: "manual",
+        signal: signal
+          ? AbortSignal.any([signal, AbortSignal.timeout(options.timeoutMs ?? 30_000)])
+          : AbortSignal.timeout(options.timeoutMs ?? 30_000)
+      }),
+      signal
+    );
     if (response.status === 304 && cached) {
       cached.expiresAt = Date.now() + API_DOCUMENT_CACHE_TTL_MS;
       this.apiDocumentCache.delete(cacheKey);
@@ -637,26 +688,50 @@ export class OdooClient {
     return value;
   }
 
-  async discoverSurface(context: RequestContext, signal?: AbortSignal): Promise<OdooSurface | null> {
+  async discoverSurface(
+    context: RequestContext,
+    signal?: AbortSignal,
+    options: ApiDocumentOptions = {}
+  ): Promise<OdooSurface | null> {
     try {
-      const document = await this.fetchApiDocument<{ modules?: unknown; models?: unknown }>(context, undefined, signal);
+      const document = await this.fetchApiDocument<{ modules?: unknown; models?: unknown }>(
+        context,
+        undefined,
+        signal,
+        options
+      );
       const modules = new Set(
         Array.isArray(document.modules)
           ? document.modules.filter((item): item is string => typeof item === "string")
           : []
       );
       const publicMethods = new Map<string, ReadonlySet<string>>();
+      const modelAccess = new Map<string, OdooModelAccess>();
       if (Array.isArray(document.models)) {
         for (const item of document.models) {
           if (!item || typeof item !== "object" || Array.isArray(item)) continue;
           const candidate = item as Record<string, unknown>;
-          if (typeof candidate.model !== "string" || !Array.isArray(candidate.methods)) continue;
-          publicMethods.set(candidate.model, new Set(
-            candidate.methods.filter((method): method is string => typeof method === "string")
-          ));
+          if (typeof candidate.model !== "string") continue;
+          if (Array.isArray(candidate.methods)) {
+            publicMethods.set(candidate.model, new Set(
+              candidate.methods.filter((method): method is string => typeof method === "string")
+            ));
+          }
+          const access = candidate.access;
+          if (access && typeof access === "object" && !Array.isArray(access)) {
+            const values = access as Record<string, unknown>;
+            if (["read", "create", "write", "unlink"].every((operation) => typeof values[operation] === "boolean")) {
+              modelAccess.set(candidate.model, {
+                read: values.read as boolean,
+                create: values.create as boolean,
+                write: values.write as boolean,
+                unlink: values.unlink as boolean
+              });
+            }
+          }
         }
       }
-      return { modules, publicMethods };
+      return { modules, publicMethods, modelAccess };
     } catch {
       return null;
     }

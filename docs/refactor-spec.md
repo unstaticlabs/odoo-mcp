@@ -47,6 +47,7 @@ External requirements and implications:
 ```text
 HTTP or stdio
   -> request identity and visibility profile
+  -> cached Agent identity and Odoo access snapshot
   -> canonical capability registry
   -> application service
   -> Odoo adapter
@@ -59,11 +60,11 @@ Direct clients submit `X-Odoo-Url`, `X-Odoo-Database`, and `X-Odoo-Api-Key`. `Au
 
 Hosted clients enroll a governed Odoo Agent through Better Auth. The human authorizes the connector, while the Agent remains the execution identity. The Agent key is AES-GCM encrypted in a mounted SQLite credential vault. Access tokens last one hour; rotating refresh tokens last 180 days with a one-year grant ceiling. Cloudflare grants are not migrated.
 
-Visibility and authorization remain independent. Profiles optimize context and tool selection. Before every capability, the MCP revalidates `usl.agent.current_identity`. Odoo authentication, the owner/delegation intersection, ACLs, record rules, field access, company context, public method publication, validation, and irreversible-action policy decide actual authority.
+Visibility and authorization remain independent. Profiles optimize context and tool selection. The first use of a credential loads a bounded, process-local snapshot from `usl.agent.current_identity` and authenticated API documentation; warm requests consume it without a preflight. Odoo authentication, the owner/delegation intersection, ACLs, record rules, field access, company context, public method publication, validation, and irreversible-action policy remain the live authority on every business call.
 
 ## Capability registry and profiles
 
-Each capability declares a stable identifier, snake_case tool name, layer, multiple toolsets, profiles, effect classification, MCP annotations, strict input/output schemas, required modules, required public methods, required runtime features, availability predicate, retrieval keywords, sort key, and schema-token estimate. Per-identity `/doc-bearer` discovery controls whether backend-dependent tools are visible; an explicit runtime feature flag additionally gates staged integrations. The registry validates uniqueness, naming, metadata, deterministic ordering, profile budgets, and effect/annotation consistency.
+Each capability declares a stable identifier, snake_case tool name, layer, multiple toolsets, profiles, effect classification, MCP annotations, strict input/output schemas, required modules, required fixed or any-model operations, required fixed or any-model public methods, required runtime features, availability predicate, retrieval keywords, sort key, and schema-token estimate. Per-identity `/doc-bearer` discovery controls whether backend-dependent tools are visible; an explicit runtime feature flag additionally gates staged integrations. Missing positive proof hides those capabilities while preserving generic read and discovery. The registry validates uniqueness, naming, metadata, deterministic ordering, profile budgets, and effect/annotation consistency.
 
 Profiles are views over the same registry:
 
@@ -121,7 +122,9 @@ Initial additions grounded in current Distribution services are partner, activit
 
 ## Odoo adapter, transactions, and performance
 
-The Odoo adapter owns target mapping, bearer headers, redirect refusal, request/response limits, error translation, retries, cancellation, ETag-aware API-document caching, and a configurable per-target semaphore. The default concurrency is eight calls per Odoo target.
+The Odoo adapter owns target mapping, bearer headers, redirect refusal, request/response limits, error translation, retries, cancellation, conditional ETag-aware API-document requests, and a configurable per-target semaphore. The default concurrency is eight calls per Odoo target. Foreground waiters take priority; background access refreshes use one slot per target, one attempt, and a short timeout.
+
+Runtime services own a memory-only, 50-entry LRU Agent access cache keyed by a SHA-256 fingerprint of target, database, and credential. It coalesces cold loads and refreshes, never exposes the raw key, and stores failures only as unavailable status. Active snapshots refresh out of band on a jittered exponential schedule from one minute to a one-day cap. Access denials request one cooldown-protected refresh and never replay the failed operation. Revoked, expired, suspended, or otherwise invalid identities become immediately unavailable from cache; scheduled refreshes permit recovery after reactivation. Shutdown cancels timers and in-flight refreshes.
 
 Read calls may retry 429, 502, 503, 504, timeouts, and transient network failures up to three attempts while honoring `Retry-After`. Mutations and generic method calls receive one attempt. A complete success response means succeeded; a structured Odoo rejection means not applied; loss of the response after Odoo may have committed means unknown.
 

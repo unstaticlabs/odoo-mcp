@@ -11,6 +11,7 @@ import { createCapabilityRegistry } from "../../src/capabilities/index.js";
 import { OdooClient } from "../../src/odoo/client.js";
 import { loadRuntimeConfig } from "../../src/runtime/config.js";
 import { createObservability } from "../../src/runtime/observability.js";
+import { AgentAccessSnapshotCache } from "../../src/runtime/agent_access_cache.js";
 
 const closeCallbacks: Array<() => Promise<void>> = [];
 
@@ -51,11 +52,17 @@ const agentIdentity = {
   effective_group_ids: [1, 10]
 };
 
-function testServices(config: ReturnType<typeof configuration>, identity: unknown = agentIdentity) {
+function testServices(
+  config: ReturnType<typeof configuration>,
+  identity: unknown = agentIdentity,
+  calls?: string[]
+) {
   const fetcher: typeof fetch = async (input) => {
     const url = String(input);
+    calls?.push(url);
     if (url.includes("/json/2/usl.agent/current_identity")) return Response.json(identity);
     if (url.endsWith("/doc-bearer/index.json")) return Response.json({ modules: [] });
+    if (url.endsWith("/json/2/res.partner/search_read")) return Response.json([]);
     return Response.json({ message: "unexpected test request" }, { status: 404 });
   };
   const client = new OdooClient(8, 1024 * 1024, fetcher);
@@ -63,12 +70,17 @@ function testServices(config: ReturnType<typeof configuration>, identity: unknow
     client,
     registry: createCapabilityRegistry(client),
     enabledFeatures: new Set(config.documentMaterializationEnabled ? ["document_materialization"] : []),
-    observability: createObservability(config.analytics)
+    observability: createObservability(config.analytics),
+    accessCache: new AgentAccessSnapshotCache(client)
   };
 }
 
-async function listeningServer(config = configuration(), identity: unknown = agentIdentity) {
-  const app = createHttpApp(config, testServices(config, identity));
+async function listeningServer(
+  config = configuration(),
+  identity: unknown = agentIdentity,
+  calls?: string[]
+) {
+  const app = createHttpApp(config, testServices(config, identity, calls));
   const server = app.listen(0, "127.0.0.1");
   await once(server, "listening");
   const address = server.address() as AddressInfo;
@@ -103,6 +115,28 @@ describe("VPS HTTP MCP transport", () => {
     const tools = await client.listTools();
     expect(tools.tools.map((tool) => tool.name)).toContain("odoo_search_records");
     expect(tools.tools.map((tool) => tool.name)).not.toContain("odoo_call_method");
+  });
+
+  it("performs setup once while warm list and tool requests add only the business call", async () => {
+    const calls: string[] = [];
+    const origin = await listeningServer(configuration(), agentIdentity, calls);
+    const transport = new StreamableHTTPClientTransport(new URL(`${origin}/mcp`), {
+      requestInit: { headers: credentialHeaders }
+    });
+    const client = new Client({ name: "http-request-count-test", version: "1.0.0" });
+    await client.connect(transport);
+    closeCallbacks.push(async () => client.close());
+    expect(calls.filter((url) => url.includes("/current_identity"))).toHaveLength(1);
+    expect(calls.filter((url) => url.endsWith("/doc-bearer/index.json"))).toHaveLength(1);
+
+    await client.listTools();
+    await client.callTool({
+      name: "odoo_search_records",
+      arguments: { model: "res.partner", domain: [], fields: ["name"], context: {} }
+    });
+    expect(calls.filter((url) => url.includes("/current_identity"))).toHaveLength(1);
+    expect(calls.filter((url) => url.endsWith("/doc-bearer/index.json"))).toHaveLength(1);
+    expect(calls.filter((url) => url.endsWith("/json/2/res.partner/search_read"))).toHaveLength(1);
   });
 
   it("serves the enrollment page with a CSP that permits its own submit fetch", async () => {

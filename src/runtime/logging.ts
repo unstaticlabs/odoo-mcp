@@ -3,6 +3,7 @@ export type EventName =
   | "auth.resolved"
   | "auth.enrollment.completed"
   | "auth.enrollment.revoked"
+  | "agent.snapshot.refresh"
   | "mcp.request.started"
   | "mcp.request.completed"
   | "mcp.tools.listed"

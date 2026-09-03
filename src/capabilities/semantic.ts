@@ -155,6 +155,7 @@ export function registerSemanticCapabilities(registry: CapabilityRegistry, clien
     annotations: readAnnotations,
     keywords: ["partner", "contact", "company", "customer", "vendor", "activities"],
     requiredModules: ["contacts", "mail"],
+    requiredModelAccess: [{ model: "res.partner", operation: "read" }],
     defaultVisible: true,
     alwaysLoad: false,
     sortOrder: 200,
@@ -217,6 +218,10 @@ export function registerSemanticCapabilities(registry: CapabilityRegistry, clien
     annotations: readAnnotations,
     keywords: ["todo", "follow-up", "deadline", "mail activity"],
     requiredModules: ["mail"],
+    requiredModelAccess: [
+      { model: "mail.activity", operation: "read" },
+      { model: "mail.message", operation: "read" }
+    ],
     defaultVisible: true,
     alwaysLoad: false,
     sortOrder: 210,
@@ -246,6 +251,11 @@ export function registerSemanticCapabilities(registry: CapabilityRegistry, clien
     annotations: readAnnotations,
     keywords: ["task", "project", "chatter", "activity", "documents", "context"],
     requiredModules: ["project", "mail"],
+    requiredModelAccess: [
+      { model: "project.task", operation: "read" },
+      { model: "mail.activity", operation: "read" },
+      { model: "mail.message", operation: "read" }
+    ],
     defaultVisible: true,
     alwaysLoad: false,
     sortOrder: 220,
@@ -292,6 +302,12 @@ export function registerSemanticCapabilities(registry: CapabilityRegistry, clien
     annotations: readAnnotations,
     keywords: ["invoice", "vendor bill", "account move", "payment state", "lines", "documents"],
     requiredModules: ["account", "mail"],
+    requiredModelAccess: [
+      { model: "account.move", operation: "read" },
+      { model: "account.move.line", operation: "read" },
+      { model: "mail.activity", operation: "read" },
+      { model: "mail.message", operation: "read" }
+    ],
     defaultVisible: true,
     alwaysLoad: false,
     sortOrder: 230,
@@ -346,7 +362,6 @@ export function registerSemanticCapabilities(registry: CapabilityRegistry, clien
     toolsets: ["expenses", "accounting"],
     profiles: ["accounting"],
     effect: "read",
-    agentReadonly: false,
     annotations: readAnnotations,
     keywords: ["expense batch", "review", "receipts", "exceptions", "analytics", "accounting"],
     requiredModules: ["usl_expense_batch"],
@@ -405,6 +420,14 @@ export function registerSemanticCapabilities(registry: CapabilityRegistry, clien
     annotations: readAnnotations,
     keywords: ["B2C", "order", "payment", "refund", "fulfilment", "accounting", "evidence"],
     requiredModules: ["usl_b2c"],
+    requiredModelAccess: [
+      { model: "b2c.order", operation: "read" },
+      { model: "b2c.order.line", operation: "read" },
+      { model: "b2c.payment.event", operation: "read" },
+      { model: "b2c.fulfilment.event", operation: "read" },
+      { model: "b2c.accounting.link", operation: "read" },
+      { model: "b2c.order.source", operation: "read" }
+    ],
     defaultVisible: false,
     alwaysLoad: false,
     sortOrder: 260,

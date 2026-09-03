@@ -30,4 +30,17 @@ describe("target semaphore", () => {
     await first;
     await expect(semaphore.run(async () => "ok")).resolves.toBe("ok");
   });
+
+  it("always dequeues foreground work before queued background refreshes", async () => {
+    const semaphore = new Semaphore(1);
+    const order: string[] = [];
+    let release!: () => void;
+    const active = semaphore.run(() => new Promise<void>((resolve) => { release = resolve; }));
+    await Promise.resolve();
+    const background = semaphore.run(async () => { order.push("background"); }, undefined, "background");
+    const foreground = semaphore.run(async () => { order.push("foreground"); });
+    release();
+    await Promise.all([active, background, foreground]);
+    expect(order).toEqual(["foreground", "background"]);
+  });
 });
