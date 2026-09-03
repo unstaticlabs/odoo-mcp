@@ -1,5 +1,12 @@
 # VPS deployment and rollback
 
+Every `main` build publishes an immutable, attested
+`usl-odoo-mcp-oci-release/v2` artifact. It binds the image to the supported
+Odoo series, required modules/actions, qualification evidence, and OAuth-vault
+migration. GitOps may replace MCP independently only after this contract passes
+against staging. MCP-only promotion backs up and migrates the OAuth vault; it
+never restarts Odoo, PostgreSQL, Paperless, or Sign.
+
 The production shape is one non-root Node 26 container on the same private network as the USL Odoo Distribution. The reverse proxy terminates TLS and forwards only the MCP public origin to port 3000. Odoo traffic uses the configured private origin.
 
 ## Build and configure

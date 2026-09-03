@@ -15,6 +15,7 @@
     "oauth:backup": "node dist/auth/cli.js backup",
     "eval:validate": "npm run build && node dist/evals/cli.js validate",
     "eval:surfaces": "npm run build && node dist/evals/cli.js surfaces",
+    "check:release-contract": "node scripts/release-contract.mjs --check",
     "typecheck": "tsc --noEmit",
     "test": "vitest run test/vps test/evals",
     "test:integration": "vitest run test/integration",

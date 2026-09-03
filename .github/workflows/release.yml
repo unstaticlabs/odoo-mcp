@@ -14,7 +14,6 @@ concurrency:
 
 env:
   IMAGE: ghcr.io/unstaticlabs/odoo-mcp
-  IMAGE_TAG: sha-${{ github.sha }}
 
 jobs:
   publish:
@@ -48,6 +47,14 @@ jobs:
           npm run build
           node dist/evals/cli.js validate
 
+      - name: Resolve immutable component inputs
+        id: inputs
+        run: |
+          digest="$(git ls-files Dockerfile package.json package-lock.json src release scripts | sort | xargs sha256sum | sha256sum | cut -d' ' -f1)"
+          printf '%s\n' "$digest" | grep -Eq '^[0-9a-f]{64}$'
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "tag=content-$digest" >> "$GITHUB_OUTPUT"
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
 
@@ -58,16 +65,39 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Reuse an identical published image
+        id: existing
+        env:
+          TAG: ${{ steps.inputs.outputs.tag }}
+        run: |
+          set +e
+          inspection="$(docker buildx imagetools inspect "$IMAGE:$TAG" 2>&1)"
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          elif printf '%s' "$inspection" | grep -Eqi 'manifest unknown|name unknown|not found|404'; then
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          else
+            printf 'Cannot inspect %s:%s:\n%s\n' "$IMAGE" "$TAG" "$inspection" >&2
+            exit "$status"
+          fi
+
+      - name: Install ORAS
+        uses: oras-project/setup-oras@22ce207df3b08e061f537244349aac6ae1d214f6 # v1.2.4
+
       - name: Build and push once
         id: build
+        if: steps.existing.outputs.exists != 'true'
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
           context: .
           push: true
-          tags: ${{ env.IMAGE }}:${{ env.IMAGE_TAG }}
+          tags: ${{ env.IMAGE }}:${{ steps.inputs.outputs.tag }}
           labels: |
             org.opencontainers.image.source=https://github.com/unstaticlabs/odoo-mcp.git
             org.opencontainers.image.revision=${{ github.sha }}
+            com.unstaticlabs.component.input-sha256=${{ steps.inputs.outputs.digest }}
           provenance: mode=max
           sbom: true
           cache-from: type=gha,scope=odoo-mcp
@@ -77,54 +107,62 @@ jobs:
         id: release
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
+          TAG: ${{ steps.inputs.outputs.tag }}
         run: |
-          if ! printf '%s\n' "$DIGEST" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
+          digest="$DIGEST"
+          if [ -z "$digest" ]; then
+            digest="sha256:$(docker buildx imagetools inspect --raw "$IMAGE:$TAG" | sha256sum | cut -d' ' -f1)"
+          fi
+          if ! printf '%s\n' "$digest" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
             echo "Build produced no valid sha256 digest" >&2
             exit 1
           fi
-          reference="$IMAGE@$DIGEST"
+          reference="$IMAGE@$digest"
           docker pull "$reference"
-          test "$(docker image inspect "$reference" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$GITHUB_SHA"
           test "$(docker image inspect "$reference" --format '{{index .Config.Labels "org.opencontainers.image.source"}}')" = "https://github.com/unstaticlabs/odoo-mcp.git"
+          test "$(docker image inspect "$reference" --format '{{index .Config.Labels "com.unstaticlabs.component.input-sha256"}}')" = '${{ steps.inputs.outputs.digest }}'
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
           echo "digest_reference=$reference" >> "$GITHUB_OUTPUT"
 
       - name: Generate build provenance
+        if: steps.existing.outputs.exists != 'true'
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-name: ${{ env.IMAGE }}
-          subject-digest: ${{ steps.build.outputs.digest }}
+          subject-digest: ${{ steps.release.outputs.digest }}
           push-to-registry: true
 
       - name: Write release metadata
         id: metadata
         env:
-          DIGEST: ${{ steps.build.outputs.digest }}
+          DIGEST: ${{ steps.release.outputs.digest }}
         run: |
           artifact_name="odoo-mcp-release-$GITHUB_SHA"
-          jq -n \
-            --arg commit "$GITHUB_SHA" \
-            --arg image "$IMAGE" \
-            --arg tag "$IMAGE_TAG" \
-            --arg digest "$DIGEST" \
-            '{
-              schema: "usl-odoo-mcp-oci-release/v1",
-              source: {
-                repository: "https://github.com/unstaticlabs/odoo-mcp.git",
-                commit: $commit
-              },
-              image: {
-                name: $image,
-                tag: $tag,
-                digest: $digest,
-                digest_reference: ($image + "@" + $digest)
-              },
-              attestations: {
-                oci_sbom: "generated",
-                buildkit_provenance: "generated",
-                github_provenance: "generated"
-              }
-            }' > odoo-mcp-release.json
+          evidence="$(git ls-files src test evals package.json package-lock.json release | xargs sha256sum | sha256sum | cut -d' ' -f1)"
+          node scripts/release-contract.mjs \
+            --commit "$GITHUB_SHA" \
+            --image "$IMAGE@$DIGEST" \
+            --evidence "$evidence" \
+            --output odoo-mcp-release.json
           echo "artifact_name=$artifact_name" >> "$GITHUB_OUTPUT"
+
+      - name: Publish MCP release as immutable OCI artifact
+        id: release_oci
+        run: |
+          reference="ghcr.io/unstaticlabs/usl-odoo-mcp-release:sha-$GITHUB_SHA"
+          oras push --artifact-type application/vnd.usl.odoo-mcp.release.v2+json \
+            "$reference" odoo-mcp-release.json:application/json
+          digest="$(oras resolve "$reference")"
+          printf '%s\n' "$digest" | grep -Eq '^sha256:[0-9a-f]{64}$'
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "reference=ghcr.io/unstaticlabs/usl-odoo-mcp-release@$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Attest MCP release artifact
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-name: ghcr.io/unstaticlabs/usl-odoo-mcp-release
+          subject-digest: ${{ steps.release_oci.outputs.digest }}
+          push-to-registry: true
 
       - name: Upload release metadata
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -133,3 +171,22 @@ jobs:
           path: odoo-mcp-release.json
           if-no-files-found: error
           retention-days: 90
+
+      - name: Trigger protected GitOps MCP ingestion
+        if: vars.USL_MCP_RELEASE_AUTOMATION_ENABLED == 'true'
+        env:
+          GITOPS_PIPELINE_TRIGGER_URL: ${{ secrets.GITOPS_PIPELINE_TRIGGER_URL }}
+          GITOPS_PIPELINE_TRIGGER_TOKEN: ${{ secrets.GITOPS_PIPELINE_TRIGGER_TOKEN }}
+          MCP_RELEASE_MANIFEST: ${{ steps.release_oci.outputs.reference }}
+        run: |
+          test -n "$GITOPS_PIPELINE_TRIGGER_URL"
+          test -n "$GITOPS_PIPELINE_TRIGGER_TOKEN"
+          curl --fail-with-body --silent --show-error --max-time 30 \
+            --request POST "$GITOPS_PIPELINE_TRIGGER_URL" \
+            --form "token=$GITOPS_PIPELINE_TRIGGER_TOKEN" \
+            --form "ref=main" \
+            --form "variables[USL_MCP_RELEASE_MANIFEST]=$MCP_RELEASE_MANIFEST" \
+            --form "variables[USL_SOURCE_REPOSITORY]=$GITHUB_REPOSITORY" \
+            --form "variables[USL_SOURCE_REF]=$GITHUB_REF" \
+            --form "variables[USL_SOURCE_COMMIT]=$GITHUB_SHA" \
+            --form "variables[USL_GITHUB_RUN_ID]=$GITHUB_RUN_ID"
