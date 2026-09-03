@@ -21,7 +21,11 @@ import {
 import { CredentialVault } from "../../src/auth/vault.js";
 import { createCapabilityRegistry } from "../../src/capabilities/index.js";
 import { OdooClient } from "../../src/odoo/client.js";
+import { AgentAccessSnapshotCache, type AgentAccessSnapshot } from "../../src/runtime/agent_access_cache.js";
 import { loadRuntimeConfig } from "../../src/runtime/config.js";
+import { createObservability } from "../../src/runtime/observability.js";
+import { createRuntimeServices } from "../../src/runtime/server.js";
+import { requestContext } from "./fixtures.js";
 
 const directories: string[] = [];
 
@@ -46,6 +50,24 @@ function oauthConfiguration(databasePath?: string) {
     BETTER_AUTH_SECRET: "a-development-secret-that-is-long-enough-for-tests",
     MCP_CREDENTIAL_ENCRYPTION_KEY: Buffer.alloc(32, 7).toString("base64")
   });
+}
+
+function accessSnapshot(refreshedAt = Date.now()): AgentAccessSnapshot {
+  return {
+    identity: requestContext().agentIdentity!,
+    refreshedAt,
+    surface: {
+      etag: '"access-v1"',
+      modules: new Set(["base", "hr_expense"]),
+      publicMethods: new Map([["hr.expense", new Set(["action_approve_expenses"])]]),
+      modelAccess: new Map([["hr.expense", {
+        read: true,
+        create: true,
+        write: true,
+        unlink: false
+      }]])
+    }
+  };
 }
 
 describe("OAuth credential vault", () => {
@@ -177,6 +199,72 @@ describe("OAuth credential vault", () => {
     expect(() => vault.resolve(enrollmentId)).toThrow("revoked");
     vault.close();
   });
+
+  it("encrypts, validates, and round-trips a complete Agent access snapshot", () => {
+    const config = oauthConfiguration();
+    const vault = new CredentialVault(config.oauth!, config);
+    const enrollmentId = vault.stableEnrollmentId("default", "usl", 9);
+    vault.upsert({
+      enrollmentId,
+      targetId: "default",
+      publicOrigin: "https://odoo.example",
+      database: "usl",
+      apiKey: "snapshot-secret",
+      odooUserId: 9,
+      displayName: "Snapshot Agent"
+    });
+    const principal = vault.resolve(enrollmentId);
+    const snapshot = accessSnapshot();
+    vault.save(principal, snapshot);
+
+    expect(vault.load(principal)).toEqual(snapshot);
+    const stored = vault.database.prepare(
+      "SELECT encrypted_snapshot FROM odoo_agent_access_snapshot WHERE enrollment_id = ?"
+    ).get(enrollmentId) as { encrypted_snapshot: string };
+    expect(stored.encrypted_snapshot).toMatch(/^v1\./);
+    expect(stored.encrypted_snapshot).not.toContain("hr_expense");
+    expect(stored.encrypted_snapshot).not.toContain("Test Agent");
+    vault.close();
+  });
+
+  it("deletes snapshots after credential rotation, corruption, and enrollment revocation", () => {
+    const config = oauthConfiguration();
+    const vault = new CredentialVault(config.oauth!, config);
+    const enrollmentId = vault.stableEnrollmentId("default", "usl", 10);
+    const enrollment = {
+      enrollmentId,
+      targetId: "default",
+      publicOrigin: "https://odoo.example",
+      database: "usl",
+      apiKey: "first-secret",
+      odooUserId: 10,
+      displayName: "Snapshot Agent"
+    };
+    vault.upsert(enrollment);
+    const firstPrincipal = vault.resolve(enrollmentId);
+    vault.save(firstPrincipal, accessSnapshot());
+
+    vault.upsert({ ...enrollment, apiKey: "rotated-secret" });
+    const rotatedPrincipal = vault.resolve(enrollmentId);
+    expect(vault.load(rotatedPrincipal)).toBeNull();
+    expect(vault.database.prepare(
+      "SELECT COUNT(*) AS count FROM odoo_agent_access_snapshot WHERE enrollment_id = ?"
+    ).get(enrollmentId)).toEqual({ count: 0 });
+
+    vault.save(rotatedPrincipal, accessSnapshot());
+    vault.database.prepare(
+      "UPDATE odoo_agent_access_snapshot SET encrypted_snapshot = ? WHERE enrollment_id = ?"
+    ).run("v1.corrupt.payload.tag", enrollmentId);
+    expect(vault.load(rotatedPrincipal)).toBeNull();
+
+    vault.save(rotatedPrincipal, accessSnapshot());
+    vault.attachUser(enrollmentId, "better-user-10");
+    expect(vault.revokeUser("better-user-10")).toBe(true);
+    expect(vault.database.prepare(
+      "SELECT COUNT(*) AS count FROM odoo_agent_access_snapshot WHERE enrollment_id = ?"
+    ).get(enrollmentId)).toEqual({ count: 0 });
+    vault.close();
+  });
 });
 
 describe("OAuth continuation", () => {
@@ -210,16 +298,49 @@ describe("OAuth enrollment credentials", () => {
     expect(headers.get("Cookie")).toBe("session=opaque");
     expect(headers.get("Content-Type")).toBe("application/json");
   });
+
+  it("returns retryable warming when a complete discovery surface cannot be loaded", async () => {
+    const config = oauthConfiguration();
+    const identity = requestContext().agentIdentity!;
+    const client = new OdooClient(8, 1024 * 1024, vi.fn<typeof fetch>(async (input) =>
+      String(input).includes("current_identity")
+        ? Response.json(identity)
+        : Response.json({ error: { message: "temporarily unavailable" } }, { status: 503 })
+    ));
+    const services = {
+      client,
+      registry: createCapabilityRegistry(client),
+      enabledFeatures: new Set<string>(),
+      observability: createObservability(config.analytics),
+      accessCache: new AgentAccessSnapshotCache(client, { refreshTimeoutMs: 30_000 })
+    };
+    const service = createOAuthService(config, services)!;
+    await service.ready;
+    const response = await service.enrollmentFetch(new Request("http://127.0.0.1:3000/oauth/enroll", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        odooUrl: "https://odoo.example",
+        database: "usl",
+        apiKey: "agent-key",
+        oauthQuery: "client_id=test"
+      })
+    }));
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get("Retry-After")).toBe("5");
+    expect(await response.json()).toMatchObject({ error: "surface_warming" });
+    await services.accessCache.close();
+    service.close();
+    await services.observability.close();
+  });
 });
 
 describe("Better Auth MCP provider", () => {
   it("migrates its SQLite schema and publishes authorization metadata", async () => {
     const config = oauthConfiguration();
-    const client = new OdooClient();
-    const service = createOAuthService(config, {
-      client,
-      registry: createCapabilityRegistry(client)
-    });
+    const services = createRuntimeServices(config);
+    const service = createOAuthService(config, services);
     expect(service).not.toBeNull();
     await service!.ready;
 
@@ -236,22 +357,23 @@ describe("Better Auth MCP provider", () => {
     );
     expect(resource.status).toBe(200);
     expect(await resource.json()).toMatchObject({ resource: "http://127.0.0.1:3000/mcp" });
+    await services.accessCache.close();
     service!.close();
+    await services.observability.close();
   });
 
   it("uses normalized continuation fields on the consent page", async () => {
     const config = oauthConfiguration();
-    const client = new OdooClient();
-    const service = createOAuthService(config, {
-      client,
-      registry: createCapabilityRegistry(client)
-    });
+    const services = createRuntimeServices(config);
+    const service = createOAuthService(config, services);
     await service!.ready;
     const response = await service!.consentFetch(new Request("http://127.0.0.1:3000/oauth/consent"));
     const body = await response.text();
     expect(body).toContain("data.url || data.redirect_uri || data.redirectUri");
     expect(body).toContain("new URL(candidate, location.origin)");
     expect(body).not.toContain("location.assign(data.redirect_uri)");
+    await services.accessCache.close();
     service!.close();
+    await services.observability.close();
   });
 });

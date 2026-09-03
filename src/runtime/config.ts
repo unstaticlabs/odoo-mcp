@@ -27,6 +27,8 @@ export interface RuntimeConfig {
   requestBytes: number;
   responseBytes: number;
   targetConcurrency: number;
+  accessSnapshotMaxStaleMs: number;
+  accessRefreshTimeoutMs: number;
   allowLocalHttpOdoo: boolean;
   documentMaterializationEnabled: boolean;
   oauth: OAuthRuntimeConfig | null;
@@ -244,6 +246,20 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runtime
     requestBytes: boundedInteger(env.MCP_MAX_REQUEST_BYTES, 1024 * 1024, 1024, 16 * 1024 * 1024, "MCP_MAX_REQUEST_BYTES"),
     responseBytes: boundedInteger(env.MCP_MAX_RESPONSE_BYTES, 1024 * 1024, 1024, 16 * 1024 * 1024, "MCP_MAX_RESPONSE_BYTES"),
     targetConcurrency: boundedInteger(env.MCP_TARGET_CONCURRENCY, 8, 1, 64, "MCP_TARGET_CONCURRENCY"),
+    accessSnapshotMaxStaleMs: boundedInteger(
+      env.MCP_ACCESS_SNAPSHOT_MAX_STALE_SECONDS,
+      24 * 60 * 60,
+      300,
+      7 * 24 * 60 * 60,
+      "MCP_ACCESS_SNAPSHOT_MAX_STALE_SECONDS"
+    ) * 1_000,
+    accessRefreshTimeoutMs: boundedInteger(
+      env.MCP_ACCESS_REFRESH_TIMEOUT_SECONDS,
+      120,
+      30,
+      300,
+      "MCP_ACCESS_REFRESH_TIMEOUT_SECONDS"
+    ) * 1_000,
     allowLocalHttpOdoo: allowLocalHttp,
     documentMaterializationEnabled: booleanEnv(env.MCP_DOCUMENT_MATERIALIZATION_ENABLED),
     analytics: parseAnalytics(env),

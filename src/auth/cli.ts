@@ -3,6 +3,7 @@ import { isAbsolute, resolve } from "node:path";
 import { createOAuthService } from "./oauth.js";
 import { loadRuntimeConfig } from "../runtime/config.js";
 import { createRuntimeServices } from "../runtime/server.js";
+import { createRequestContext } from "../runtime/context.js";
 
 async function main(): Promise<void> {
   const command = process.argv[2];
@@ -14,6 +15,32 @@ async function main(): Promise<void> {
     await oauth.ready;
     if (command === "migrate") {
       process.stdout.write("OAuth schema is current.\n");
+      return;
+    }
+    if (command === "prepare") {
+      const active = oauth.vault.activePrincipals();
+      let refreshed = 0;
+      let cached = 0;
+      let unavailable = active.unavailable;
+      for (const principal of active.principals) {
+        const context = createRequestContext("default", principal);
+        context.eventObserver = services.observability;
+        context.analyticsPrincipalId = services.observability.principalId(principal);
+        try {
+          const result = await services.accessCache.warm(context);
+          if (result.refreshed) refreshed += 1;
+          else cached += 1;
+        } catch {
+          try {
+            if (services.accessCache.get(principal).surface) cached += 1;
+            else unavailable += 1;
+          } catch {
+            unavailable += 1;
+          }
+        }
+      }
+      process.stdout.write(`OAuth schema is current; access snapshots: ${refreshed} refreshed, ${cached} cached, ${unavailable} unavailable.\n`);
+      if (unavailable > 0) process.exitCode = 1;
       return;
     }
     if (command === "backup") {
@@ -33,10 +60,10 @@ async function main(): Promise<void> {
       process.stdout.write(`OAuth vault backed up to ${destination}\n`);
       return;
     }
-    throw new Error("Usage: npm run oauth:migrate or npm run oauth:backup -- /absolute/path/to/backup.sqlite");
+    throw new Error("Usage: npm run oauth:migrate, node dist/auth/cli.js prepare, or npm run oauth:backup -- /absolute/path/to/backup.sqlite");
   } finally {
-    oauth.close();
     await services.accessCache.close();
+    oauth.close();
     await services.observability.close();
   }
 }

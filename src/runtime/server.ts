@@ -31,7 +31,10 @@ export function createRuntimeServices(config: RuntimeConfig): RuntimeServices {
     registry: createCapabilityRegistry(client),
     enabledFeatures,
     observability,
-    accessCache: new AgentAccessSnapshotCache(client)
+    accessCache: new AgentAccessSnapshotCache(client, {
+      maximumStaleMs: config.accessSnapshotMaxStaleMs,
+      refreshTimeoutMs: config.accessRefreshTimeoutMs
+    })
   };
 }
 

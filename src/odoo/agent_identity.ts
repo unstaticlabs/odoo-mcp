@@ -40,25 +40,32 @@ export const AgentIdentitySchema = z.object({
 
 export type AgentIdentity = z.infer<typeof AgentIdentitySchema>;
 
+export class AgentIdentityValidationError extends Error {
+  constructor() {
+    super("This Odoo key is not a governed Agent credential. Create an Agent in My Agents, then generate its API key.");
+    this.name = "AgentIdentityValidationError";
+  }
+}
+
 export async function loadAgentIdentity(
   client: OdooClient,
   context: RequestContext,
   signal?: AbortSignal,
-  options: { background?: boolean } = {}
+  options: { background?: boolean; timeoutMs?: number } = {}
 ): Promise<AgentIdentity> {
   const identity = await client.call<unknown>(context, "usl.agent", "current_identity", {}, {
     signal,
+    ...(options.timeoutMs ? { timeoutMs: options.timeoutMs } : {}),
+    ...(options.timeoutMs ? { maxAttempts: 1 as const } : {}),
     ...(options.background ? {
       priority: "background" as const,
       maxAttempts: 1 as const,
-      timeoutMs: 4_000
+      timeoutMs: options.timeoutMs ?? 4_000
     } : {})
   });
   const parsed = AgentIdentitySchema.safeParse(identity);
   if (!parsed.success) {
-    throw new Error(
-      "This Odoo key is not a governed Agent credential. Create an Agent in My Agents, then generate its API key."
-    );
+    throw new AgentIdentityValidationError();
   }
   return parsed.data;
 }

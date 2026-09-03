@@ -564,6 +564,10 @@ class PostHogObservability implements Observability {
         const value = safeIdentifier(dimensions[name], 32);
         if (value) properties[`usl_${name}`] = value;
       }
+      const cacheSource = safeIdentifier(dimensions.cache_source, 32);
+      if (cacheSource) properties.usl_cache_source = cacheSource;
+      const errorClass = safeIdentifier(dimensions.error_class, 64);
+      if (errorClass) properties.usl_error_class = errorClass;
       for (const name of ["queue_delay_ms", "duration_ms", "snapshot_age_ms"]) {
         const value = safeNumber(dimensions[name]);
         if (value !== undefined) properties[`usl_${name}`] = value;

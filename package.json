@@ -11,6 +11,7 @@
     "start": "node dist/http.js",
     "stdio": "node dist/stdio.js",
     "oauth:migrate": "node dist/auth/cli.js migrate",
+    "oauth:prepare": "node dist/auth/cli.js prepare",
     "oauth:backup": "node dist/auth/cli.js backup",
     "eval:validate": "npm run build && node dist/evals/cli.js validate",
     "eval:surfaces": "npm run build && node dist/evals/cli.js surfaces",

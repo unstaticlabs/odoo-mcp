@@ -95,6 +95,7 @@ export interface OdooSurface {
   modules: ReadonlySet<string>;
   publicMethods: ReadonlyMap<string, ReadonlySet<string>>;
   modelAccess: ReadonlyMap<string, OdooModelAccess>;
+  etag?: string;
 }
 
 export interface OdooModelAccess {
@@ -108,6 +109,11 @@ export interface ApiDocumentOptions {
   forceRevalidate?: boolean;
   priority?: OdooRequestPriority;
   timeoutMs?: number;
+  ifNoneMatch?: string;
+}
+
+export interface SurfaceDiscoveryOptions extends ApiDocumentOptions {
+  previous?: OdooSurface;
 }
 
 const RETRYABLE_STATUS = new Set([429, 502, 503, 504]);
@@ -633,14 +639,14 @@ export class OdooClient {
       this.apiDocumentCache.set(cacheKey, cached);
       return cached.value as T;
     }
-    if (cached) this.apiDocumentCache.delete(cacheKey);
     const headers: Record<string, string> = {
       Authorization: `Bearer ${context.principal.apiKey}`,
       "X-Odoo-Database": context.principal.database,
       Accept: "application/json",
       ...injectTraceHeaders(context.trace?.context)
     };
-    if (cached?.etag) headers["If-None-Match"] = cached.etag;
+    const conditionalEtag = cached?.etag ?? options.ifNoneMatch;
+    if (conditionalEtag) headers["If-None-Match"] = conditionalEtag;
     const response = await this.runForTarget(
       context,
       options.priority ?? "foreground",
@@ -658,6 +664,18 @@ export class OdooClient {
       this.apiDocumentCache.delete(cacheKey);
       this.apiDocumentCache.set(cacheKey, cached);
       return cached.value as T;
+    }
+    if (response.status === 304) {
+      throw new OdooError(
+        "Authenticated Odoo API documentation was not modified but no local document is available",
+        "odoo_server_error",
+        response.status,
+        "api_doc",
+        path,
+        false,
+        "not_applied",
+        conditionalEtag
+      );
     }
     if (!response.ok) {
       throw new OdooError(
@@ -694,46 +712,79 @@ export class OdooClient {
     options: ApiDocumentOptions = {}
   ): Promise<OdooSurface | null> {
     try {
+      return await this.discoverSurfaceStrict(context, signal, options);
+    } catch {
+      return null;
+    }
+  }
+
+  async discoverSurfaceStrict(
+    context: RequestContext,
+    signal?: AbortSignal,
+    options: SurfaceDiscoveryOptions = {}
+  ): Promise<OdooSurface> {
+    try {
       const document = await this.fetchApiDocument<{ modules?: unknown; models?: unknown }>(
         context,
         undefined,
         signal,
-        options
+        {
+          ...options,
+          ...(options.previous?.etag ? { ifNoneMatch: options.previous.etag } : {})
+        }
       );
-      const modules = new Set(
-        Array.isArray(document.modules)
-          ? document.modules.filter((item): item is string => typeof item === "string")
-          : []
-      );
+      if (!Array.isArray(document.modules)
+        || !document.modules.every((item) => typeof item === "string" && item.length > 0 && item.length <= 255)
+        || document.modules.length > 10_000
+        || !Array.isArray(document.models)
+        || document.models.length > 10_000) {
+        throw new Error("Authenticated Odoo API documentation is incomplete or invalid");
+      }
+      const modules = new Set(document.modules);
       const publicMethods = new Map<string, ReadonlySet<string>>();
       const modelAccess = new Map<string, OdooModelAccess>();
-      if (Array.isArray(document.models)) {
-        for (const item of document.models) {
-          if (!item || typeof item !== "object" || Array.isArray(item)) continue;
-          const candidate = item as Record<string, unknown>;
-          if (typeof candidate.model !== "string") continue;
-          if (Array.isArray(candidate.methods)) {
-            publicMethods.set(candidate.model, new Set(
-              candidate.methods.filter((method): method is string => typeof method === "string")
-            ));
-          }
-          const access = candidate.access;
-          if (access && typeof access === "object" && !Array.isArray(access)) {
-            const values = access as Record<string, unknown>;
-            if (["read", "create", "write", "unlink"].every((operation) => typeof values[operation] === "boolean")) {
-              modelAccess.set(candidate.model, {
-                read: values.read as boolean,
-                create: values.create as boolean,
-                write: values.write as boolean,
-                unlink: values.unlink as boolean
-              });
-            }
-          }
+      for (const item of document.models) {
+        if (!item || typeof item !== "object" || Array.isArray(item)) {
+          throw new Error("Authenticated Odoo API documentation contains an invalid model entry");
         }
+        const candidate = item as Record<string, unknown>;
+        const model = ModelNameSchema.parse(candidate.model);
+        if (!Array.isArray(candidate.methods)
+          || candidate.methods.length > 10_000
+          || !candidate.methods.every((method) => MethodNameSchema.safeParse(method).success)) {
+          throw new Error(`Authenticated Odoo API documentation contains invalid methods for ${model}`);
+        }
+        const access = candidate.access;
+        if (!access || typeof access !== "object" || Array.isArray(access)) {
+          throw new Error(`Authenticated Odoo API documentation lacks access metadata for ${model}`);
+        }
+        const values = access as Record<string, unknown>;
+        if (!["read", "create", "write", "unlink"].every((operation) => typeof values[operation] === "boolean")) {
+          throw new Error(`Authenticated Odoo API documentation contains invalid access metadata for ${model}`);
+        }
+        publicMethods.set(model, new Set(candidate.methods as string[]));
+        modelAccess.set(model, {
+          read: values.read as boolean,
+          create: values.create as boolean,
+          write: values.write as boolean,
+          unlink: values.unlink as boolean
+        });
       }
-      return { modules, publicMethods, modelAccess };
-    } catch {
-      return null;
+      const path = "/doc-bearer/index.json";
+      const identity = createHash("sha256")
+        .update(`${context.principal.targetId}\0${context.principal.database}\0${context.principal.apiKey}`)
+        .digest("base64url");
+      const etag = this.apiDocumentCache.get(`${identity}:${path}`)?.etag;
+      return { modules, publicMethods, modelAccess, ...(etag ? { etag } : {}) };
+    } catch (error) {
+      if (error instanceof OdooError
+        && error.httpStatus === 304
+        && options.previous
+        && options.previous.etag
+        && error.details === options.previous.etag) {
+        return options.previous;
+      }
+      throw error;
     }
   }
 

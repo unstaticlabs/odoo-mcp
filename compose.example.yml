@@ -9,6 +9,8 @@ services:
       MCP_ALLOWED_HOSTS: mcp.example.com
       MCP_ALLOWED_ORIGINS: mcp.example.com
       MCP_DOCUMENT_MATERIALIZATION_ENABLED: "false"
+      MCP_ACCESS_SNAPSHOT_MAX_STALE_SECONDS: "86400"
+      MCP_ACCESS_REFRESH_TIMEOUT_SECONDS: "120"
       ODOO_TARGETS_JSON: >-
         [{"id":"primary","publicOrigin":"https://odoo.example.com","internalOrigin":"http://odoo:8069","databases":["odoo"]}]
       MCP_OAUTH_ENABLED: "true"

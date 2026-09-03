@@ -66,6 +66,24 @@ describe("runtime target mapping", () => {
     }))).toThrow("must be supplied together");
   });
 
+  it("bounds persistent access snapshot freshness and refresh timeouts", () => {
+    const defaults = loadRuntimeConfig(environment());
+    expect(defaults.accessSnapshotMaxStaleMs).toBe(86_400_000);
+    expect(defaults.accessRefreshTimeoutMs).toBe(120_000);
+    const configured = loadRuntimeConfig(environment({
+      MCP_ACCESS_SNAPSHOT_MAX_STALE_SECONDS: "3600",
+      MCP_ACCESS_REFRESH_TIMEOUT_SECONDS: "60"
+    }));
+    expect(configured.accessSnapshotMaxStaleMs).toBe(3_600_000);
+    expect(configured.accessRefreshTimeoutMs).toBe(60_000);
+    expect(() => loadRuntimeConfig(environment({
+      MCP_ACCESS_SNAPSHOT_MAX_STALE_SECONDS: "299"
+    }))).toThrow("MCP_ACCESS_SNAPSHOT_MAX_STALE_SECONDS");
+    expect(() => loadRuntimeConfig(environment({
+      MCP_ACCESS_REFRESH_TIMEOUT_SECONDS: "301"
+    }))).toThrow("MCP_ACCESS_REFRESH_TIMEOUT_SECONDS");
+  });
+
   it("rejects targets that the operator did not configure", () => {
     const config = loadRuntimeConfig(environment());
     expect(() => resolveDirectConnection(config, new Headers({

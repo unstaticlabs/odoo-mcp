@@ -74,20 +74,20 @@ The credential-encryption value must decode to exactly 32 bytes. Enrollment:
 1. receives the configured Odoo URL/database/key tuple;
 2. validates the target mapping;
 3. calls `usl.agent.current_identity` and requires an active Agent credential;
-4. loads authenticated API documentation and seeds the process-local access snapshot;
+4. loads authenticated API documentation and persists the encrypted access snapshot;
 5. encrypts the API key with AES-256-GCM;
 6. stores the enrollment in the SQLite volume;
 7. continues the authorization-code/PKCE flow.
 
-Direct HTTP performs the same two-request setup only on a credential's first use in the process. OAuth repeats it once on the first request after a process restart, and stdio performs it once during startup. Warm requests do not revalidate identity before listing or invoking tools. Odoo still authenticates the Agent credential and enforces current authority on every actual Odoo request.
+Direct HTTP performs the same two-request setup only on a credential's first use in the process. OAuth hydrates a complete snapshot from its persistent volume after a process restart and revalidates it out of band; stdio performs discovery once during startup. Run `node dist/auth/cli.js prepare` after migration to prewarm every active OAuth enrollment before replacing the service. Warm requests do not revalidate identity before listing or invoking tools. Odoo still authenticates the Agent credential and enforces current authority on every actual Odoo request.
 
 Default access-token life is one hour. Rotating refresh tokens last 180 days. An enrollment has a hard one-year ceiling and must then reconnect. `/oauth/revoke` removes the enrollment and associated access, refresh, and consent grants. Tokens fail immediately after the enrollment is removed or its configured target disappears.
 
-Run schema initialization/migrations before rollout:
+Run schema initialization/migrations and prewarm active enrollments before rollout:
 
 ```bash
 npm run build
-npm run oauth:migrate
+npm run oauth:prepare
 ```
 
 Create a consistent SQLite backup to a new absolute path:

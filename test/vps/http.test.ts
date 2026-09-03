@@ -12,6 +12,7 @@ import { OdooClient } from "../../src/odoo/client.js";
 import { loadRuntimeConfig } from "../../src/runtime/config.js";
 import { createObservability } from "../../src/runtime/observability.js";
 import { AgentAccessSnapshotCache } from "../../src/runtime/agent_access_cache.js";
+import { requestContext } from "./fixtures.js";
 
 const closeCallbacks: Array<() => Promise<void>> = [];
 
@@ -57,11 +58,34 @@ function testServices(
   identity: unknown = agentIdentity,
   calls?: string[]
 ) {
+  const access = requestContext();
+  const publicMethods = new Set(
+    [...access.availablePublicMethods!.values()].flatMap((methods) => [...methods])
+  );
+  const models = new Set([
+    ...access.availableModelAccess!.keys(),
+    ...access.availablePublicMethods!.keys()
+  ]);
   const fetcher: typeof fetch = async (input) => {
     const url = String(input);
     calls?.push(url);
     if (url.includes("/json/2/usl.agent/current_identity")) return Response.json(identity);
-    if (url.endsWith("/doc-bearer/index.json")) return Response.json({ modules: [] });
+    if (url.endsWith("/doc-bearer/index.json")) return Response.json({
+      modules: [
+        "base", "api_doc", "usl_access_control", "mail", "contacts", "project", "account",
+        "rebuild_account_migration", "usl_home", "usl_documents"
+      ],
+      models: [...models].map((model) => ({
+        model,
+        access: access.availableModelAccess!.get(model) ?? {
+          read: true,
+          create: false,
+          write: false,
+          unlink: false
+        },
+        methods: [...publicMethods]
+      }))
+    });
     if (url.endsWith("/json/2/res.partner/search_read")) return Response.json([]);
     return Response.json({ message: "unexpected test request" }, { status: 404 });
   };
@@ -113,6 +137,7 @@ describe("VPS HTTP MCP transport", () => {
     await client.connect(transport);
     closeCallbacks.push(async () => client.close());
     const tools = await client.listTools();
+    expect(tools.tools).toHaveLength(21);
     expect(tools.tools.map((tool) => tool.name)).toContain("odoo_search_records");
     expect(tools.tools.map((tool) => tool.name)).toContain("odoo_call_method");
     expect(tools.tools.map((tool) => tool.name)).not.toContain("odoo_delete_records");

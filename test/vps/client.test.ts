@@ -129,6 +129,12 @@ describe("JSON-2 adapter", () => {
     });
   });
 
+  it("does not treat incomplete API documentation as a complete access surface", async () => {
+    const client = new OdooClient(8, 1024, (async () => Response.json({ modules: ["base"] })) as typeof fetch);
+    await expect(client.discoverSurfaceStrict(requestContext())).rejects.toThrow("incomplete or invalid");
+    await expect(client.discoverSurface(requestContext())).resolves.toBeNull();
+  });
+
   it("force-revalidates API discovery conditionally even inside the local cache TTL", async () => {
     const requests: RequestInit[] = [];
     const fetcher = vi.fn<typeof fetch>(async (_input, init) => {
@@ -146,6 +152,31 @@ describe("JSON-2 adapter", () => {
     expect(await client.fetchApiDocument(context, undefined, undefined, { forceRevalidate: true })).toBe(first);
     expect(fetcher).toHaveBeenCalledTimes(2);
     expect(new Headers(requests[1]?.headers).get("If-None-Match")).toBe('\"surface-v1\"');
+  });
+
+  it("reuses a persisted surface when conditional discovery returns 304 after restart", async () => {
+    const requests: RequestInit[] = [];
+    const client = new OdooClient(8, 1024, vi.fn<typeof fetch>(async (_input, init) => {
+      requests.push(init ?? {});
+      return new Response(null, { status: 304 });
+    }));
+    const previous = {
+      etag: '\"persisted-v1\"',
+      modules: new Set(["base", "hr_expense"]),
+      publicMethods: new Map([["hr.expense", new Set(["action_approve_expenses"])]]),
+      modelAccess: new Map([["hr.expense", {
+        read: true,
+        create: true,
+        write: true,
+        unlink: false
+      }]])
+    };
+
+    expect(await client.discoverSurfaceStrict(requestContext(), undefined, {
+      forceRevalidate: true,
+      previous
+    })).toBe(previous);
+    expect(new Headers(requests[0]?.headers).get("If-None-Match")).toBe('\"persisted-v1\"');
   });
 
   it("keeps the HTTP status when an error response is not JSON", async () => {
