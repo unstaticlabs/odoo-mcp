@@ -7,6 +7,12 @@ migration. GitOps may replace MCP independently only after this contract passes
 against staging. MCP-only promotion backs up and migrates the OAuth vault; it
 never restarts Odoo, PostgreSQL, Paperless, or Sign.
 
+Image reuse is limited to a retry of the exact same source revision. The
+release workflow verifies the OCI source, revision, and component-input labels
+before reusing an existing `sha-<commit>` image. Build layers remain cached
+across revisions, but a release document can never claim an image built from a
+different commit.
+
 The production shape is one non-root Node 26 container on the same private network as the USL Odoo Distribution. The reverse proxy terminates TLS and forwards only the MCP public origin to port 3000. Odoo traffic uses the configured private origin.
 
 ## Build and configure

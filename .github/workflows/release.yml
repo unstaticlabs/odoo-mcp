@@ -53,7 +53,7 @@ jobs:
           digest="$(git ls-files Dockerfile package.json package-lock.json src release scripts | sort | xargs sha256sum | sha256sum | cut -d' ' -f1)"
           printf '%s\n' "$digest" | grep -Eq '^[0-9a-f]{64}$'
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
-          echo "tag=content-$digest" >> "$GITHUB_OUTPUT"
+          echo "tag=sha-$GITHUB_SHA" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
@@ -69,13 +69,20 @@ jobs:
         id: existing
         env:
           TAG: ${{ steps.inputs.outputs.tag }}
+          INPUT_DIGEST: ${{ steps.inputs.outputs.digest }}
         run: |
           set +e
           inspection="$(docker buildx imagetools inspect "$IMAGE:$TAG" 2>&1)"
           status=$?
           set -e
           if [ "$status" -eq 0 ]; then
+            digest="sha256:$(docker buildx imagetools inspect --raw "$IMAGE:$TAG" | sha256sum | cut -d' ' -f1)"
+            reference="$IMAGE@$digest"
+            docker pull "$reference"
+            docker image inspect "$reference" --format '{{json .Config}}' > image-config.json
+            node scripts/image-identity.mjs --config image-config.json --commit "$GITHUB_SHA" --input "$INPUT_DIGEST"
             echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "digest=$digest" >> "$GITHUB_OUTPUT"
           elif printf '%s' "$inspection" | grep -Eqi 'manifest unknown|name unknown|not found|404'; then
             echo "exists=false" >> "$GITHUB_OUTPUT"
           else
@@ -106,8 +113,9 @@ jobs:
       - name: Resolve and verify immutable identity
         id: release
         env:
-          DIGEST: ${{ steps.build.outputs.digest }}
+          DIGEST: ${{ steps.build.outputs.digest || steps.existing.outputs.digest }}
           TAG: ${{ steps.inputs.outputs.tag }}
+          INPUT_DIGEST: ${{ steps.inputs.outputs.digest }}
         run: |
           digest="$DIGEST"
           if [ -z "$digest" ]; then
@@ -119,13 +127,12 @@ jobs:
           fi
           reference="$IMAGE@$digest"
           docker pull "$reference"
-          test "$(docker image inspect "$reference" --format '{{index .Config.Labels "org.opencontainers.image.source"}}')" = "https://github.com/unstaticlabs/odoo-mcp.git"
-          test "$(docker image inspect "$reference" --format '{{index .Config.Labels "com.unstaticlabs.component.input-sha256"}}')" = '${{ steps.inputs.outputs.digest }}'
+          docker image inspect "$reference" --format '{{json .Config}}' > image-config.json
+          node scripts/image-identity.mjs --config image-config.json --commit "$GITHUB_SHA" --input "$INPUT_DIGEST"
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
           echo "digest_reference=$reference" >> "$GITHUB_OUTPUT"
 
       - name: Generate build provenance
-        if: steps.existing.outputs.exists != 'true'
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-name: ${{ env.IMAGE }}
@@ -142,6 +149,7 @@ jobs:
           node scripts/release-contract.mjs \
             --commit "$GITHUB_SHA" \
             --image "$IMAGE@$DIGEST" \
+            --input '${{ steps.inputs.outputs.digest }}' \
             --evidence "$evidence" \
             --output odoo-mcp-release.json
           echo "artifact_name=$artifact_name" >> "$GITHUB_OUTPUT"

@@ -44,15 +44,21 @@ export function loadCompatibility(root = process.cwd()) {
   return { value, raw, digest: sha256(raw) };
 }
 
-export function createRelease({ commit, image, evidence }, root = process.cwd()) {
+export function createRelease({ commit, image, input, evidence }, root = process.cwd()) {
   if (!/^[0-9a-f]{40}$/.test(commit)) fail("commit must be a full Git SHA");
   if (!/^ghcr\.io\/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$/.test(image)) fail("image must use an immutable digest");
+  if (!/^[0-9a-f]{64}$/.test(input)) fail("component input digest is invalid");
   if (!/^[0-9a-f]{64}$/.test(evidence)) fail("qualification evidence digest is invalid");
   const compatibility = loadCompatibility(root);
   return {
     schema: "usl-odoo-mcp-oci-release/v2",
     source: { repository: "https://github.com/unstaticlabs/odoo-mcp.git", ref: "refs/heads/main", commit },
-    image: { digest_reference: image },
+    image: {
+      digest_reference: image,
+      source_repository: "https://github.com/unstaticlabs/odoo-mcp.git",
+      source_commit: commit,
+      input_sha256: input,
+    },
     compatibility: { ...compatibility.value, sha256: compatibility.digest },
     qualification: { evidence_sha256: evidence },
   };
@@ -66,7 +72,7 @@ function main() {
   }
   const values = {};
   for (let index = 0; index < args.length; index += 2) values[args[index]?.replace(/^--/, "")] = args[index + 1];
-  if (!values.commit || !values.image || !values.evidence || !values.output) fail("commit, image, evidence and output are required");
+  if (!values.commit || !values.image || !values.input || !values.evidence || !values.output) fail("commit, image, input, evidence and output are required");
   writeFileSync(values.output, `${JSON.stringify(createRelease(values), null, 2)}\n`, { mode: 0o644 });
 }
 
