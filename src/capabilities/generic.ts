@@ -16,7 +16,11 @@ import {
   PositiveIdSchema,
   queryFingerprint
 } from "../odoo/schemas.js";
-import { CapabilityRegistry, defineCapability, type CapabilityMetadata } from "./registry.js";
+import {
+  CapabilityRegistry,
+  defineCapability,
+  type CapabilitySearchMatch
+} from "./registry.js";
 
 const RecordSchema = z.record(z.string(), z.unknown());
 const RecordsSchema = z.array(RecordSchema);
@@ -73,7 +77,8 @@ function resultIds(value: unknown): number[] {
   return ids;
 }
 
-function capabilitySummary(metadata: CapabilityMetadata) {
+function capabilitySummary(match: CapabilitySearchMatch) {
+  const { metadata } = match;
   return {
     id: metadata.id,
     name: metadata.name,
@@ -82,6 +87,9 @@ function capabilitySummary(metadata: CapabilityMetadata) {
     layer: metadata.layer,
     toolsets: [...metadata.toolsets],
     effect: metadata.effect,
+    availability: match.availability,
+    visible_in_current_profile: match.visibleInCurrentProfile,
+    callable_now: match.callableNow,
     profiles: [...metadata.profiles],
     always_load: metadata.alwaysLoad,
     required_modules: [...metadata.requiredModules],
@@ -101,7 +109,7 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
     name: "odoo_search_capabilities",
     title: "Search Odoo Capabilities",
     description:
-      "Search the complete Odoo MCP catalogue by task, object, workflow, or domain. Use this when the visible generic tools may have a more efficient semantic helper or business action. It returns matching tool metadata; it does not classify a request into one exclusive domain or grant authority.",
+      "Search the complete Odoo MCP catalogue by task, object, workflow, or domain. Results recommend callable tools and unknown-availability candidates, but never activate a tool, change the current profile, or alter tools/list. Tool visibility and Odoo authorization remain separate.",
     layer: "generic",
     toolsets: ["core"],
     profiles: [],
@@ -125,6 +133,9 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
         layer: z.enum(["generic", "semantic", "business_action"]),
         toolsets: z.array(z.string()),
         effect: z.enum(["read", "write", "consequential", "irreversible"]),
+        availability: z.enum(["available", "unknown"]),
+        visible_in_current_profile: z.boolean(),
+        callable_now: z.boolean(),
         profiles: z.array(z.string()),
         always_load: z.boolean(),
         required_modules: z.array(z.string()),
@@ -135,29 +146,35 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
           operation: z.enum(["read", "create", "write", "unlink"])
         }).strict()),
         required_features: z.array(z.string())
-      }).strict())
+      }).strict()),
+      recommended_fallback: z.object({
+        name: z.string(),
+        reason: z.string()
+      }).strict().optional(),
+      selection_note: z.string()
     }).strict(),
     async handler({ query, limit }, context) {
+      const availability = {
+        modules: context.availableModules,
+        publicMethods: context.availablePublicMethods,
+        modelAccess: context.availableModelAccess,
+        enabledFeatures: context.enabledFeatures
+      };
+      const options = { profile: context.profile, availability } as const;
+      const matches = registry.search(query, limit, options);
+      const recommendedFallback = registry.recommendFallback(query, matches, options);
       emitEvent("mcp.capabilities.searched", {
         request_id: context.requestId,
         correlation_id: context.correlationId,
         profile: context.profile,
         target_id: context.principal.targetId,
-        result_count: registry.search(query, limit, {
-          modules: context.availableModules,
-          publicMethods: context.availablePublicMethods,
-          modelAccess: context.availableModelAccess,
-          enabledFeatures: context.enabledFeatures
-        }).length
+        result_count: matches.length
       }, context.eventObserver);
       return {
         data: {
-          capabilities: registry.search(query, limit, {
-            modules: context.availableModules,
-            publicMethods: context.availablePublicMethods,
-            modelAccess: context.availableModelAccess,
-            enabledFeatures: context.enabledFeatures
-          }).map(capabilitySummary)
+          capabilities: matches.map(capabilitySummary),
+          ...(recommendedFallback ? { recommended_fallback: recommendedFallback } : {}),
+          selection_note: "Catalogue results are advisory. This search does not activate tools, change profiles, or alter tools/list."
         }
       };
     }
@@ -946,13 +963,13 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
     description:
       "Call any Odoo-public JSON-2 model method with named kwargs and optional record IDs. Use as an advanced escape hatch for long-tail Distribution functionality after inspecting odoo_describe_model when possible. Do not use it to chain a supposedly atomic workflow; use one purpose-built business action instead. Private and @api.private methods remain unavailable through Odoo.",
     layer: "generic",
-    toolsets: ["advanced"],
+    toolsets: ["core", "advanced"],
     profiles: ["advanced"],
     effect: "consequential",
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     keywords: ["public method", "JSON-2", "escape hatch", "model action", "workflow"],
     requiredModules: [],
-    defaultVisible: false,
+    defaultVisible: true,
     alwaysLoad: false,
     sortOrder: 910,
     input: z.object({

@@ -33,10 +33,11 @@ Required runtime configuration:
 3. Run `oauth:migrate` with the candidate image and production mounts.
 4. Start the candidate container without removing the preceding image.
 5. Require `GET /healthz` to return `status=ok`.
-6. Require `GET /readyz` to return `status=ready`, the default tool budget within 20/15,000, OAuth `ready` or deliberately `disabled`, and analytics `ready` or deliberately `disabled`. Analytics `degraded` does not make the MCP unavailable, but fix it before treating telemetry as complete.
+6. Require `GET /readyz` to return `status=ready`, the default tool budget within 21/15,000, OAuth `ready` or deliberately `disabled`, and analytics `ready` or deliberately `disabled`. Analytics `degraded` does not make the MCP unavailable, but fix it before treating telemetry as complete.
 7. Run the authenticated MCP initialization/tool-list smoke test and a bounded Odoo read.
 8. Run a hosted OAuth reconnect test when OAuth is enabled.
-9. Shift reverse-proxy traffic and monitor content-free error/latency events.
+9. Rescan and reconnect the ChatGPT connector, then manually run the six `evals/chatgpt-golden-prompts.json` acceptance scenarios.
+10. Shift reverse-proxy traffic and monitor content-free error/latency events.
 
 The process handles `SIGTERM`/`SIGINT` by closing the listener and OAuth vault, then attempting a bounded two-second analytics flush. Give the container a normal termination grace period; PostHog failure never delays shutdown beyond that bound and in-flight mutations are not replayed after termination.
 

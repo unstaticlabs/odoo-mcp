@@ -22,15 +22,15 @@ The runtime has no global business transaction or session state. An HTTP MCP req
 2. **Semantic helpers** collapse frequent relational reads into compact context results. They remain optional shortcuts; generic records stay accessible.
 3. **Business actions** expose fixed-intent workflows or safer data preparation. A consequential multi-record workflow must execute in one Odoo-side public method and one database transaction.
 
-Every capability records a stable ID/name, layer, toolsets, profiles, effect, annotations, input/output schemas, required modules, required model operations or public methods, discovery keywords, availability, load preference, sort order, and estimated schema tokens. Odoo's authenticated `/doc-bearer` metadata supplies caller-specific model access and public methods. Capabilities that require positive backend proof disappear when that metadata is unavailable; the generic read and discovery substrate remains visible.
+Every capability records a stable ID/name, layer, toolsets, profiles, effect, annotations, input/output schemas, required modules, required model operations or public methods, discovery keywords, availability, load preference, sort order, and estimated schema tokens. Odoo's authenticated `/doc-bearer` metadata supplies caller-specific model access and public methods. Capabilities that require positive backend proof disappear from actual tool exposure when that metadata is unavailable; capability search keeps those catalogue entries as explicitly unknown unless other evidence proves them unavailable.
 
 ## Profiles and discovery
 
-- `/mcp` is the broad default static view, capped at 20 tools and 15,000 estimated schema tokens.
+- `/mcp` is the broad default static view, capped at 21 tools and 15,000 estimated schema tokens.
 - `/mcp/all` exposes the canonical catalogue with `defer_loading` metadata for capable clients.
 - `/mcp/read-only`, `/mcp/accounting`, `/mcp/projects`, `/mcp/documents`, `/mcp/b2c`, and `/mcp/advanced` are filtered views over the same registry.
 
-Thematic profiles include the universal core and may span multiple toolsets. `odoo_search_capabilities` searches individual capability metadata and can return several domains in one result. It is not a domain router.
+Thematic writable profiles include the universal core, including the deferred `odoo_call_method`, and may span multiple toolsets. `odoo_search_capabilities` searches individual capability metadata and can return several domains in one result. It is not a domain router, profile switch, or MCP tool-loading mechanism.
 
 Profiles do not alter credentials or authorize operations. A hidden tool can still correspond to an Odoo operation the credential may perform elsewhere; a visible tool can still be denied by Odoo.
 

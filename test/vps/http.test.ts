@@ -114,7 +114,8 @@ describe("VPS HTTP MCP transport", () => {
     closeCallbacks.push(async () => client.close());
     const tools = await client.listTools();
     expect(tools.tools.map((tool) => tool.name)).toContain("odoo_search_records");
-    expect(tools.tools.map((tool) => tool.name)).not.toContain("odoo_call_method");
+    expect(tools.tools.map((tool) => tool.name)).toContain("odoo_call_method");
+    expect(tools.tools.map((tool) => tool.name)).not.toContain("odoo_delete_records");
   });
 
   it("performs setup once while warm list and tool requests add only the business call", async () => {

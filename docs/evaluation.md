@@ -1,6 +1,6 @@
 # Agent-interface evaluation
 
-The reusable corpus is `evals/corpus.json`; exact logical fixture facts and relations are in `evals/fixtures/usl-eval-v1.json`. Zod validation, observation schemas, and A/B/C/D/E surface generation live under `src/evals`. Run:
+The reusable corpus is `evals/corpus.json`; exact logical fixture facts and relations are in `evals/fixtures/usl-eval-v1.json`. `evals/chatgpt-golden-prompts.json` adds six connector-metadata acceptance scenarios for direct and indirect long-tail actions, specialized-tool preference, missing `/doc-bearer`, read-only use, and irreversible deletion. Zod validation, observation schemas, and A/B/C/D/E surface generation live under `src/evals`. Run:
 
 ```bash
 npm run eval:validate
@@ -19,6 +19,8 @@ The 60 tasks are fixed at:
 - 5 malformed, stale, unsupported, prompt-injection, or recovery tasks.
 
 Every task has a stable ID, prompt, profile, thematic metadata, versioned fixture references, outcome class, bounded tool-call budget, accepted capabilities, forbidden capabilities, and factual/state assertions. Held-out tasks all name at least one generic fallback in their oracle.
+
+The ChatGPT golden prompts follow OpenAI's [metadata optimization](https://developers.openai.com/plugins/guides/optimize-metadata) and [connector testing](https://developers.openai.com/plugins/deploy/connect-chatgpt) guidance. Run them after the connector has been rescanned or reconnected so results reflect the deployed schema rather than a cached tool list.
 
 ## Compared surfaces
 

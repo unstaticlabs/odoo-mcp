@@ -70,13 +70,15 @@ Profiles are views over the same registry:
 
 | Profile | Surface |
 | --- | --- |
-| `default` | Broad generic substrate and common cross-domain context tools, at most 20 tools and 15,000 schema tokens |
+| `default` | Broad generic substrate and common cross-domain context tools, at most 21 tools and 15,000 schema tokens |
 | `all` | Entire catalogue for native tool search/deferred loading |
 | `read-only` | Every read capability; a visibility convenience, not credential authority |
 | `accounting`, `projects`, `documents`, `b2c` | Universal core plus tools carrying the corresponding tag |
-| `advanced` | Default plus deletion, public method invocation, and administration tools |
+| `advanced` | Default plus deletion and administration tools |
 
-The five recommended non-deferred tools are `odoo_search_capabilities`, `odoo_search_models`, `odoo_describe_model`, `odoo_search_records`, and `odoo_read_records`. Capability search operates at tool level and may return tools from several domains. It is not a mandatory router and does not activate tools through mutable connection state.
+The five recommended non-deferred tools are `odoo_search_capabilities`, `odoo_search_models`, `odoo_describe_model`, `odoo_search_records`, and `odoo_read_records`. Capability search operates at tool level and may return tools from several domains. It searches unknown-availability catalogue entries but actual exposure remains fail-closed. It is not a mandatory router and does not activate tools through mutable connection state.
+
+Capability search normalizes case, punctuation, dots, hyphens, underscores, common stopwords, and simple plurals. Ranking is additive and deterministic: exact tool name 100, exact capability ID 90, phrase match 25, keyword/toolset token 20, title token 10, and description token 3. A non-empty query must contain and match at least one meaningful term; empty queries retain registry order, which is also the final tie-breaker.
 
 ## Generic substrate
 
@@ -95,11 +97,11 @@ The five recommended non-deferred tools are `odoo_search_capabilities`, `odoo_se
 | `odoo_archive_records` | Inherited `action_archive`; unsupported when the model has no active field |
 | `odoo_post_message` | One message on one record |
 | `odoo_delete_records` | Advanced `unlink` in one transaction |
-| `odoo_call_method` | Advanced public JSON-2 method invocation |
+| `odoo_call_method` | Deferred public JSON-2 method invocation in every writable profile |
 
 Every returned record includes a stable `{model, id, display_name, url}` reference. Inputs use strict schemas, bounded domains/JSON, explicit field selection, and cursor pagination. Responses provide structured content plus a concise text representation for older clients. Errors use stable codes, a redacted explanation, recoverability, and an actionable next step. Mutation failures distinguish request rejection, ambiguous completion, and post-success response processing. Unknown outcomes explicitly prohibit blind retries, report request/response/result evidence as `yes`, `no`, or `unknown`, preserve sanitized known record or grant identifiers, and give a reconciliation read plus minimal-correction guidance.
 
-`odoo_call_method` is preserved intentionally. It accepts a validated model and public method, optional 1-100 IDs, named kwargs, and bounded context. The argument body is limited to 256 KiB, eight nesting levels, and 200 object keys. It has no MCP allowlist or heuristic effect classifier; `/doc-bearer` inspection is recommended but is not a prerequisite. Odoo's public dispatcher and the selected identity are authoritative. The MCP attempts the call once, never claims generic idempotency, and reports interrupted completion as `outcome: unknown`.
+`odoo_call_method` is preserved intentionally and is always listed on writable profiles so long-tail work does not depend on client-side schema refresh. It accepts a validated model and public method, optional 1-100 IDs, named kwargs, and bounded context. The argument body is limited to 256 KiB, eight nesting levels, and 200 object keys. It has no MCP allowlist or heuristic effect classifier; `/doc-bearer` inspection is recommended but is not a prerequisite. Odoo's public dispatcher and the selected identity are authoritative. The MCP attempts the call once, never claims generic idempotency, and reports interrupted completion as `outcome: unknown`. Permanent deletion remains advanced-only.
 
 ## Current-to-target tool mapping
 

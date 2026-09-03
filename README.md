@@ -11,7 +11,7 @@ The interface deliberately combines:
 - Odoo-authoritative permissions, record rules, company scope, and transactions.
 - a governed autonomous Agent identity for every connection.
 
-Tool visibility is context optimization, not authorization. `odoo_call_method` remains available in the `advanced` and `all` profiles as a one-shot escape hatch for any Odoo-public JSON-2 method.
+Tool visibility is context optimization, not authorization. `odoo_call_method` is part of every writable profile as a deferred, one-shot escape hatch for any Odoo-public JSON-2 method; Odoo remains the authority for public-method dispatch and access.
 
 Documents remain metadata/text-only until an agent explicitly invokes the
 deferred `documents_create_download_url` action. Odoo then issues a revocable,
@@ -28,7 +28,7 @@ bearer capabilities.
 - Stateless MCP requests; no application-level MCP session store.
 - Optional, fail-open, privacy-filtered PostHog MCP Analytics.
 
-The default surface currently contains 19 tools and remains below the 15,000 estimated schema-token budget. Dynamic clients should use `/mcp/all`; only these tools are marked for immediate loading:
+The default surface contains 21 tools and remains below the 15,000 estimated schema-token budget. Only these tools are marked for immediate loading:
 
 1. `odoo_search_capabilities`
 2. `odoo_search_models`

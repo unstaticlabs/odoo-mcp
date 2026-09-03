@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { createCapabilityRegistry } from "../../src/capabilities/index.js";
-import { loadEvalCorpus, loadFixtureManifest } from "../../src/evals/schema.js";
+import {
+  loadChatGptGoldenPrompts,
+  loadEvalCorpus,
+  loadFixtureManifest
+} from "../../src/evals/schema.js";
 import { generateAllEvalSurfaces, generateEvalSurface } from "../../src/evals/surfaces.js";
 import { OdooClient } from "../../src/odoo/client.js";
 
@@ -46,6 +50,31 @@ describe("agent-interface evaluation corpus", () => {
     const corpus = await loadEvalCorpus();
     for (const task of corpus.tasks.filter((candidate) => candidate.held_out)) {
       expect(task.oracle.must_use_one_of.some((name) => name.startsWith("odoo_")), task.id).toBe(true);
+    }
+  });
+
+  it("validates the six ChatGPT discovery and safety golden prompts", async () => {
+    const golden = await loadChatGptGoldenPrompts();
+    const registry = createCapabilityRegistry(new OdooClient());
+    const knownTools = new Set(registry.list("all").map((tool) => tool.name));
+    expect(new Set(golden.prompts.map((prompt) => prompt.scenario))).toEqual(new Set([
+      "direct_method",
+      "indirect_expense_approval",
+      "specialized_tool_preference",
+      "missing_doc_bearer",
+      "read_only_identity",
+      "irreversible_deletion"
+    ]));
+    for (const prompt of golden.prompts) {
+      expect(
+        [
+          ...prompt.expected.visible_tools,
+          ...prompt.expected.hidden_tools,
+          ...prompt.expected.preferred_tools,
+          ...prompt.expected.forbidden_tools
+        ].every((name) => knownTools.has(name)),
+        prompt.id
+      ).toBe(true);
     }
   });
 

@@ -14,12 +14,12 @@ The five non-deferred tools are:
 | `odoo_search_records` | Perform bounded cross-domain or long-tail search. |
 | `odoo_read_records` | Read selected fields from known record IDs. |
 
-Further generic substrate tools are available in the default profile but may be deferred by dynamic clients:
+Further generic substrate tools are available in every writable profile but may be deferred by clients:
 
 - `odoo_expand_record`, `odoo_aggregate_records`, and `odoo_describe_environment`;
-- `odoo_create_records`, `odoo_update_records`, `odoo_archive_records`, and `odoo_post_message`.
+- `odoo_create_records`, `odoo_update_records`, `odoo_archive_records`, `odoo_post_message`, and `odoo_call_method`.
 
-Advanced-only generic tools are `odoo_delete_records` and `odoo_call_method`.
+The only advanced-only generic tool is `odoo_delete_records`.
 
 Use `odoo_call_method` when a legitimate public Distribution method has no MCP shortcut or when preserving a model's versatile public API is more useful than adding a thin wrapper. Prefer a fixed-intent action when it reduces ambiguity, returns better context, or guarantees a multi-step invariant. The method tool receives one attempt and may report unknown completion.
 
@@ -49,18 +49,18 @@ Actions do not bypass Odoo state or permissions. The agent should read the relev
 
 | URL | Intended visible surface |
 | --- | --- |
-| `/mcp` | Broad default for general agents; maximum 20 tools/15k estimated schema tokens. |
+| `/mcp` | Broad default for general agents; maximum 21 tools/15k estimated schema tokens. |
 | `/mcp/all` | Complete catalogue with deferred-loading metadata. |
 | `/mcp/read-only` | Every read capability currently available. |
 | `/mcp/accounting` | Universal core plus accounting, expenses, and related document actions. |
 | `/mcp/projects` | Universal core plus project and related capabilities. |
 | `/mcp/documents` | Universal core plus archive and related capabilities. |
 | `/mcp/b2c` | Universal core plus B2C context. |
-| `/mcp/advanced` | Default plus permanent deletion and arbitrary public-method invocation. |
+| `/mcp/advanced` | Default plus permanent deletion. |
 
-Static clients should use `/mcp` or a fitting profile. Dynamic tool-search clients should use `/mcp/all` and honor `_meta.defer_loading`. A request may retrieve tools from multiple thematic toolsets.
+Clients should use `/mcp` or a fitting profile. `/mcp/all` is available only when a client deliberately wants the complete catalogue. Per-tool `_meta.defer_loading` is a selection hint; it does not make a schema callable unless the client actually loaded that tool definition.
 
-Module predicates remove specialized tools when authenticated `/doc-bearer` definitively reports the owning module absent. Metadata failures leave the catalogue usable so API-document permission does not become a hidden authorization requirement.
+Module, public-method, model-access, and feature predicates remove specialized tools from `tools/list` unless positive availability is known. Capability search evaluates the complete canonical catalogue: it omits entries proven unavailable, retains unknown candidates, and returns `availability`, `visible_in_current_profile`, and `callable_now`. On writable profiles its optional fallback prefers a matching callable tool, then `odoo_call_method`; on `read-only` it always recommends generic record search and never method invocation. Search metadata is advisory and never activates a tool, changes a profile, or alters `tools/list`.
 
 ## Contract conventions
 

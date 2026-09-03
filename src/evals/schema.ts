@@ -71,9 +71,37 @@ export const EvalObservationSchema = z.object({
   notes: z.string().max(2_000).optional()
 }).strict();
 
+export const ChatGptGoldenPromptSchema = z.object({
+  id: z.string().regex(/^[a-z][a-z0-9_]{2,79}$/),
+  scenario: z.enum([
+    "direct_method",
+    "indirect_expense_approval",
+    "specialized_tool_preference",
+    "missing_doc_bearer",
+    "read_only_identity",
+    "irreversible_deletion"
+  ]),
+  profile: ProfileNameSchema,
+  backend_metadata: z.enum(["available", "unavailable"]),
+  prompt: z.string().min(20).max(2_000),
+  expected: z.object({
+    visible_tools: z.array(z.string().regex(/^[a-z][a-z0-9_]{0,63}$/)).max(20),
+    hidden_tools: z.array(z.string().regex(/^[a-z][a-z0-9_]{0,63}$/)).max(20),
+    preferred_tools: z.array(z.string().regex(/^[a-z][a-z0-9_]{0,63}$/)).max(20),
+    forbidden_tools: z.array(z.string().regex(/^[a-z][a-z0-9_]{0,63}$/)).max(20),
+    assertions: z.array(z.string().min(4).max(500)).min(1).max(20)
+  }).strict()
+}).strict();
+
+export const ChatGptGoldenPromptsSchema = z.object({
+  version: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  prompts: z.array(ChatGptGoldenPromptSchema).length(6)
+}).strict();
+
 export type EvalCorpus = z.infer<typeof EvalCorpusSchema>;
 export type EvalTask = z.infer<typeof EvalTaskSchema>;
 export type FixtureManifest = z.infer<typeof FixtureManifestSchema>;
+export type ChatGptGoldenPrompt = z.infer<typeof ChatGptGoldenPromptSchema>;
 
 export async function loadEvalCorpus(path = resolve(process.cwd(), "evals/corpus.json")): Promise<EvalCorpus> {
   return EvalCorpusSchema.parse(JSON.parse(await readFile(path, "utf8")));
@@ -83,4 +111,10 @@ export async function loadFixtureManifest(
   path = resolve(process.cwd(), "evals/fixtures/usl-eval-v1.json")
 ): Promise<FixtureManifest> {
   return FixtureManifestSchema.parse(JSON.parse(await readFile(path, "utf8")));
+}
+
+export async function loadChatGptGoldenPrompts(
+  path = resolve(process.cwd(), "evals/chatgpt-golden-prompts.json")
+): Promise<z.infer<typeof ChatGptGoldenPromptsSchema>> {
+  return ChatGptGoldenPromptsSchema.parse(JSON.parse(await readFile(path, "utf8")));
 }
