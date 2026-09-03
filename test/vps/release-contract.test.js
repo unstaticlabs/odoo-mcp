@@ -26,6 +26,8 @@ describe("MCP release contract", () => {
       source_commit: commit,
       input_sha256: input,
     });
+    expect(release.compatibility.required_actions).toContain("usl.document.mcp_create_download_grant");
+    expect(release.compatibility.required_actions).toContain("usl.document.mcp_revoke_download_grant");
     expect(release.compatibility.oauth_vault.schema_version).toBe(1);
     expect(release.compatibility.required_agent_identity).toMatchObject({
       method: "usl.agent.current_identity",
