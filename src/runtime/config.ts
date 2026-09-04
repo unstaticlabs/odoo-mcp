@@ -33,6 +33,12 @@ export interface RuntimeConfig {
   documentMaterializationEnabled: boolean;
   oauth: OAuthRuntimeConfig | null;
   analytics: AnalyticsRuntimeConfig;
+  releaseIdentity: ReleaseIdentity;
+}
+
+export interface ReleaseIdentity {
+  mcpCommit: string;
+  gitopsCommit: string;
 }
 
 export type AnalyticsStatus = "disabled" | "ready" | "degraded";
@@ -102,6 +108,11 @@ function safeLabel(value: string | undefined, fallback: string, name: string): s
     throw new Error(`${name} must be a 1-128 character operational label`);
   }
   return label;
+}
+
+function releaseCommit(value: string | undefined): string {
+  const candidate = value?.trim().toLowerCase() ?? "";
+  return /^[0-9a-f]{40}$/.test(candidate) ? candidate : "unknown";
 }
 
 function parseAnalytics(env: NodeJS.ProcessEnv): AnalyticsRuntimeConfig {
@@ -262,6 +273,10 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runtime
     ) * 1_000,
     allowLocalHttpOdoo: allowLocalHttp,
     documentMaterializationEnabled: booleanEnv(env.MCP_DOCUMENT_MATERIALIZATION_ENABLED),
+    releaseIdentity: {
+      mcpCommit: releaseCommit(env.MCP_BUILD_ID),
+      gitopsCommit: releaseCommit(env.MCP_GITOPS_COMMIT)
+    },
     analytics: parseAnalytics(env),
     oauth: oauthEnabled
       ? {

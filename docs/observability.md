@@ -29,7 +29,8 @@ Set `MCP_ANALYTICS_ENABLED=true` and provide every value below:
 | `POSTHOG_HOST` | Explicit HTTPS ingestion origin for the project's chosen residency. Paths, credentials, query strings, and fragments are rejected. |
 | `MCP_ANALYTICS_PSEUDONYMIZATION_KEY` or `MCP_ANALYTICS_PSEUDONYMIZATION_KEY_FILE` | Exactly 32 random bytes encoded as canonical Base64. Keep this separate from every application and PostHog key. |
 | `MCP_DEPLOYMENT_ID` | Stable low-cardinality deployment label, such as `usl-prod-vps-1`. |
-| `MCP_BUILD_ID` | Immutable revision, normally the Git SHA or image digest. |
+| `MCP_BUILD_ID` | Immutable revision. Use the exact 40-character Git SHA so feedback attribution remains exact; other safe labels remain valid for analytics and are reported as `unknown` in feedback. |
+| `MCP_GITOPS_COMMIT` | Exact 40-character GitOps revision included in feedback attribution. Invalid or absent values are reported as `unknown`. |
 | `MCP_ENVIRONMENT` | Optional low-cardinality environment label; defaults to `development`. |
 
 Generate the pseudonymization key once and store its output in the mounted
@@ -50,7 +51,8 @@ environment:
   POSTHOG_HOST: https://eu.i.posthog.com
   MCP_ANALYTICS_PSEUDONYMIZATION_KEY_FILE: /run/secrets/analytics_pseudonymization_key
   MCP_DEPLOYMENT_ID: usl-prod-vps-1
-  MCP_BUILD_ID: <immutable-git-sha-or-image-digest>
+  MCP_BUILD_ID: <exact-40-character-git-sha>
+  MCP_GITOPS_COMMIT: <exact-40-character-gitops-sha>
 ```
 
 Do not rotate this key as part of routine PostHog-key rotation. Rotating either

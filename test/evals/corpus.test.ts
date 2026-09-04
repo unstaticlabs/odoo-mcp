@@ -53,12 +53,13 @@ describe("agent-interface evaluation corpus", () => {
     }
   });
 
-  it("validates the six ChatGPT discovery and safety golden prompts", async () => {
+  it("validates the ChatGPT discovery, feedback, and safety golden prompts", async () => {
     const golden = await loadChatGptGoldenPrompts();
     const registry = createCapabilityRegistry(new OdooClient());
     const knownTools = new Set(registry.list("all").map((tool) => tool.name));
     expect(new Set(golden.prompts.map((prompt) => prompt.scenario))).toEqual(new Set([
       "direct_method",
+      "agent_feedback",
       "indirect_expense_approval",
       "specialized_tool_preference",
       "missing_doc_bearer",

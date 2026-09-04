@@ -16,6 +16,23 @@ function environment(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
 }
 
 describe("runtime target mapping", () => {
+  it("accepts only exact release commits and otherwise reports unknown", () => {
+    expect(loadRuntimeConfig(environment({
+      MCP_BUILD_ID: "a".repeat(40),
+      MCP_GITOPS_COMMIT: "B".repeat(40)
+    })).releaseIdentity).toEqual({
+      mcpCommit: "a".repeat(40),
+      gitopsCommit: "b".repeat(40)
+    });
+    expect(loadRuntimeConfig(environment({
+      MCP_BUILD_ID: "main",
+      MCP_GITOPS_COMMIT: ""
+    })).releaseIdentity).toEqual({
+      mcpCommit: "unknown",
+      gitopsCommit: "unknown"
+    });
+  });
+
   it("accepts standards-defined localhost subdomains only with the local HTTP opt-in", () => {
     const local = environment({
       ODOO_PUBLIC_ORIGIN: "http://odoo.localhost:28669",

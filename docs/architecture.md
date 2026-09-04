@@ -26,7 +26,7 @@ Every capability records a stable ID/name, layer, toolsets, profiles, effect, an
 
 ## Profiles and discovery
 
-- `/mcp` is the broad default static view, capped at 21 tools and 15,000 estimated schema tokens; it omits deferred-loading hints so hosted clients retain every listed schema.
+- `/mcp` is the broad default static view, capped at 22 tools and 15,000 estimated schema tokens; it omits deferred-loading hints so hosted clients retain every listed schema.
 - `/mcp/all` exposes the canonical catalogue with advisory `defer_loading` metadata for capable clients. The host remains responsible for enabling its native MCP tool-search flow and materializing schemas.
 - `/mcp/read-only`, `/mcp/accounting`, `/mcp/projects`, `/mcp/documents`, `/mcp/b2c`, and `/mcp/advanced` are filtered views over the same registry.
 

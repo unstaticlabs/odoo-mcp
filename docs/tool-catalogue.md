@@ -19,6 +19,8 @@ Further generic substrate tools are available in every writable profile:
 - `odoo_expand_record`, `odoo_aggregate_records`, and `odoo_describe_environment`;
 - `odoo_create_records`, `odoo_update_records`, `odoo_archive_records`, `odoo_post_message`, and `odoo_call_method`.
 
+`odoo_submit_feedback` is also present in every writable MCP profile. It lets any active governed Agent create one structured, low-trust report in the configured MCP development Inbox, even when that Agent has no Project application access. The Odoo method fixes and validates the destination, escapes all submitted text, and creates the task plus its audit marker in one transaction. The explicit `/mcp/read-only` transport profile hides it because that profile contains no mutations.
+
 The only advanced-only generic tool is `odoo_delete_records`.
 
 Use `odoo_call_method` when a legitimate public Distribution method has no MCP shortcut or when preserving a model's versatile public API is more useful than adding a thin wrapper. Prefer a fixed-intent action when it reduces ambiguity, returns better context, or guarantees a multi-step invariant. The method tool receives one attempt and may report unknown completion.
@@ -42,6 +44,7 @@ Current actions cover:
 - document link/unlink;
 - explicit short-lived document materialization and revocation;
 - draft incoming vendor-receipt creation with a no-call dry run.
+- structured Agent feedback submission to the governed MCP development Inbox.
 
 Actions do not bypass Odoo state or permissions. The agent should read the relevant context immediately before consequential operations. Mutation failures are not automatically replayed.
 
@@ -49,7 +52,7 @@ Actions do not bypass Odoo state or permissions. The agent should read the relev
 
 | URL | Intended visible surface |
 | --- | --- |
-| `/mcp` | Static broad default for general agents; maximum 21 tools/15k estimated schema tokens. |
+| `/mcp` | Static broad default for general agents; maximum 22 tools/15k estimated schema tokens. |
 | `/mcp/all` | Complete catalogue with deferred-loading metadata. |
 | `/mcp/read-only` | Every read capability currently available. |
 | `/mcp/accounting` | Universal core plus accounting, expenses, and related document actions. |

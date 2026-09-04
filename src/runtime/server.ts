@@ -28,7 +28,7 @@ export function createRuntimeServices(config: RuntimeConfig): RuntimeServices {
   );
   return {
     client,
-    registry: createCapabilityRegistry(client),
+    registry: createCapabilityRegistry(client, config.releaseIdentity),
     enabledFeatures,
     observability,
     accessCache: new AgentAccessSnapshotCache(client, {

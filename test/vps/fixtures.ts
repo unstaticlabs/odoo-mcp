@@ -70,6 +70,7 @@ export function requestContext(accessMode: "read_only" | "read_write" | "mixed" 
     correlationId: "correlation-test",
     profile: "default",
     availablePublicMethods: new Map([
+      ["usl.agent", new Set(["current_identity", "submit_mcp_feedback"])],
       ["usl.document", new Set([
         "mcp_search",
         "mcp_get",
