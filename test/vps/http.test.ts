@@ -131,7 +131,7 @@ describe("VPS HTTP MCP transport", () => {
     expect(readiness.status).toBe("ready");
     expect(readiness).toMatchObject({
       schema: "usl-odoo-mcp-readiness/v1",
-      server_version: "1.0.0",
+      server_version: "1.1.0",
       oauth: { status: "disabled", schema_version: 1 }
     });
 
@@ -142,9 +142,10 @@ describe("VPS HTTP MCP transport", () => {
     await client.connect(transport);
     closeCallbacks.push(async () => client.close());
     const tools = await client.listTools();
-    expect(tools.tools).toHaveLength(21);
+    expect(tools.tools).toHaveLength(22);
     expect(tools.tools.map((tool) => tool.name)).toContain("odoo_search_records");
     expect(tools.tools.map((tool) => tool.name)).toContain("odoo_call_method");
+    expect(tools.tools.map((tool) => tool.name)).toContain("odoo_submit_feedback");
     expect(tools.tools.map((tool) => tool.name)).not.toContain("odoo_delete_records");
     expect(tools.tools.every((tool) => !("defer_loading" in (tool._meta ?? {})))).toBe(true);
   });

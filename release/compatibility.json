@@ -1,9 +1,9 @@
 {
   "schema": "usl-odoo-mcp-compatibility/v2",
-  "server_version": "1.0.0",
+  "server_version": "1.1.0",
   "supported_odoo_series": ["19.3"],
   "required_modules": ["account", "contacts", "hr_expense", "mail", "project", "rebuild_account_migration", "stock", "usl_access_control", "usl_b2c", "usl_documents", "usl_expense_batch", "usl_home"],
-  "required_public_methods": ["usl.agent.current_identity"],
+  "required_public_methods": ["usl.agent.current_identity", "usl.agent.submit_mcp_feedback"],
   "required_agent_identity": {
     "method": "usl.agent.current_identity",
     "principal_kind": "agent",

@@ -1,6 +1,23 @@
 {
-  "version": "2026-09-03",
+  "version": "2026-09-04",
   "prompts": [
+    {
+      "id": "chatgpt_structured_agent_feedback",
+      "scenario": "agent_feedback",
+      "profile": "default",
+      "backend_metadata": "available",
+      "prompt": "Report this reproducible Odoo connector bug to the MCP development team with its impact, expected behavior, actual behavior, and steps.",
+      "expected": {
+        "visible_tools": ["odoo_submit_feedback"],
+        "hidden_tools": ["odoo_delete_records"],
+        "preferred_tools": ["odoo_submit_feedback"],
+        "forbidden_tools": ["odoo_create_records", "odoo_post_message"],
+        "assertions": [
+          "The dedicated feedback transaction is preferred over composing generic task and Chatter mutations.",
+          "No prompt, credential, full tool arguments, tool result, or unrelated record content is copied into the report."
+        ]
+      }
+    },
     {
       "id": "chatgpt_direct_public_method",
       "scenario": "direct_method",

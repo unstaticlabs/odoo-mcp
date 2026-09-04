@@ -38,8 +38,9 @@ describe("canonical capability registry", () => {
     expect(names).toContain("odoo_search_records");
     expect(names).toContain("odoo_create_records");
     expect(names).toContain("odoo_call_method");
+    expect(names).toContain("odoo_submit_feedback");
     expect(names).not.toContain("odoo_delete_records");
-    expect(registry.profileBudget("default")).toMatchObject({ tools: 21 });
+    expect(registry.profileBudget("default")).toMatchObject({ tools: 22 });
     expect(registry.profileBudget("default").schemaTokens).toBeLessThanOrEqual(15_000);
   });
 
@@ -47,8 +48,10 @@ describe("canonical capability registry", () => {
     const registry = createCapabilityRegistry(new OdooClient());
     for (const profile of ["default", "advanced", "accounting", "projects", "documents", "b2c"] as const) {
       expect(registry.list(profile).map((item) => item.name), profile).toContain("odoo_call_method");
+      expect(registry.list(profile).map((item) => item.name), profile).toContain("odoo_submit_feedback");
     }
     expect(registry.list("read-only").map((item) => item.name)).not.toContain("odoo_call_method");
+    expect(registry.list("read-only").map((item) => item.name)).not.toContain("odoo_submit_feedback");
     expect(registry.search("public method escape hatch", 5).map((item) => item.metadata.name))
       .toContain("odoo_call_method");
   });
