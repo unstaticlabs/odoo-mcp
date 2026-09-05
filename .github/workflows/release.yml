@@ -16,8 +16,46 @@ env:
   IMAGE: ghcr.io/unstaticlabs/odoo-mcp
 
 jobs:
+  test:
+    name: Test exact Odoo MCP source
+    runs-on: ubuntu-latest
+    outputs:
+      evidence_sha256: ${{ steps.evidence.outputs.sha256 }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 26
+          cache: npm
+
+      - name: Install frozen dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Run complete tests
+        run: npm test
+
+      - name: Build production output
+        run: npm run build
+
+      - name: Validate agent evaluation corpus
+        run: node dist/evals/cli.js validate
+
+      - name: Bind exact source and test evidence
+        id: evidence
+        run: |
+          evidence="$(git ls-files src test evals package.json package-lock.json tsconfig.json release scripts | sort | xargs sha256sum | sha256sum | cut -d' ' -f1)"
+          printf '%s\n' "$evidence" | grep -Eq '^[0-9a-f]{64}$'
+          echo "sha256=$evidence" >> "$GITHUB_OUTPUT"
+
   publish:
     name: Publish immutable Odoo MCP image
+    needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -32,20 +70,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 26
-          cache: npm
-
-      - name: Qualify source
-        run: |
-          npm ci
-          npm run typecheck
-          npm test
-          npm run build
-          node dist/evals/cli.js validate
 
       - name: Resolve immutable component inputs
         id: inputs
@@ -143,14 +167,15 @@ jobs:
         id: metadata
         env:
           DIGEST: ${{ steps.release.outputs.digest }}
+          TEST_EVIDENCE: ${{ needs.test.outputs.evidence_sha256 }}
         run: |
           artifact_name="odoo-mcp-release-$GITHUB_SHA"
-          evidence="$(git ls-files src test evals package.json package-lock.json release | xargs sha256sum | sha256sum | cut -d' ' -f1)"
+          printf '%s\n' "$TEST_EVIDENCE" | grep -Eq '^[0-9a-f]{64}$'
           node scripts/release-contract.mjs \
             --commit "$GITHUB_SHA" \
             --image "$IMAGE@$DIGEST" \
             --input '${{ steps.inputs.outputs.digest }}' \
-            --evidence "$evidence" \
+            --evidence "$TEST_EVIDENCE" \
             --output odoo-mcp-release.json
           echo "artifact_name=$artifact_name" >> "$GITHUB_OUTPUT"
 

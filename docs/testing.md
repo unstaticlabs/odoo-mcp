@@ -11,7 +11,7 @@ npm run eval:validate
 docker build -t usl-odoo-mcp:test .
 ```
 
-`npm run check` runs strict TypeScript checking, all `test/vps` unit/protocol tests, all `test/evals` corpus/interface tests, and a production build. CI performs the same checks and builds the container.
+`npm run check` runs strict TypeScript checking, all `test/vps` unit/protocol tests, all `test/evals` corpus/interface tests, and a production build. CI performs the same checks and builds the container. The npm cache stores downloaded packages, while Buildx shares Docker layers between pull-request and publication builds. Test results themselves are always recomputed for each commit.
 
 The default suite covers:
 

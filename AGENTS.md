@@ -21,6 +21,15 @@ This repository is the canonical MCP for the self-hosted USL Odoo Distribution. 
 - Add or update registry, schema, adapter, protocol, and evaluation tests with contract changes.
 - Use `npm run check` before committing. Run `npm run test:integration` with a disposable Distribution fixture database for integration changes.
 - Use Conventional Commits. Keep runtime, capability, evaluation, and documentation changes reviewable.
+- Protected CI/GitOps is the default delivery path, not an exclusive one. When
+  the user explicitly authorizes it, an operator may deploy MCP manually and
+  may bypass CI. Before a production mutation, verify a current qualified,
+  restorable backup, including the MCP OAuth vault where applicable, and
+  confirm that the current GitOps checkout and desired-state ledgers describe
+  the intended MCP and Odoo release pair.
+- Release and promotion MRs intentionally require zero approving reviews so
+  qualified pipelines can merge unattended. Generated SBOMs are passive build
+  metadata and are not an admission or enforcement gate.
 
 ## Repository knowledge
 
