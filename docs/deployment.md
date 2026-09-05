@@ -1,11 +1,28 @@
 # VPS deployment and rollback
 
-Every `main` build publishes an immutable, attested
+Every `main` build first runs a dedicated `test` job: frozen dependency install,
+typechecking, the complete test suite, production build, and evaluation-corpus
+validation. Only a successful test job permits `publish`, which consumes the
+exact source/test evidence digest without repeating those host-side commands.
+The npm cache stores downloaded packages and the PR/release workflows share
+Docker layers through the same Buildx cache; neither mechanism reuses test
+results across commits.
+
+Every successful `main` build publishes an immutable, attested
 `usl-odoo-mcp-oci-release/v2` artifact. It binds the image to the supported
 Odoo series, required modules/actions, qualification evidence, and OAuth-vault
 migration. GitOps may replace MCP independently only after this contract passes
 against staging. MCP-only promotion backs up and migrates the OAuth vault; it
 never restarts Odoo, PostgreSQL, Paperless, or Sign.
+
+Protected CI/GitOps is the default delivery path, not an exclusive authority.
+When the owner explicitly instructs it, an operator may deploy MCP manually and
+may bypass CI. Before a production mutation, verify the current qualified
+backup, including the OAuth vault when applicable, and confirm that the current
+GitOps checkout and desired-state ledgers describe the exact intended MCP/Odoo
+release pair. Release and promotion MRs intentionally require zero approving
+reviews and may merge unattended after their checks pass. Generated SBOMs are
+passive build metadata, not an admission or enforcement gate.
 
 Image reuse is limited to a retry of the exact same source revision. The
 release workflow verifies the OCI source, revision, and component-input labels
