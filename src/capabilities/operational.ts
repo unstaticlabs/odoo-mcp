@@ -163,7 +163,7 @@ export function registerOperationalCapabilities(registry: CapabilityRegistry, cl
     keywords: ["project", "task", "create", "assignment", "deadline", "dependency"],
     requiredModules: ["project"],
     requiredModelAccess: [{ model: "project.task", operation: "create" }],
-    defaultVisible: false,
+    defaultVisible: true,
     alwaysLoad: false,
     sortOrder: 560,
     input: z.object({
@@ -360,7 +360,7 @@ export function registerOperationalCapabilities(registry: CapabilityRegistry, cl
       { model: "hr.expense", operation: "read" },
       { model: "ir.attachment", operation: "read" }
     ],
-    defaultVisible: false,
+    defaultVisible: true,
     alwaysLoad: false,
     sortOrder: 270,
     input: z.object({
@@ -416,7 +416,7 @@ export function registerOperationalCapabilities(registry: CapabilityRegistry, cl
     keywords: ["expense", "draft", "category", "account", "analytic", "tax", "paid by"],
     requiredModules: ["hr_expense"],
     requiredModelAccess: [{ model: "hr.expense", operation: "write" }],
-    defaultVisible: false,
+    defaultVisible: true,
     alwaysLoad: false,
     sortOrder: 590,
     input: z.object({
@@ -498,7 +498,7 @@ export function registerOperationalCapabilities(registry: CapabilityRegistry, cl
     requiredModules: ["account", "usl_accounting"],
     requiredPublicMethods: [{ model: "account.move", method: "configure_draft_vendor_bill" }],
     requiredModelAccess: [{ model: "account.move", operation: "write" }],
-    defaultVisible: false,
+    defaultVisible: true,
     alwaysLoad: false,
     sortOrder: 600,
     input: z.object({

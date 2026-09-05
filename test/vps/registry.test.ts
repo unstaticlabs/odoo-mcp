@@ -41,7 +41,7 @@ describe("canonical capability registry", () => {
     expect(names).toContain("odoo_submit_feedback");
     expect(names).toContain("activities_schedule");
     expect(names).not.toContain("odoo_delete_records");
-    expect(registry.profileBudget("default")).toMatchObject({ tools: 23 });
+    expect(registry.profileBudget("default")).toMatchObject({ tools: 31 });
     expect(registry.profileBudget("default").schemaTokens).toBeLessThanOrEqual(15_000);
   });
 
@@ -55,6 +55,43 @@ describe("canonical capability registry", () => {
     expect(registry.list("read-only").map((item) => item.name)).not.toContain("odoo_submit_feedback");
     expect(registry.search("public method escape hatch", 5).map((item) => item.metadata.name))
       .toContain("odoo_call_method");
+  });
+
+  it("exposes complete document and draft-preparation workflows without widening permissions", async () => {
+    const registry = createCapabilityRegistry(new OdooClient());
+    const added = ["documents_search", "documents_get_content", "documents_create_download_url",
+      "documents_revoke_download_url", "projects_create_task", "expenses_get_context",
+      "expenses_update_draft", "expenses_configure_draft_vendor_bill"];
+    expect(await listedToolNames(registry)).toEqual(expect.arrayContaining(added));
+    const readOnly = await listedToolNames(registry, { ...requestContext(), profile: "read-only" });
+    expect(readOnly).toEqual(expect.arrayContaining(["documents_search", "documents_get_content", "expenses_get_context"]));
+    for (const name of added.filter((name) => !["documents_search", "documents_get_content", "expenses_get_context"].includes(name))) {
+      expect(readOnly).not.toContain(name);
+    }
+    const disabled = await listedToolNames(registry, { ...requestContext(), enabledFeatures: new Set() });
+    expect(disabled).toContain("documents_search");
+    expect(disabled).not.toContain("documents_create_download_url");
+    expect(disabled).not.toContain("documents_revoke_download_url");
+    const restricted = requestContext();
+    restricted.availableModelAccess!.set("project.task", { read: true, create: false, write: false, unlink: false });
+    restricted.availableModelAccess!.set("hr.expense", { read: true, create: false, write: false, unlink: false });
+    restricted.availableModelAccess!.set("account.move", { read: true, create: false, write: false, unlink: false });
+    const names = await listedToolNames(registry, restricted);
+    for (const name of ["projects_create_task", "expenses_update_draft", "expenses_configure_draft_vendor_bill"]) {
+      expect(names).not.toContain(name);
+    }
+  });
+
+  it("does not recommend an action because its description says it cannot do the requested operation", () => {
+    const registry = createCapabilityRegistry(new OdooClient());
+    for (const query of ["approve expense", "submit expense", "post expense"]) {
+      const options = { profile: "default" as const };
+      expect(registry.recommendFallback(query, registry.search(query, 20, options), options)?.name)
+        .toBe("odoo_call_method");
+    }
+    const options = { profile: "default" as const };
+    expect(registry.recommendFallback("draft expense tax", registry.search("draft expense tax", 20, options), options)?.name)
+      .toBe("expenses_update_draft");
   });
 
   it("treats profiles as filtered canonical views without leaking advanced tools", () => {

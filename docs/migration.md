@@ -27,7 +27,7 @@ The most common mappings are:
 | create/update variants | `odoo_create_records`, `odoo_update_records` |
 | deletion | default `odoo_archive_records`; advanced `odoo_delete_records` |
 | chatter message variants | `odoo_post_message` |
-| arbitrary model method | deferred `odoo_call_method` in every writable profile |
+| arbitrary model method | static `odoo_call_method` in writable named profiles; deferred only on `all` |
 | thin project list/get wrappers | generic search/read or `projects_get_task_context` |
 | legacy document model access | `documents_*` capabilities backed by `usl.document` |
 | expense/batch workflow chains | fixed-intent `expenses_*` and `expense_batches_*` actions |
@@ -42,7 +42,7 @@ Old offset pagination, heterogeneous batch writes, duplicated server-specific to
 - Cursor-oriented searches replace offset variants.
 - Direct mutations receive one attempt. There is no generic replay key or deployed transaction-replay service.
 - An ambiguous mutation transport failure returns unknown completion and requires Odoo reconciliation.
-- The unrestricted public-method escape hatch is preserved but renamed, deferred, and truthfully annotated as potentially destructive/non-idempotent.
+- The unrestricted public-method escape hatch is preserved but renamed and truthfully annotated as potentially destructive/non-idempotent. Only `/mcp/all` defers it.
 - Specialized capabilities disappear when the owning Distribution module is definitively absent; generic discovery/read remains.
 - The document archive contract is the Distribution facade rather than an Enterprise application model.
 - `odoo_describe_environment` now reports the Agent, accountable owner, credential expiry and effective companies. Human keys, suspended Agents and expired Agent credentials fail before tools are exposed.

@@ -65,10 +65,10 @@ Required runtime configuration:
 3. Run `node dist/auth/cli.js prepare` with the candidate image and production mounts so migrations complete and active OAuth access snapshots are warm.
 4. Start the candidate container without removing the preceding image.
 5. Require `GET /healthz` to return `status=ok`.
-6. Require `GET /readyz` to return `status=ready`, the default tool budget within 23/15,000, OAuth `ready` or deliberately `disabled`, and analytics `ready` or deliberately `disabled`. Analytics `degraded` does not make the MCP unavailable, but fix it before treating telemetry as complete.
+6. Require `GET /readyz` to return `status=ready`, the default tool budget within 31/15,000, OAuth `ready` or deliberately `disabled`, and analytics `ready` or deliberately `disabled`. Analytics `degraded` does not make the MCP unavailable, but fix it before treating telemetry as complete.
 7. Run the authenticated MCP initialization/tool-list smoke test and a bounded Odoo read.
 8. Run a hosted OAuth reconnect test when OAuth is enabled.
-9. Rescan and reconnect the ChatGPT connector, then manually run the seven `evals/chatgpt-golden-prompts.json` acceptance scenarios.
+9. Rescan and reconnect the ChatGPT connector, start a new conversation, then manually run `evals/chatgpt-golden-prompts.json`. Verify the named schemas, not just the count or catalogue recommendations.
 10. Shift reverse-proxy traffic and monitor content-free error/latency events.
 
 The process handles `SIGTERM`/`SIGINT` by closing the listener and OAuth vault, then attempting a bounded two-second analytics flush. Give the container a normal termination grace period; PostHog failure never delays shutdown beyond that bound and in-flight mutations are not replayed after termination.
@@ -90,7 +90,7 @@ Odoo records, authorization, and business audit history remain in Odoo and follo
 
 ## Document materialization dependency
 
-The deferred `documents_create_download_url` and `documents_revoke_download_url`
+The `documents_create_download_url` and `documents_revoke_download_url`
 tools require the coordinated `usl_documents` backend public methods and Paperless
 `3.0.5-usl.9`. Until these changes reach `19-usl`, the authoritative Distribution
 source is `usl/codex/chore-post-migration-continuous-operations`. The MCP does not

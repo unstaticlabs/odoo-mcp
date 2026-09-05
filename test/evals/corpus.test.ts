@@ -64,8 +64,10 @@ describe("agent-interface evaluation corpus", () => {
       "specialized_tool_preference",
       "missing_doc_bearer",
       "read_only_identity",
-      "irreversible_deletion"
+      "irreversible_deletion",
+      "everyday_workflow"
     ]));
+    expect(new Set(golden.prompts.map((prompt) => prompt.id)).size).toBe(golden.prompts.length);
     for (const prompt of golden.prompts) {
       expect(
         [
@@ -76,6 +78,11 @@ describe("agent-interface evaluation corpus", () => {
         ].every((name) => knownTools.has(name)),
         prompt.id
       ).toBe(true);
+      if (prompt.backend_metadata === "available") {
+        const names = registry.list(prompt.profile).map((tool) => tool.name);
+        for (const name of prompt.expected.visible_tools) expect(names, prompt.id).toContain(name);
+        for (const name of prompt.expected.hidden_tools) expect(names, prompt.id).not.toContain(name);
+      }
     }
   });
 

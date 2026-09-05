@@ -29,11 +29,43 @@ Use `odoo_call_method` when a legitimate public Distribution method has no MCP s
 
 Current context helpers cover partners, record activities, project tasks, invoices, individual expenses, expense batches, Home attention, B2C orders, the rebuilt Accounting overview/reports, and the USL document archive. They return bounded high-signal context and warnings when optional linked context cannot be read.
 
-Document tools use the Distribution archive facade for search, context, bounded text, similarity, and catalogues. Link/unlink operations call one public archive method. `documents_create_download_url` is a deferred consequential action that explicitly materializes one exact authorized document version as a 30–900 second HTTPS bearer URL; `documents_revoke_download_url` ends that capability early. Search and read tools report binary availability but never create or return bearer URLs.
+Document tools use the Distribution archive facade for search, context, bounded text, similarity, and catalogues. Link/unlink operations call one public archive method. `documents_create_download_url` is a consequential action that issues a 30–900 second HTTPS bearer URL for one exact authorized document version; `documents_revoke_download_url` ends that capability early. Both are static on `/mcp` when available and deferred only on `/mcp/all`. Search and read tools report binary availability but never create or return bearer URLs. Issuance does not prove the client downloaded bytes; see the [qualification runbook](document-materialization.md).
 
 Thin domain list/get wrappers are intentionally absent where generic search/read already communicates the task cleanly.
 
-## Business actions
+## Everyday ChatGPT workflows
+
+The default profile promotes eight existing tools, without changing handlers,
+schemas, effects, authorization, or the one-attempt mutation contract. The complete
+candidate surface is 31 tools / 14,988 estimated input/output schema tokens. The
+count is 29 when materialization is disabled and can be lower when Odoo modules,
+methods or access are unavailable. Schema estimates are not measured model usage.
+
+| Workflow | Static tools on `/mcp` |
+| --- | --- |
+| Find and read documents | `documents_search`, `documents_get_context`, `documents_get_content` |
+| Obtain original bytes and clean up | `documents_create_download_url`, `documents_revoke_download_url` |
+| Create and maintain tasks | `projects_create_task`, `projects_get_task_context`, `odoo_update_records` |
+| Chatter and follow-ups | `odoo_post_message`, `activities_list_for_record`, `activities_schedule` |
+| Prepare expenses | `expenses_get_context`, `expenses_update_draft` |
+| Prepare vendor bills/credit notes | `accounting_get_invoice_context`, `expenses_configure_draft_vendor_bill` |
+| Report a connector issue | `odoo_submit_feedback` |
+
+Activity rescheduling/editing still uses the generic update tool where Odoo
+permits it; completion uses the documented public method via `odoo_call_method`.
+This release does not introduce new activity methods or expand their permissions.
+Likewise, less-common document linking/catalogue operations and expense
+approval/posting remain available in thematic profiles or through the inspected
+public-method fallback, not newly promoted into default.
+
+Prefer a matching visible workflow tool. Use capability search when the action
+is unclear; do not repeatedly search hoping to load an absent schema. Returning
+a tool name cannot activate it. Keep `/mcp/all` for clients with verified host-side
+tool search; its five immediate-loading primitives and deferred metadata remain
+unchanged. Reconnect and start a new ChatGPT conversation before comparing the
+actual tool list and running the golden prompts.
+
+## Business action catalogue
 
 Current actions cover:
 
@@ -52,7 +84,7 @@ Actions do not bypass Odoo state or permissions. The agent should read the relev
 
 | URL | Intended visible surface |
 | --- | --- |
-| `/mcp` | Static broad default for general agents; maximum 23 tools/15k estimated schema tokens. |
+| `/mcp` | Static everyday workflows plus generic substrate; maximum 31 tools/15k estimated schema tokens. |
 | `/mcp/all` | Complete catalogue with deferred-loading metadata. |
 | `/mcp/read-only` | Every read capability currently available. |
 | `/mcp/accounting` | Universal core plus accounting, expenses, and related document actions. |

@@ -1,6 +1,90 @@
 {
-  "version": "2026-09-04",
+  "version": "2026-09-05",
   "prompts": [
+    {
+      "id": "chatgpt_document_text_without_grant",
+      "scenario": "everyday_workflow",
+      "profile": "default",
+      "backend_metadata": "available",
+      "prompt": "Find the synthetic QA supplier invoice and tell me its payment deadline from the extracted text. I do not need the PDF.",
+      "expected": {
+        "visible_tools": ["documents_search", "documents_get_context", "documents_get_content"],
+        "hidden_tools": ["odoo_delete_records"],
+        "preferred_tools": ["documents_search", "documents_get_content"],
+        "forbidden_tools": ["documents_create_download_url", "odoo_call_method"],
+        "assertions": ["Prefer bounded archive search and paginated text over model introspection.", "No bearer grant is issued for a text-only request."]
+      }
+    },
+    {
+      "id": "chatgpt_document_download_and_revoke",
+      "scenario": "everyday_workflow",
+      "profile": "default",
+      "backend_metadata": "available",
+      "prompt": "Download the disposable QA PDF for visual inspection, verify its bytes, then revoke its temporary download link even if retrieval fails.",
+      "expected": {
+        "visible_tools": ["documents_search", "documents_get_context", "documents_create_download_url", "documents_revoke_download_url"],
+        "hidden_tools": ["odoo_delete_records"],
+        "preferred_tools": ["documents_get_context", "documents_create_download_url", "documents_revoke_download_url"],
+        "forbidden_tools": ["odoo_call_method"],
+        "assertions": ["Each named tool is callable without another discovery/profile step.", "Grant issuance is not described as successful byte retrieval.", "Use the client file/network tool for download; verify size/checksum and revoke by grant ID in cleanup.", "Do not reproduce the bearer URL in the final answer or evaluation artifact."]
+      }
+    },
+    {
+      "id": "chatgpt_create_task_and_followup",
+      "scenario": "everyday_workflow",
+      "profile": "default",
+      "backend_metadata": "available",
+      "prompt": "Create a disposable QA task in the test project, post an internal note, and schedule a Call activity for the test assignee tomorrow.",
+      "expected": {
+        "visible_tools": ["projects_create_task", "projects_get_task_context", "odoo_post_message", "activities_list_for_record", "activities_schedule"],
+        "hidden_tools": ["odoo_delete_records"],
+        "preferred_tools": ["projects_create_task", "odoo_post_message", "activities_schedule"],
+        "forbidden_tools": ["odoo_call_method", "odoo_create_records"],
+        "assertions": ["Resolve project, activity type, assignee and date from live QA context, not guessed IDs.", "Each requested action is one separate transaction; do not claim multi-tool atomicity.", "After an unknown outcome, reconcile instead of blindly repeating a mutation."]
+      }
+    },
+    {
+      "id": "chatgpt_prepare_draft_expense",
+      "scenario": "everyday_workflow",
+      "profile": "default",
+      "backend_metadata": "available",
+      "prompt": "Check the disposable draft expense and correct its tax configuration for review. Do not submit or approve it.",
+      "expected": {
+        "visible_tools": ["expenses_get_context", "expenses_update_draft"],
+        "hidden_tools": ["expenses_approve", "expense_batches_post"],
+        "preferred_tools": ["expenses_get_context", "expenses_update_draft"],
+        "forbidden_tools": ["odoo_call_method", "expenses_approve", "expense_batches_post"],
+        "assertions": ["Read the draft state and tax IDs before the single curated update.", "A description saying does not approve must not route an approval request to this editing tool."]
+      }
+    },
+    {
+      "id": "chatgpt_configure_draft_bill_taxes",
+      "scenario": "everyday_workflow",
+      "profile": "default",
+      "backend_metadata": "available",
+      "prompt": "Prepare the disposable draft vendor credit note: correct the reference and replace taxes on its existing product line, without posting it.",
+      "expected": {
+        "visible_tools": ["accounting_get_invoice_context", "expenses_configure_draft_vendor_bill"],
+        "hidden_tools": ["odoo_delete_records"],
+        "preferred_tools": ["accounting_get_invoice_context", "expenses_configure_draft_vendor_bill"],
+        "forbidden_tools": ["odoo_call_method", "odoo_update_records"],
+        "assertions": ["Use one atomic configuration action after confirming draft state and existing product-line ownership.", "Do not pass generated tax/payment-term lines as edits or claim posting/reconciliation occurred."]
+      }
+    },
+    {
+      "id": "chatgpt_deferred_document_discovery",
+      "scenario": "everyday_workflow",
+      "profile": "all",
+      "backend_metadata": "available",
+      "prompt": "In a separate deferred-discovery developer connection, find and read the synthetic QA invoice text without downloading its binary.",
+      "expected": {
+        "visible_tools": ["odoo_search_capabilities", "documents_search", "documents_get_content"],
+        "hidden_tools": [],
+        "preferred_tools": ["documents_search", "documents_get_content"],
+        "forbidden_tools": ["documents_create_download_url"],
+        "assertions": ["Record the raw tools/list separately from schemas actually acquired by the host.", "Only claim progressive loading works after a deferred tool schema is materialized and called.", "Do not change the primary /mcp connection as part of this experiment."]
+      }
+    },
     {
       "id": "chatgpt_structured_agent_feedback",
       "scenario": "agent_feedback",

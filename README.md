@@ -4,17 +4,17 @@ One agent-facing MCP for the self-hosted USL Odoo Distribution. It runs as a Nod
 
 The interface deliberately combines:
 
-- five always-loaded discovery and read primitives;
+- five discovery and read primitives preferred for initial loading on `/mcp/all`;
 - a broad generic Odoo substrate for cross-domain and unanticipated work;
-- deferred semantic context tools and fixed-intent business actions;
+- statically callable everyday workflow tools on `/mcp`, with deferred discovery on `/mcp/all`;
 - thematic profiles generated from one capability registry;
 - Odoo-authoritative permissions, record rules, company scope, and transactions.
 - a governed autonomous Agent identity for every connection.
 
-Tool visibility is context optimization, not authorization. `odoo_call_method` is part of every writable profile as a deferred, one-shot escape hatch for any Odoo-public JSON-2 method; Odoo remains the authority for public-method dispatch and access.
+Tool visibility is context optimization, not authorization. `odoo_call_method` is a statically advertised, one-shot escape hatch on writable named profiles, deferred only on `/mcp/all`; Odoo remains the authority for public-method dispatch and access.
 
 Documents remain metadata/text-only until an agent explicitly invokes the
-deferred `documents_create_download_url` action. Odoo then issues a revocable,
+explicit `documents_create_download_url` action. Odoo then issues a revocable,
 short-lived URL for one exact version; ordinary searches and reads never create
 bearer capabilities.
 
@@ -28,7 +28,14 @@ bearer capabilities.
 - Stateless MCP requests; no application-level MCP session store.
 - Optional, fail-open, privacy-filtered PostHog MCP Analytics.
 
-The default surface contains 23 tools and remains below the 15,000 estimated schema-token budget. Only these tools are marked for immediate loading:
+The default surface contains up to 31 statically advertised tools (14,988 estimated
+schema tokens, below the 15,000 budget). Odoo availability, access and feature flags
+may reduce the count. Everyday document, project, activity, Chatter, feedback and
+draft-accounting workflows do not require a profile switch. See the
+[workflow map](docs/tool-catalogue.md#everyday-chatgpt-workflows).
+
+Only `/mcp/all` uses deferred-loading hints. On that endpoint these five tools
+are marked for immediate loading:
 
 1. `odoo_search_capabilities`
 2. `odoo_search_models`
