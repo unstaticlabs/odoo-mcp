@@ -164,6 +164,18 @@ export function createHttpApp(
         response.status(503).json({ error: "surface_warming", message: error.message });
         return;
       }
+      if (error instanceof OdooError && (
+        error.retryable
+        || (error.httpStatus !== null && error.httpStatus >= 500)
+        || ["network_error", "timeout"].includes(error.code)
+      )) {
+        response.setHeader("Retry-After", "5");
+        response.status(503).json({
+          error: "mcp_upstream_unavailable",
+          message: "Odoo is temporarily unavailable. Retry after the indicated delay."
+        });
+        return;
+      }
       response.status(401).json({
         error: error instanceof OdooError
           ? error.policyCode ?? "invalid_odoo_credentials"
@@ -189,7 +201,7 @@ export function createHttpApp(
         oauthStatus = "error";
       }
     }
-    const ready = budget.tools <= 22 && budget.schemaTokens <= 15_000 && oauthStatus !== "error";
+    const ready = budget.tools <= 23 && budget.schemaTokens <= 15_000 && oauthStatus !== "error";
     response.json({
       schema: "usl-odoo-mcp-readiness/v1",
       status: ready ? "ready" : "not_ready",

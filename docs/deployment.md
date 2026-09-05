@@ -65,7 +65,7 @@ Required runtime configuration:
 3. Run `node dist/auth/cli.js prepare` with the candidate image and production mounts so migrations complete and active OAuth access snapshots are warm.
 4. Start the candidate container without removing the preceding image.
 5. Require `GET /healthz` to return `status=ok`.
-6. Require `GET /readyz` to return `status=ready`, the default tool budget within 22/15,000, OAuth `ready` or deliberately `disabled`, and analytics `ready` or deliberately `disabled`. Analytics `degraded` does not make the MCP unavailable, but fix it before treating telemetry as complete.
+6. Require `GET /readyz` to return `status=ready`, the default tool budget within 23/15,000, OAuth `ready` or deliberately `disabled`, and analytics `ready` or deliberately `disabled`. Analytics `degraded` does not make the MCP unavailable, but fix it before treating telemetry as complete.
 7. Run the authenticated MCP initialization/tool-list smoke test and a bounded Odoo read.
 8. Run a hosted OAuth reconnect test when OAuth is enabled.
 9. Rescan and reconnect the ChatGPT connector, then manually run the seven `evals/chatgpt-golden-prompts.json` acceptance scenarios.

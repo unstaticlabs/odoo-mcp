@@ -297,7 +297,7 @@ export function registerOperationalCapabilities(registry: CapabilityRegistry, cl
     keywords: ["activity", "todo", "follow-up", "deadline", "assign"],
     requiredModules: ["mail"],
     requiredAnyPublicMethods: ["activity_schedule"],
-    defaultVisible: false,
+    defaultVisible: true,
     alwaysLoad: false,
     sortOrder: 580,
     input: z.object({

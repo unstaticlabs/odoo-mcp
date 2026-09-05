@@ -28,7 +28,7 @@ bearer capabilities.
 - Stateless MCP requests; no application-level MCP session store.
 - Optional, fail-open, privacy-filtered PostHog MCP Analytics.
 
-The default surface contains 22 tools and remains below the 15,000 estimated schema-token budget. Only these tools are marked for immediate loading:
+The default surface contains 23 tools and remains below the 15,000 estimated schema-token budget. Only these tools are marked for immediate loading:
 
 1. `odoo_search_capabilities`
 2. `odoo_search_models`
