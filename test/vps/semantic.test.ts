@@ -114,6 +114,7 @@ describe("Distribution semantic and business capabilities", () => {
       }
     });
     expect(result.structuredContent).toMatchObject({
+      warnings: [expect.stringContaining("file bytes have not been downloaded or verified")],
       data: {
         grant_id: "1fcae9e6-c713-42c5-9d1f-e1ba8dc76b40",
         document: {
