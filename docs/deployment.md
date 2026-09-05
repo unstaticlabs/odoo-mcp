@@ -107,11 +107,15 @@ tools while leaving document search, metadata, and OCR available.
 
 Before exposing the tools, configure Odoo's frozen HTTPS `web.base.url` and the
 Distribution's `/agent-documents/<43-character-token>` ingress contract. That
-route must suppress access logs, strip spoofed `X-USL-Document-Grant` headers,
+route must suppress access and URI-bearing error logs, strip spoofed `X-USL-Document-Grant` headers,
 rewrite to the private fixed Odoo controller, preserve Range/If-Range, and
 disable caching. Keep Odoo and Paperless ports private. The authoritative Nginx
 and Caddy examples live in the Distribution runbook
 `docs/operations/document-materialization.md`.
+
+Use the [materialization qualification runbook](document-materialization.md) to
+verify the public gateway, failure-path token secrecy, and actual byte retrieval.
+Grant issuance alone is not an end-to-end download test.
 
 Treat a returned URL as a temporary secret. MCP request telemetry must not log
 tool results. For rollback, set `MCP_DOCUMENT_MATERIALIZATION_ENABLED=false`

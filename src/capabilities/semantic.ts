@@ -711,7 +711,7 @@ export function registerBusinessActions(registry: CapabilityRegistry, client: Od
     name: "documents_create_download_url",
     title: "Create Document Download URL",
     description:
-      "Create one short-lived HTTPS bearer URL for the exact authorized binary of a known USL document. Use only when an agent needs the PDF/image bytes; document search, metadata, and OCR text do not require materialization. The URL is a temporary secret and issuance is not retried automatically.",
+      "Create one short-lived HTTPS bearer URL for the exact authorized binary of a known USL document. Use only for PDF/image bytes, not metadata or OCR text. Success confirms grant issuance, not download: fetch the URL with the client's file/network tool, verify size/checksum, then use documents_revoke_download_url when finished. Treat the URL as a temporary secret; issuance is not retried automatically.",
     layer: "business_action",
     toolsets: ["documents"],
     profiles: ["documents"],
@@ -770,7 +770,8 @@ export function registerBusinessActions(registry: CapabilityRegistry, client: Od
           checksum: result.checksum === false ? null : result.checksum,
           correlation_id: context.correlationId,
           outcome: "succeeded"
-        })
+        }),
+        warnings: ["Grant issued; file bytes have not been downloaded or verified by MCP. Fetch with the client's file/network tool, verify size/checksum, and revoke the grant when finished. Do not log or publish the bearer URL."]
       }), (result) => ({
         knownIds: [document_id],
         grantId: z.string().uuid().parse(result.grant_id)
