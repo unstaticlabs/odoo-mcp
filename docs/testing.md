@@ -63,7 +63,7 @@ Qualify the built image with MCP Inspector or an equivalent protocol client:
 5. start `dist/stdio.js` as a subprocess and execute discovery/read;
 6. connect current Codex and Claude Code/Desktop clients;
 7. complete hosted ChatGPT and Claude OAuth enrollment, refresh, reconnect, and revoke flows;
-8. rescan/reconnect the ChatGPT connector, verify the default 23-tool and degraded 8-tool surfaces, and run the feedback and discovery golden prompts.
+8. rescan/reconnect the ChatGPT connector and start a new conversation; verify the full 31-tool default surface (29 without materialization) and the degraded direct-HTTP 8-tool surface, then run the workflow, feedback and discovery golden prompts. OAuth without a valid complete snapshot returns warming rather than advertising a degraded manifest.
 
 Record client versions, MCP protocol negotiation, model IDs, date, image SHA, Distribution SHA, profile URL, and whether native tool search was enabled.
 

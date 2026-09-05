@@ -486,7 +486,7 @@ export function registerDocumentCapabilities(registry: CapabilityRegistry, clien
     keywords: ["archive", "document", "hybrid search", "semantic", "exact", "Paperless"],
     requiredModules: ["usl_documents"],
     requiredPublicMethods: [{ model: "usl.document", method: "mcp_search" }],
-    defaultVisible: false,
+    defaultVisible: true,
     alwaysLoad: false,
     sortOrder: 300,
     input: z.object({
@@ -575,7 +575,7 @@ export function registerDocumentCapabilities(registry: CapabilityRegistry, clien
     keywords: ["document text", "OCR", "content", "pagination"],
     requiredModules: ["usl_documents"],
     requiredPublicMethods: [{ model: "usl.document", method: "mcp_get_content" }],
-    defaultVisible: false,
+    defaultVisible: true,
     alwaysLoad: false,
     sortOrder: 320,
     input: z.object({
@@ -721,7 +721,7 @@ export function registerBusinessActions(registry: CapabilityRegistry, client: Od
     requiredModules: ["usl_documents"],
     requiredPublicMethods: [{ model: "usl.document", method: "mcp_create_download_grant" }],
     requiredFeatures: ["document_materialization"],
-    defaultVisible: false,
+    defaultVisible: true,
     alwaysLoad: false,
     sortOrder: 515,
     input: z.object({
@@ -799,7 +799,7 @@ export function registerBusinessActions(registry: CapabilityRegistry, client: Od
     requiredModules: ["usl_documents"],
     requiredPublicMethods: [{ model: "usl.document", method: "mcp_revoke_download_grant" }],
     requiredFeatures: ["document_materialization"],
-    defaultVisible: false,
+    defaultVisible: true,
     alwaysLoad: false,
     sortOrder: 516,
     input: z.object({

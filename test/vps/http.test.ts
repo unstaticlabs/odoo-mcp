@@ -74,7 +74,8 @@ function testServices(
     if (url.endsWith("/doc-bearer/index.json")) return Response.json({
       modules: [
         "base", "api_doc", "usl_access_control", "mail", "contacts", "project", "account",
-        "rebuild_account_migration", "usl_home", "usl_documents"
+        "rebuild_account_migration", "usl_home", "usl_documents", "usl_accounting",
+        "hr_expense", "usl_expense_batch"
       ],
       models: [...models].map((model) => ({
         model,
@@ -160,13 +161,37 @@ describe("VPS HTTP MCP transport", () => {
     await client.connect(transport);
     closeCallbacks.push(async () => client.close());
     const tools = await client.listTools();
-    expect(tools.tools).toHaveLength(23);
+    // Materialization is disabled in this configuration; both grants are absent.
+    expect(tools.tools).toHaveLength(29);
     expect(tools.tools.map((tool) => tool.name)).toContain("odoo_search_records");
     expect(tools.tools.map((tool) => tool.name)).toContain("odoo_call_method");
     expect(tools.tools.map((tool) => tool.name)).toContain("odoo_submit_feedback");
     expect(tools.tools.map((tool) => tool.name)).toContain("activities_schedule");
     expect(tools.tools.map((tool) => tool.name)).not.toContain("odoo_delete_records");
     expect(tools.tools.every((tool) => !("defer_loading" in (tool._meta ?? {})))).toBe(true);
+  });
+
+  it("lists every fixed workflow schema on /mcp while reserving deferral for /mcp/all", async () => {
+    const origin = await listeningServer({ ...configuration(), documentMaterializationEnabled: true });
+    for (const profile of ["default", "all"] as const) {
+      const transport = new StreamableHTTPClientTransport(new URL(profile === "default" ? `${origin}/mcp` : `${origin}/mcp/all`), {
+        requestInit: { headers: credentialHeaders }
+      });
+      const client = new Client({ name: "workflow-http-test", version: "1.0.0" });
+      await client.connect(transport);
+      closeCallbacks.push(async () => client.close());
+      const { tools } = await client.listTools();
+      if (profile === "default") expect(tools).toHaveLength(31);
+      for (const name of ["documents_search", "documents_get_content", "documents_create_download_url",
+        "documents_revoke_download_url", "projects_create_task", "expenses_get_context",
+        "expenses_update_draft", "expenses_configure_draft_vendor_bill", "activities_schedule", "odoo_post_message", "odoo_submit_feedback"]) {
+        const tool = tools.find((candidate) => candidate.name === name);
+        expect(tool, name).toBeDefined();
+        expect(tool?.inputSchema.additionalProperties, name).toBe(false);
+        if (profile === "default") expect(tool?._meta).not.toHaveProperty("defer_loading");
+        else expect(tool?._meta).toHaveProperty("defer_loading", true);
+      }
+    }
   });
 
   it("performs setup once while warm list and tool requests add only the business call", async () => {

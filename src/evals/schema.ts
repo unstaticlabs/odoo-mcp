@@ -80,7 +80,8 @@ export const ChatGptGoldenPromptSchema = z.object({
     "missing_doc_bearer",
     "read_only_identity",
     "irreversible_deletion",
-    "agent_feedback"
+    "agent_feedback",
+    "everyday_workflow"
   ]),
   profile: ProfileNameSchema,
   backend_metadata: z.enum(["available", "unavailable"]),
@@ -96,7 +97,7 @@ export const ChatGptGoldenPromptSchema = z.object({
 
 export const ChatGptGoldenPromptsSchema = z.object({
   version: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-  prompts: z.array(ChatGptGoldenPromptSchema).length(7)
+  prompts: z.array(ChatGptGoldenPromptSchema).min(7).max(40)
 }).strict();
 
 export type EvalCorpus = z.infer<typeof EvalCorpusSchema>;

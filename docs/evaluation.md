@@ -1,6 +1,6 @@
 # Agent-interface evaluation
 
-The reusable corpus is `evals/corpus.json`; exact logical fixture facts and relations are in `evals/fixtures/usl-eval-v1.json`. `evals/chatgpt-golden-prompts.json` adds six connector-metadata acceptance scenarios for direct and indirect long-tail actions, specialized-tool preference, missing `/doc-bearer`, read-only use, and irreversible deletion. Zod validation, observation schemas, and A/B/C/D/E surface generation live under `src/evals`. Run:
+The reusable corpus is `evals/corpus.json`; exact logical fixture facts and relations are in `evals/fixtures/usl-eval-v1.json`. `evals/chatgpt-golden-prompts.json` adds connector-metadata acceptance scenarios for everyday document/project/draft-accounting workflows, feedback, long-tail actions, specialized-tool preference, missing `/doc-bearer`, read-only use, irreversible deletion and the separate deferred endpoint. Zod validation, observation schemas, and A/B/C/D/E surface generation live under `src/evals`. Run:
 
 ```bash
 npm run eval:validate
@@ -21,6 +21,15 @@ The 60 tasks are fixed at:
 Every task has a stable ID, prompt, profile, thematic metadata, versioned fixture references, outcome class, bounded tool-call budget, accepted capabilities, forbidden capabilities, and factual/state assertions. Held-out tasks all name at least one generic fallback in their oracle.
 
 The ChatGPT golden prompts follow OpenAI's [metadata optimization](https://developers.openai.com/plugins/guides/optimize-metadata) and [connector testing](https://developers.openai.com/plugins/deploy/connect-chatgpt) guidance. Run them after the connector has been rescanned or reconnected so results reflect the deployed schema rather than a cached tool list.
+
+For the expanded fixed surface, compare strategy C on the preceding and candidate
+commits using the same disposable fixture and pinned client/model. Record task
+success, unnecessary introspection, repeated discovery, fallback use, tool calls,
+tokens and latency. In the full-availability fixture, the new everyday actions
+should use their dedicated tools; retain public-method fallback for long-tail work.
+The separate `/mcp/all` prompt tests actual host schema acquisition, not merely
+catalogue recommendations. Validation and token estimates are not evidence that
+ChatGPT performance improved; that requires recorded client runs.
 
 ## Compared surfaces
 
