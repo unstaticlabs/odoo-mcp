@@ -91,6 +91,9 @@ export function requestContext(accessMode: "read_only" | "read_write" | "mixed" 
       ["usl.home.service", new Set(["get_ai_attention"])],
       ["mail.activity", new Set(["activity_schedule"])],
       ["mail.thread", new Set(["action_archive", "message_post", "message_subscribe", "message_unsubscribe"])],
+      ["account.move", writeAccess
+        ? new Set(["configure_draft_vendor_bill"])
+        : new Set<string>()],
       ["hr.expense", writeAccess
         ? new Set([
             "action_reset",

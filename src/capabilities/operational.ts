@@ -34,6 +34,67 @@ const ActionOutputSchema = z.object({
   }).strict().optional()
 }).strict();
 
+const RelatedRecordSchema = z.object({
+  id: PositiveIdSchema,
+  name: z.string()
+}).strict().nullable();
+const VendorBillConfigurationResultSchema = z.object({
+  bill: z.object({
+    id: PositiveIdSchema,
+    display_name: z.string(),
+    move_type: z.enum(["in_invoice", "in_refund"]),
+    state: z.literal("draft"),
+    company: RelatedRecordSchema,
+    partner: RelatedRecordSchema,
+    currency: RelatedRecordSchema,
+    invoice_date: DateSchema.nullable(),
+    accounting_date: DateSchema.nullable(),
+    invoice_date_due: DateSchema.nullable(),
+    reference: z.string().nullable(),
+    review_state: z.enum(["no_review", "todo", "reviewed", "supervised", "anomaly"]),
+    amount_untaxed: z.number(),
+    amount_tax: z.number(),
+    amount_total: z.number()
+  }).strict(),
+  invoice_lines: z.array(z.object({
+    id: PositiveIdSchema,
+    name: z.string(),
+    product: RelatedRecordSchema,
+    account: RelatedRecordSchema,
+    quantity: z.number(),
+    price_unit: z.number(),
+    discount: z.number(),
+    tax_ids: z.array(PositiveIdSchema),
+    analytic_distribution: z.record(z.string(), z.number()),
+    price_subtotal: z.number(),
+    price_total: z.number()
+  }).strict()).max(500),
+  tax_lines: z.array(z.object({
+    id: PositiveIdSchema,
+    name: z.string(),
+    account: RelatedRecordSchema,
+    tax: RelatedRecordSchema,
+    balance: z.number(),
+    amount_currency: z.number()
+  }).strict()).max(500),
+  payable_lines: z.array(z.object({
+    id: PositiveIdSchema,
+    name: z.string(),
+    account: RelatedRecordSchema,
+    date_maturity: DateSchema.nullable(),
+    balance: z.number(),
+    amount_currency: z.number()
+  }).strict()).max(100)
+}).strict();
+const VendorBillConfigurationOutputSchema = z.object({
+  result: VendorBillConfigurationResultSchema,
+  correlation_id: z.string(),
+  outcome: z.enum(["succeeded", "unknown"]),
+  record: z.object({
+    model: z.string(), id: z.number().int(), display_name: z.string(), url: z.string()
+  }).strict()
+}).strict();
+
 function rpcContext(requested: Record<string, unknown>, context: RequestContext) {
   return attributedContext(requested, context.correlationId);
 }
@@ -427,14 +488,15 @@ export function registerOperationalCapabilities(registry: CapabilityRegistry, cl
     name: "expenses_configure_draft_vendor_bill",
     title: "Configure Draft Vendor Bill",
     description:
-      "Update curated header/review fields on one draft vendor bill after checking its live type and state. This does not edit lines, post, pay, reconcile, or change a non-vendor-bill journal entry.",
+      "Atomically update curated header fields and existing product lines on one draft vendor bill or credit note, including taxes and analytics. Odoo validates company, ownership, locks, access, type, and state, then returns recomputed totals, tax lines, and payable lines. This never posts, pays, reconciles, deletes user-entered lines, or accepts generated lines as input.",
     layer: "business_action",
     toolsets: ["expenses", "accounting"],
     profiles: ["accounting"],
     effect: "write",
     annotations: actionAnnotations,
-    keywords: ["vendor bill", "draft", "supplier", "invoice date", "review"],
-    requiredModules: ["account"],
+    keywords: ["vendor bill", "credit note", "draft", "supplier", "invoice date", "review", "tax", "reverse charge", "analytic", "line"],
+    requiredModules: ["account", "usl_accounting"],
+    requiredPublicMethods: [{ model: "account.move", method: "configure_draft_vendor_bill" }],
     requiredModelAccess: [{ model: "account.move", operation: "write" }],
     defaultVisible: false,
     alwaysLoad: false,
@@ -451,20 +513,24 @@ export function registerOperationalCapabilities(registry: CapabilityRegistry, cl
       narration: z.string().max(50_000).optional(),
       payment_reference: z.string().max(500).optional(),
       review_state: z.enum(["no_review", "todo", "reviewed", "supervised", "anomaly"]).optional(),
+      line_patches: z.array(z.object({
+        line_id: PositiveIdSchema,
+        name: z.string().trim().min(1).max(2_000).optional(),
+        account_id: PositiveIdSchema.optional(),
+        quantity: z.number().finite().optional(),
+        price_unit: z.number().finite().optional(),
+        discount: z.number().finite().min(0).max(100).optional(),
+        tax_ids: z.array(PositiveIdSchema).max(50).optional(),
+        analytic_distribution: z.record(z.string().min(1).max(200), z.number().finite())
+          .refine((distribution) => Object.keys(distribution).length <= 100, "At most 100 analytic entries are allowed")
+          .optional()
+      }).strict()).max(100).optional(),
       context: OdooContextSchema
     }).strict(),
-    output: ActionOutputSchema,
+    output: VendorBillConfigurationOutputSchema,
     async handler(input, context, signal) {
       const common = rpcContext(input.context, context);
-      const before = await client.call<Record<string, unknown>[]>(context, "account.move", "read", {
-        ids: [input.bill_id], fields: ["id", "state", "move_type", "display_name"], context: common
-      }, { signal });
-      if (!before[0]) throw new Error(`account.move,${input.bill_id} was not found or is not readable`);
-      if (before[0].state !== "draft" || !["in_invoice", "in_refund", "in_receipt"].includes(String(before[0].move_type))) {
-        throw new Error(`account.move,${input.bill_id} must be a draft vendor bill, refund, or receipt`);
-      }
-      const displayName = String(before[0].display_name ?? "");
-      const values = {
+      const headerValues = {
         ...(input.partner_id !== undefined ? { partner_id: input.partner_id } : {}),
         ...(input.invoice_date !== undefined ? { invoice_date: input.invoice_date } : {}),
         ...(input.accounting_date !== undefined ? { date: input.accounting_date } : {}),
@@ -476,26 +542,36 @@ export function registerOperationalCapabilities(registry: CapabilityRegistry, cl
         ...(input.payment_reference !== undefined ? { payment_reference: input.payment_reference } : {}),
         ...(input.review_state !== undefined ? { review_state: input.review_state } : {})
       };
-      if (Object.keys(values).length === 0) throw new Error("Supply at least one draft vendor bill field to update");
-      const receipt = await client.call<unknown>(context, "account.move", "write", {
-        ids: [input.bill_id], vals: values, context: common
-      }, {
-        kind: "mutation",
-        signal,
-        reconciliation: {
-          targetModel: "account.move",
-          knownIds: [input.bill_id],
-          fields: Object.keys(values),
-          suggestedTool: "odoo_read_records",
-          instructions: "Read the changed draft bill fields and compare them with the original patch. Preserve matching values and patch only fields that remain different."
+      if (Object.keys(headerValues).length === 0 && !input.line_patches?.length) {
+        throw new Error("Supply at least one draft vendor bill field or line patch");
+      }
+      const receipt = await client.call<z.infer<typeof VendorBillConfigurationResultSchema>>(
+        context,
+        "account.move",
+        "configure_draft_vendor_bill",
+        {
+          ids: [input.bill_id],
+          header_values: headerValues,
+          line_patches: input.line_patches ?? [],
+          context: common
+        }, {
+          kind: "mutation",
+          signal,
+          reconciliation: {
+            targetModel: "account.move",
+            knownIds: [input.bill_id],
+            fields: [...Object.keys(headerValues), ...(input.line_patches?.length ? ["invoice_line_ids"] : [])],
+            suggestedTool: "odoo_read_records",
+            instructions: "Read the draft vendor bill totals, review state, invoice lines, taxes, and payment terms. Compare them with the requested patch and do not repeat fields whose intended result is already present."
+          }
         }
-      });
+      );
       return receipt.finalize((result) => ({
         data: {
           result,
           correlation_id: context.correlationId,
           outcome: "succeeded" as const,
-          record: recordRef(context, "account.move", input.bill_id, displayName)
+          record: recordRef(context, "account.move", input.bill_id, result.bill.display_name)
         }
       }));
     }

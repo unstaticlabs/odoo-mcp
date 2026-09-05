@@ -109,6 +109,90 @@ describe("fixed-intent operational capabilities", () => {
     });
   });
 
+  it("configures a draft vendor bill through one atomic Odoo business method", async () => {
+    const configured = {
+      bill: {
+        id: 5161,
+        display_name: "BILL/2026/5161",
+        move_type: "in_invoice",
+        state: "draft",
+        company: { id: 1, name: "Unstatic Labs" },
+        partner: { id: 20, name: "Supplier" },
+        currency: { id: 1, name: "EUR" },
+        invoice_date: "2026-09-04",
+        accounting_date: "2026-09-04",
+        invoice_date_due: "2026-10-04",
+        reference: "INV-5161",
+        review_state: "reviewed",
+        amount_untaxed: 8.61,
+        amount_tax: 1.72,
+        amount_total: 10.33
+      },
+      invoice_lines: [{
+        id: 12390,
+        name: "Service",
+        product: null,
+        account: { id: 60, name: "Services" },
+        quantity: 1,
+        price_unit: 8.61,
+        discount: 0,
+        tax_ids: [26],
+        analytic_distribution: {},
+        price_subtotal: 8.61,
+        price_total: 10.33
+      }],
+      tax_lines: [{
+        id: 12391,
+        name: "VAT 20%",
+        account: { id: 61, name: "Deductible VAT" },
+        tax: { id: 26, name: "20% S" },
+        balance: 1.72,
+        amount_currency: 1.72
+      }],
+      payable_lines: [{
+        id: 12392,
+        name: "INV-5161",
+        account: { id: 62, name: "Payable" },
+        date_maturity: "2026-10-04",
+        balance: -10.33,
+        amount_currency: -10.33
+      }]
+    };
+    const fetcher = vi.fn<typeof fetch>(async () => Response.json(configured));
+    const client = await connected(fetcher);
+    const result = await client.callTool({
+      name: "expenses_configure_draft_vendor_bill",
+      arguments: {
+        bill_id: 5161,
+        review_state: "reviewed",
+        line_patches: [{ line_id: 12390, tax_ids: [26], price_unit: 8.61 }],
+        context: { allowed_company_ids: [1] }
+      }
+    });
+
+    expect(result.isError).not.toBe(true);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    const [url, init] = fetcher.mock.calls[0]!;
+    expect(String(url).endsWith("/json/2/account.move/configure_draft_vendor_bill")).toBe(true);
+    expect(JSON.parse(String(init?.body))).toEqual({
+      ids: [5161],
+      header_values: { review_state: "reviewed" },
+      line_patches: [{ line_id: 12390, tax_ids: [26], price_unit: 8.61 }],
+      context: {
+        allowed_company_ids: [1],
+        usl_agent_origin: "odoo-mcp",
+        usl_correlation_id: expect.any(String)
+      }
+    });
+    expect(result.structuredContent).toMatchObject({
+      data: {
+        result: configured,
+        outcome: "succeeded",
+        record: { model: "account.move", id: 5161 }
+      }
+    });
+  });
+
   it("reports when Odoo returns an approval wizard without reaching the approved state", async () => {
     const fetcher = vi.fn<typeof fetch>(async (url) => String(url).endsWith("/action_approve")
       ? Response.json({ type: "ir.actions.act_window", res_model: "hr.expense.approve.duplicate" })
