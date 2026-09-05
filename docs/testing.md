@@ -63,7 +63,7 @@ Qualify the built image with MCP Inspector or an equivalent protocol client:
 5. start `dist/stdio.js` as a subprocess and execute discovery/read;
 6. connect current Codex and Claude Code/Desktop clients;
 7. complete hosted ChatGPT and Claude OAuth enrollment, refresh, reconnect, and revoke flows;
-8. rescan/reconnect the ChatGPT connector, verify the default 22-tool and degraded 8-tool surfaces, and run the feedback and discovery golden prompts.
+8. rescan/reconnect the ChatGPT connector, verify the default 23-tool and degraded 8-tool surfaces, and run the feedback and discovery golden prompts.
 
 Record client versions, MCP protocol negotiation, model IDs, date, image SHA, Distribution SHA, profile URL, and whether native tool search was enabled.
 

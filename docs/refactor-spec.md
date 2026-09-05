@@ -70,7 +70,7 @@ Profiles are views over the same registry:
 
 | Profile | Surface |
 | --- | --- |
-| `default` | Broad generic substrate and common cross-domain context tools, at most 22 tools and 15,000 schema tokens |
+| `default` | Broad generic substrate and common cross-domain context tools, at most 23 tools and 15,000 schema tokens |
 | `all` | Entire catalogue for native tool search/deferred loading |
 | `read-only` | Every read capability; a visibility convenience, not credential authority |
 | `accounting`, `projects`, `documents`, `b2c` | Universal core plus tools carrying the corresponding tag |

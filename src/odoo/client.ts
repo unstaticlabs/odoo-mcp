@@ -819,8 +819,11 @@ export function toolFailureFromError(error: unknown) {
         : error.retryable
           ? "safe"
           : "never";
+    const publicCode = ["odoo_server_error", "network_error", "timeout"].includes(error.code)
+      ? "MCP_UPSTREAM_UNAVAILABLE"
+      : `ODOO_${error.code.toUpperCase()}`;
     return {
-      code: `ODOO_${error.code.toUpperCase()}`,
+      code: publicCode,
       message: error.message,
       retryable: unknownMutation ? false : error.retryable,
       condition_retryable: error.retryable,

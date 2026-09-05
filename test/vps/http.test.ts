@@ -56,7 +56,8 @@ const agentIdentity = {
 function testServices(
   config: ReturnType<typeof configuration>,
   identity: unknown = agentIdentity,
-  calls?: string[]
+  calls?: string[],
+  fetcherOverride?: typeof fetch
 ) {
   const access = requestContext();
   const publicMethods = new Set(
@@ -66,7 +67,7 @@ function testServices(
     ...access.availableModelAccess!.keys(),
     ...access.availablePublicMethods!.keys()
   ]);
-  const fetcher: typeof fetch = async (input) => {
+  const fetcher: typeof fetch = fetcherOverride ?? (async (input) => {
     const url = String(input);
     calls?.push(url);
     if (url.includes("/json/2/usl.agent/current_identity")) return Response.json(identity);
@@ -88,7 +89,7 @@ function testServices(
     });
     if (url.endsWith("/json/2/res.partner/search_read")) return Response.json([]);
     return Response.json({ message: "unexpected test request" }, { status: 404 });
-  };
+  });
   const client = new OdooClient(8, 1024 * 1024, fetcher);
   return {
     client,
@@ -102,9 +103,10 @@ function testServices(
 async function listeningServer(
   config = configuration(),
   identity: unknown = agentIdentity,
-  calls?: string[]
+  calls?: string[],
+  fetcherOverride?: typeof fetch
 ) {
-  const app = createHttpApp(config, testServices(config, identity, calls));
+  const app = createHttpApp(config, testServices(config, identity, calls, fetcherOverride));
   const server = app.listen(0, "127.0.0.1");
   await once(server, "listening");
   const address = server.address() as AddressInfo;
@@ -124,6 +126,22 @@ const credentialHeaders = {
 };
 
 describe("VPS HTTP MCP transport", () => {
+  it("reports a cold upstream outage as retryable service unavailability", async () => {
+    const origin = await listeningServer(
+      configuration(),
+      agentIdentity,
+      undefined,
+      async () => new Response("<html>Bad Gateway</html>", { status: 502 })
+    );
+    const response = await fetch(`${origin}/mcp`, { headers: credentialHeaders });
+    expect(response.status).toBe(503);
+    expect(response.headers.get("Retry-After")).toBe("5");
+    await expect(response.json()).resolves.toEqual({
+      error: "mcp_upstream_unavailable",
+      message: "Odoo is temporarily unavailable. Retry after the indicated delay."
+    });
+  });
+
   it("serves health/readiness and a modern stateless MCP client", async () => {
     const origin = await listeningServer();
     await expect(fetch(`${origin}/healthz`).then((response) => response.json())).resolves.toEqual({ status: "ok" });
@@ -142,10 +160,11 @@ describe("VPS HTTP MCP transport", () => {
     await client.connect(transport);
     closeCallbacks.push(async () => client.close());
     const tools = await client.listTools();
-    expect(tools.tools).toHaveLength(22);
+    expect(tools.tools).toHaveLength(23);
     expect(tools.tools.map((tool) => tool.name)).toContain("odoo_search_records");
     expect(tools.tools.map((tool) => tool.name)).toContain("odoo_call_method");
     expect(tools.tools.map((tool) => tool.name)).toContain("odoo_submit_feedback");
+    expect(tools.tools.map((tool) => tool.name)).toContain("activities_schedule");
     expect(tools.tools.map((tool) => tool.name)).not.toContain("odoo_delete_records");
     expect(tools.tools.every((tool) => !("defer_loading" in (tool._meta ?? {})))).toBe(true);
   });
