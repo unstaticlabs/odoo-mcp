@@ -25,6 +25,14 @@ async function connected(fetcher: typeof fetch) {
   return client;
 }
 
+// odoo_call_method consults the authenticated API document to learn whether Odoo
+// classifies the method as readonly. That GET is metadata, not a business call,
+// so the one-attempt mutation contract is asserted over JSON-2 calls only.
+function jsonCalls(fetcher: ReturnType<typeof vi.fn>, suffix = "") {
+  return fetcher.mock.calls.filter(([url]) =>
+    String(url).includes("/json/2/") && String(url).endsWith(suffix));
+}
+
 function requestBody(fetcher: ReturnType<typeof vi.fn>, method: string) {
   const call = fetcher.mock.calls.find(([url]) => String(url).endsWith(`/json/2/${method}`));
   expect(call, `${method} was not called`).toBeDefined();
@@ -92,7 +100,7 @@ describe("common Agent write paths", () => {
     expect(activity.structuredContent).toMatchObject({
       data: { correlation_id: "correlation-test", outcome: "succeeded" }
     });
-    expect(fetcher).toHaveBeenCalledTimes(4);
+    expect(jsonCalls(fetcher)).toHaveLength(4);
     expect(requestBody(fetcher, "project.task/write")).toEqual({
       ids: [492],
       vals: { description: "Confirmed itinerary", priority: "1" },
@@ -160,7 +168,7 @@ describe("common Agent write paths", () => {
       }
     });
 
-    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(jsonCalls(fetcher, "/project.task/activity_schedule")).toHaveLength(1);
     expect(result.isError).toBe(true);
     expect(JSON.parse(String(result.content[0]?.text))).toMatchObject({
       error: {

@@ -94,6 +94,9 @@ interface ApiDocumentCacheEntry {
 export interface OdooSurface {
   modules: ReadonlySet<string>;
   publicMethods: ReadonlyMap<string, ReadonlySet<string>>;
+  // Present only for models whose documentation carries per-method descriptors.
+  // Absent means "not stated", never "not readonly".
+  readonlyMethods: ReadonlyMap<string, ReadonlySet<string>>;
   modelAccess: ReadonlyMap<string, OdooModelAccess>;
   etag?: string;
 }
@@ -119,6 +122,31 @@ export interface SurfaceDiscoveryOptions extends ApiDocumentOptions {
 const RETRYABLE_STATUS = new Set([429, 502, 503, 504]);
 const API_DOCUMENT_CACHE_TTL_MS = 5 * 60_000;
 const API_DOCUMENT_CACHE_MAX_ENTRIES = 50;
+
+// The authenticated API documentation states a model's methods either as a flat
+// list of names or as a map of name to descriptor. Only the descriptor form
+// carries Odoo's `api` classification, so a missing readonly answer means
+// "undocumented here", never "this method writes".
+function methodNamesFromDocument(methods: unknown): string[] | undefined {
+  if (Array.isArray(methods)) return methods.filter((method): method is string => typeof method === "string");
+  if (methods && typeof methods === "object") return Object.keys(methods as Record<string, unknown>);
+  return undefined;
+}
+
+function readonlyMethodsFromDocument(methods: unknown): ReadonlySet<string> | undefined {
+  if (!methods || typeof methods !== "object" || Array.isArray(methods)) return undefined;
+  const readonly = new Set<string>();
+  for (const [name, descriptor] of Object.entries(methods as Record<string, unknown>)) {
+    if (isReadonlyDescriptor(descriptor)) readonly.add(name);
+  }
+  return readonly;
+}
+
+function isReadonlyDescriptor(descriptor: unknown): boolean {
+  if (!descriptor || typeof descriptor !== "object" || Array.isArray(descriptor)) return false;
+  const api = (descriptor as Record<string, unknown>).api;
+  return Array.isArray(api) && api.includes("readonly");
+}
 
 function sanitizeKnownIds(values: readonly number[] | undefined): number[] | undefined {
   if (!values) return undefined;
@@ -742,6 +770,7 @@ export class OdooClient {
       }
       const modules = new Set(document.modules);
       const publicMethods = new Map<string, ReadonlySet<string>>();
+      const readonlyMethods = new Map<string, ReadonlySet<string>>();
       const modelAccess = new Map<string, OdooModelAccess>();
       for (const item of document.models) {
         if (!item || typeof item !== "object" || Array.isArray(item)) {
@@ -749,11 +778,14 @@ export class OdooClient {
         }
         const candidate = item as Record<string, unknown>;
         const model = ModelNameSchema.parse(candidate.model);
-        if (!Array.isArray(candidate.methods)
-          || candidate.methods.length > 10_000
-          || !candidate.methods.every((method) => MethodNameSchema.safeParse(method).success)) {
+        const methodNames = methodNamesFromDocument(candidate.methods);
+        if (!methodNames
+          || methodNames.length > 10_000
+          || !methodNames.every((method) => MethodNameSchema.safeParse(method).success)) {
           throw new Error(`Authenticated Odoo API documentation contains invalid methods for ${model}`);
         }
+        const readonly = readonlyMethodsFromDocument(candidate.methods);
+        if (readonly) readonlyMethods.set(model, readonly);
         const access = candidate.access;
         if (!access || typeof access !== "object" || Array.isArray(access)) {
           throw new Error(`Authenticated Odoo API documentation lacks access metadata for ${model}`);
@@ -762,7 +794,7 @@ export class OdooClient {
         if (!["read", "create", "write", "unlink"].every((operation) => typeof values[operation] === "boolean")) {
           throw new Error(`Authenticated Odoo API documentation contains invalid access metadata for ${model}`);
         }
-        publicMethods.set(model, new Set(candidate.methods as string[]));
+        publicMethods.set(model, new Set(methodNames));
         modelAccess.set(model, {
           read: values.read as boolean,
           create: values.create as boolean,
@@ -775,7 +807,7 @@ export class OdooClient {
         .update(`${context.principal.targetId}\0${context.principal.database}\0${context.principal.apiKey}`)
         .digest("base64url");
       const etag = this.apiDocumentCache.get(`${identity}:${path}`)?.etag;
-      return { modules, publicMethods, modelAccess, ...(etag ? { etag } : {}) };
+      return { modules, publicMethods, readonlyMethods, modelAccess, ...(etag ? { etag } : {}) };
     } catch (error) {
       if (error instanceof OdooError
         && error.httpStatus === 304
@@ -790,6 +822,34 @@ export class OdooClient {
 
   async installedModules(context: RequestContext, signal?: AbortSignal): Promise<ReadonlySet<string> | null> {
     return (await this.discoverSurface(context, signal))?.modules ?? null;
+  }
+
+  /**
+   * Ask Odoo whether a public method is classified `readonly`, so a call can be
+   * executed under the read contract instead of the mutation contract.
+   *
+   * Returns `undefined` when the documentation does not say. Callers must treat
+   * that as "assume it writes": only an explicit `true` may relax the one-attempt
+   * mutation contract.
+   */
+  async methodIsReadonly(
+    context: RequestContext,
+    model: string,
+    method: string,
+    signal?: AbortSignal
+  ): Promise<boolean | undefined> {
+    const cached = context.readonlyPublicMethods?.get(model);
+    if (cached) return cached.has(method);
+    try {
+      const document = await this.fetchApiDocument<{ methods?: unknown }>(context, model, signal);
+      const descriptor = document.methods && typeof document.methods === "object" && !Array.isArray(document.methods)
+        ? (document.methods as Record<string, unknown>)[method]
+        : undefined;
+      if (descriptor === undefined) return undefined;
+      return isReadonlyDescriptor(descriptor);
+    } catch {
+      return undefined;
+    }
   }
 }
 

@@ -162,7 +162,7 @@ describe("VPS HTTP MCP transport", () => {
     closeCallbacks.push(async () => client.close());
     const tools = await client.listTools();
     // Materialization is disabled in this configuration; both grants are absent.
-    expect(tools.tools).toHaveLength(29);
+    expect(tools.tools).toHaveLength(27);
     expect(tools.tools.map((tool) => tool.name)).toContain("odoo_search_records");
     expect(tools.tools.map((tool) => tool.name)).toContain("odoo_call_method");
     expect(tools.tools.map((tool) => tool.name)).toContain("odoo_submit_feedback");
@@ -181,7 +181,7 @@ describe("VPS HTTP MCP transport", () => {
       await client.connect(transport);
       closeCallbacks.push(async () => client.close());
       const { tools } = await client.listTools();
-      if (profile === "default") expect(tools).toHaveLength(31);
+      if (profile === "default") expect(tools).toHaveLength(29);
       for (const name of ["documents_search", "documents_get_content", "documents_create_download_url",
         "documents_revoke_download_url", "projects_create_task", "expenses_get_context",
         "expenses_update_draft", "expenses_configure_draft_vendor_bill", "activities_schedule", "odoo_post_message", "odoo_submit_feedback"]) {

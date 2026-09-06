@@ -3,18 +3,26 @@ import type { RequestContext } from "../runtime/context.js";
 import { emitEvent } from "../runtime/logging.js";
 import { OdooClient } from "../odoo/client.js";
 import {
-  assertBoundedDomain,
   assertBoundedJson,
   attributedContext,
+  CallScopeShape,
   decodeCursor,
+  decodePageCursor,
+  DomainSchema,
   encodeCursor,
+  encodePageCursor,
   FieldNameSchema,
   FieldsSchema,
+  keysetDirection,
   ModelNameSchema,
   MethodNameSchema,
+  normalizeWriteValues,
   OdooContextSchema,
+  type PageCursor,
   PositiveIdSchema,
-  queryFingerprint
+  queryFingerprint,
+  resolveCallScope,
+  SpecificationSchema
 } from "../odoo/schemas.js";
 import {
   CapabilityRegistry,
@@ -33,6 +41,11 @@ const PageSchema = z.object({
 const ExecutionSchema = z.object({
   correlation_id: z.string(),
   outcome: z.enum(["succeeded", "unknown"])
+}).strict();
+// The escape hatch reports which contract Odoo's own readonly classification
+// selected, so a caller can tell a retried read from a one-attempt mutation.
+const MethodExecutionSchema = ExecutionSchema.extend({
+  mode: z.enum(["read", "mutation"])
 }).strict();
 
 const readAnnotations = {
@@ -70,12 +83,120 @@ function decorateRecords(context: RequestContext, model: string, value: unknown)
   });
 }
 
+// `/doc-bearer` describes a field with roughly thirty attributes and a method with
+// its full rendered documentation. On a model such as account.move that is over
+// 150 KB, which no caller can use. Project to the attributes that change a
+// decision, and report what was withheld so absence is never inferred from a cap.
+const FIELD_ATTRIBUTES = [
+  "type", "string", "relation", "required", "readonly", "store",
+  "selection", "help", "groupable", "sortable", "company_dependent"
+] as const;
+const METHOD_ATTRIBUTES = ["signature", "api", "model", "module"] as const;
+
+const SelectionPageSchema = z.object({
+  total: z.number().int().nonnegative(),
+  returned: z.number().int().nonnegative(),
+  has_more: z.boolean(),
+  detail: z.enum(["summary", "full"])
+}).strict();
+
+const emptySelectionPage = { total: 0, returned: 0, has_more: false, detail: "summary" as const };
+
+function projectEntry(value: unknown, attributes: readonly string[]): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const source = value as Record<string, unknown>;
+  const projected: Record<string, unknown> = {};
+  for (const attribute of attributes) {
+    if (source[attribute] !== undefined) projected[attribute] = source[attribute];
+  }
+  return projected;
+}
+
+const projectFieldEntry = (value: unknown) => projectEntry(value, FIELD_ATTRIBUTES);
+const projectMethodEntry = (value: unknown) => projectEntry(value, METHOD_ATTRIBUTES);
+
+interface SelectionOptions {
+  names?: readonly string[];
+  filter?: string;
+  detail: "summary" | "full";
+  limit: number;
+  project(value: unknown): unknown;
+}
+
+function selectEntries(source: unknown, options: SelectionOptions): {
+  entries: Record<string, unknown>;
+  page: z.infer<typeof SelectionPageSchema>;
+  warnings: string[];
+} {
+  if (!source || typeof source !== "object" || Array.isArray(source)) {
+    return { entries: {}, page: { ...emptySelectionPage, detail: options.detail }, warnings: [] };
+  }
+  const all = source as Record<string, unknown>;
+  const warnings: string[] = [];
+  const filter = options.filter?.trim().toLowerCase();
+  let names = Object.keys(all).sort();
+  const total = names.length;
+  if (options.names) {
+    const requested = new Set(options.names);
+    const missing = [...requested].filter((name) => !(name in all));
+    if (missing.length > 0) {
+      warnings.push(`${missing.slice(0, 20).join(", ")} ${missing.length === 1 ? "is" : "are"} not documented on this model.`);
+    }
+    names = names.filter((name) => requested.has(name));
+  } else if (filter) {
+    names = names.filter((name) => name.toLowerCase().includes(filter));
+  }
+  const selected = names.slice(0, options.limit);
+  const hasMore = names.length > selected.length;
+  if (hasMore) {
+    warnings.push(
+      `${names.length - selected.length} further entries matched but were withheld by the limit. `
+      + "Filter by name or substring, or raise the limit, before concluding something is absent."
+    );
+  }
+  const entries: Record<string, unknown> = {};
+  for (const name of selected) {
+    entries[name] = options.detail === "full" ? all[name] : options.project(all[name]);
+  }
+  return {
+    entries,
+    page: { total, returned: selected.length, has_more: hasMore, detail: options.detail },
+    warnings
+  };
+}
+
+// `create` answers with ids; `web_save` answers with the records read back,
+// each carrying its id. Both prove which records now exist.
 function resultIds(value: unknown): number[] {
   const values = Array.isArray(value) ? value : [value];
-  const ids = values.filter((item): item is number => Number.isInteger(item) && (item as number) > 0);
+  const ids = values
+    .map((item) => (item && typeof item === "object" && !Array.isArray(item) ? (item as { id?: unknown }).id : item))
+    .filter((item): item is number => Number.isInteger(item) && (item as number) > 0);
   if (ids.length === 0) throw new Error("Odoo did not return created record identifiers");
   return ids;
 }
+
+// web_search_read answers `{length, records}`; `length` is the total matching
+// the domain (bounded by count_limit when one is passed), not the page size.
+function webSearchReadRows(model: string, value: unknown): { rows: unknown[]; length: number | undefined } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`Odoo ${model} web_search_read result was not an object`);
+  }
+  const result = value as { records?: unknown; length?: unknown };
+  if (!Array.isArray(result.records)) throw new Error(`Odoo ${model} web_search_read result had no records`);
+  return {
+    rows: result.records,
+    length: Number.isInteger(result.length) && (result.length as number) >= 0 ? result.length as number : undefined
+  };
+}
+
+function recordId(record: Record<string, unknown>): number | undefined {
+  return Number.isInteger(record.id) && (record.id as number) > 0 ? record.id as number : undefined;
+}
+
+const SELECTION_GUIDANCE =
+  "Select output with fields (flat; many2one values are [id, display_name] pairs) or with specification, Odoo's nested read spec, e.g. {\"name\": {}, \"partner_id\": {\"fields\": {\"display_name\": {}, \"email\": {}}}, \"line_ids\": {\"fields\": {\"name\": {}}, \"limit\": 20}}: it follows relations to any depth in one call, and a bare {} on a relational field returns only ids.";
+
 
 function capabilitySummary(match: CapabilitySearchMatch) {
   const { metadata } = match;
@@ -112,12 +233,16 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
       "Search the complete Odoo MCP catalogue by task, object, workflow, or domain. Results recommend callable tools and unknown-availability candidates, but never activate a tool, change the current profile, or alter tools/list. Tool visibility and Odoo authorization remain separate.",
     layer: "generic",
     toolsets: ["core"],
-    profiles: [],
+    // Absent from `default`, where every tool in the profile is already listed
+    // statically and catalogue search only costs the caller context. It stays on
+    // `all`, where deferred loading hides most schemas, and on the thematic and
+    // read-only profiles, which each expose a subset of the catalogue.
+    profiles: ["accounting", "projects", "documents", "b2c", "advanced"],
     effect: "read",
     annotations: readAnnotations,
     keywords: ["discover", "tools", "workflow", "semantic", "business action"],
     requiredModules: [],
-    defaultVisible: true,
+    defaultVisible: false,
     alwaysLoad: true,
     sortOrder: 0,
     input: z.object({
@@ -289,7 +414,7 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
     name: "odoo_describe_model",
     title: "Describe Odoo Model",
     description:
-      "Return fields and Odoo-public JSON-2 methods for one model. Use before choosing fields, constructing relational traversals, or calling an unfamiliar public method. This describes callable API metadata; it does not execute the method.",
+      "Return fields and Odoo-public JSON-2 methods for one model. Use before choosing fields, constructing relational traversals, or calling an unfamiliar public method. Results are projected and capped: filter with names or a substring, raise the caps, or set detail to \"full\" for complete metadata on the named entries. Check the returned totals and has_more flags before assuming a field or method is absent. This describes callable API metadata; it does not execute the method.",
     layer: "generic",
     toolsets: ["core"],
     profiles: [],
@@ -303,7 +428,12 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
     input: z.object({
       model: ModelNameSchema,
       include_fields: z.boolean().default(true),
-      include_methods: z.boolean().default(true)
+      include_methods: z.boolean().default(true),
+      field_names: FieldsSchema.optional(),
+      filter: z.string().max(100).optional(),
+      field_limit: z.number().int().min(1).max(300).default(60),
+      method_limit: z.number().int().min(1).max(300).default(60),
+      detail: z.enum(["summary", "full"]).default("summary")
     }).strict(),
     output: z.object({
       source: z.enum(["doc_bearer", "fields_get"]),
@@ -311,43 +441,63 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
       name: z.string(),
       documentation: z.string(),
       fields: z.record(z.string(), z.unknown()),
-      methods: z.record(z.string(), z.unknown())
+      methods: z.record(z.string(), z.unknown()),
+      fields_page: SelectionPageSchema,
+      methods_page: SelectionPageSchema
     }).strict(),
-    async handler({ model, include_fields, include_methods }, context, signal) {
+    async handler(input, context, signal) {
+      const { model, include_fields, include_methods, field_names, filter, field_limit, method_limit, detail } = input;
+      const selection = { names: field_names, filter, detail } as const;
       try {
         const document = await client.fetchApiDocument<Record<string, unknown>>(context, model, signal);
+        const fields = selectEntries(document.fields, {
+          ...selection,
+          limit: field_limit,
+          project: projectFieldEntry
+        });
+        const methods = selectEntries(document.methods, {
+          filter,
+          detail,
+          limit: method_limit,
+          project: projectMethodEntry
+        });
         return {
           data: {
             source: "doc_bearer" as const,
             model,
             name: typeof document.name === "string" ? document.name : model,
             documentation: typeof document.doc === "string" ? document.doc : "",
-            fields: include_fields && document.fields && typeof document.fields === "object"
-              ? document.fields as Record<string, unknown>
-              : {},
-            methods: include_methods && document.methods && typeof document.methods === "object"
-              ? document.methods as Record<string, unknown>
-              : {}
-          }
+            fields: include_fields ? fields.entries : {},
+            methods: include_methods ? methods.entries : {},
+            fields_page: include_fields ? fields.page : emptySelectionPage,
+            methods_page: include_methods ? methods.page : emptySelectionPage
+          },
+          warnings: [...(include_fields ? fields.warnings : []), ...(include_methods ? methods.warnings : [])]
         };
       } catch {
-        const fields = include_fields
+        const raw = include_fields
           ? await client.call<Record<string, unknown>>(context, model, "fields_get", {
               attributes: ["type", "string", "readonly", "required", "selection", "relation", "help"]
             }, { signal })
           : {};
+        const fields = selectEntries(raw, { ...selection, limit: field_limit, project: projectFieldEntry });
         return {
           data: {
             source: "fields_get" as const,
             model,
             name: model,
             documentation: "",
-            fields,
-            methods: {}
+            fields: fields.entries,
+            methods: {},
+            fields_page: include_fields ? fields.page : emptySelectionPage,
+            methods_page: emptySelectionPage
           },
-          warnings: include_methods
-            ? ["Authenticated API documentation was unavailable; public method metadata is omitted."]
-            : []
+          warnings: [
+            ...fields.warnings,
+            ...(include_methods
+              ? ["Authenticated API documentation was unavailable; public method metadata is omitted."]
+              : [])
+          ]
         };
       }
     }
@@ -358,49 +508,90 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
     name: "odoo_search_records",
     title: "Search Odoo Records",
     description:
-      "Search any accessible Odoo model with a bounded domain and selected fields. Use for cross-domain exploration and long-tail queries. Prefer a specialized context tool when capability search finds one that performs the same common traversal more compactly.",
+      "Search any accessible Odoo model with a typed domain. " + SELECTION_GUIDANCE
+      + " Queries ordered by id alone page by keyset and never skip or repeat rows between pages. Use for cross-domain exploration and long-tail queries; prefer a specialized context tool when one performs the same common traversal more compactly.",
     layer: "generic",
     toolsets: ["core"],
     profiles: [],
     effect: "read",
     annotations: readAnnotations,
-    keywords: ["search_read", "find", "filter", "records", "domain", "pagination"],
+    keywords: ["search_read", "web_search_read", "find", "filter", "records", "domain", "pagination", "specification", "relations"],
     requiredModules: [],
     defaultVisible: true,
     alwaysLoad: true,
     sortOrder: 30,
     input: z.object({
       model: ModelNameSchema,
-      domain: z.array(z.unknown()).default([]),
+      domain: DomainSchema,
       fields: FieldsSchema.optional(),
+      specification: SpecificationSchema.optional(),
       limit: z.number().int().min(1).max(100).default(20),
       order: z.string().min(1).max(300).default("id asc"),
       cursor: z.string().max(1000).optional(),
       include_count: z.boolean().default(false),
+      ...CallScopeShape,
       context: OdooContextSchema
     }).strict(),
     output: z.object({ records: RecordsSchema, page: PageSchema }).strict(),
-    async handler({ model, domain, fields, limit, order, cursor, include_count, context: requestedContext }, context, signal) {
-      assertBoundedDomain(domain);
-      const selectedFields = fields ?? ["display_name"];
-      const fingerprint = queryFingerprint({ model, domain, fields: selectedFields, order });
-      const offset = decodeCursor(cursor, fingerprint);
-      const rpcContext = attributedContext(requestedContext, context.correlationId);
-      const [rows, total] = await Promise.all([
-        client.call<unknown[]>(context, model, "search_read", {
-          domain,
-          fields: selectedFields,
-          limit: limit + 1,
+    async handler(input, context, signal) {
+      const { model, domain, fields, specification, limit, order, cursor, include_count, context: requestedContext, ...scope } = input;
+      if (fields && specification) throw new Error("Pass either fields or specification, not both");
+      const selection = specification ? { specification } : { fields: fields ?? ["display_name"] };
+      const fingerprint = queryFingerprint({ model, domain, ...selection, order });
+      const page = decodePageCursor(cursor, fingerprint);
+      const direction = keysetDirection(order);
+      if (page.kind === "keyset" && !direction) throw new Error("cursor does not match this query");
+      const { context: rpcContext, warnings } = resolveCallScope({ ...scope, context: requestedContext }, context.correlationId);
+
+      // A keyset page restricts the domain instead of skipping rows, so inserts
+      // and deletes between pages cannot shift the window.
+      const pageDomain = page.kind === "keyset"
+        ? [["id", direction === "desc" ? "<" : ">", page.after], ...domain]
+        : domain;
+      const offset = page.kind === "offset" ? page.offset : 0;
+      const countOriginalDomain = () =>
+        client.call<number>(context, model, "search_count", { domain, context: rpcContext }, { signal });
+
+      let rows: unknown[];
+      let total: number | undefined;
+      if (specification) {
+        // web_search_read counts the domain it is given, which on a keyset page
+        // is only the remainder; the exact total then needs the original domain.
+        const exactTotalAvailable = include_count && page.kind === "offset";
+        const result = await client.call<unknown>(context, model, "web_search_read", {
+          domain: pageDomain,
+          specification,
           offset,
+          limit: limit + 1,
           order,
+          ...(exactTotalAvailable ? {} : { count_limit: offset + limit + 1 }),
           context: rpcContext
-        }, { signal }),
-        include_count
-          ? client.call<number>(context, model, "search_count", { domain, context: rpcContext }, { signal })
-          : Promise.resolve(undefined)
-      ]);
+        }, { signal });
+        const parsed = webSearchReadRows(model, result);
+        rows = parsed.rows;
+        if (include_count) total = exactTotalAvailable ? parsed.length : await countOriginalDomain();
+      } else {
+        [rows, total] = await Promise.all([
+          client.call<unknown[]>(context, model, "search_read", {
+            domain: pageDomain,
+            fields: selection.fields,
+            limit: limit + 1,
+            offset,
+            order,
+            context: rpcContext
+          }, { signal }),
+          include_count ? countOriginalDomain() : Promise.resolve(undefined)
+        ]);
+      }
+
       const hasMore = rows.length > limit;
       const records = decorateRecords(context, model, rows.slice(0, limit));
+      const lastId = records.length > 0 ? recordId(records[records.length - 1]!) : undefined;
+      const next: PageCursor | undefined = !hasMore
+        ? undefined
+        : direction && lastId !== undefined
+          ? { kind: "keyset", after: lastId }
+          : { kind: "offset", offset: offset + records.length };
       return {
         data: {
           records,
@@ -408,9 +599,10 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
             returned: records.length,
             has_more: hasMore,
             ...(total === undefined ? {} : { total }),
-            ...(hasMore ? { next_cursor: encodeCursor(offset + records.length, fingerprint) } : {})
+            ...(next ? { next_cursor: encodePageCursor(next, fingerprint) } : {})
           }
-        }
+        },
+        warnings
       };
     }
   }));
@@ -420,13 +612,14 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
     name: "odoo_read_records",
     title: "Read Odoo Records",
     description:
-      "Read selected fields from known record IDs on one model. Use after search or when a stable record reference is already known. It does not recursively expand relations; use odoo_expand_record for one-hop relational context.",
+      "Read known record IDs on one model, archived records included. " + SELECTION_GUIDANCE
+      + " Use after a search or when a stable record reference is already known.",
     layer: "generic",
     toolsets: ["core"],
     profiles: [],
     effect: "read",
     annotations: readAnnotations,
-    keywords: ["read", "IDs", "fields", "record details"],
+    keywords: ["read", "IDs", "fields", "record details", "specification", "relations"],
     requiredModules: [],
     defaultVisible: true,
     alwaysLoad: true,
@@ -435,19 +628,38 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
       model: ModelNameSchema,
       ids: z.array(PositiveIdSchema).min(1).max(100),
       fields: FieldsSchema.optional(),
+      specification: SpecificationSchema.optional(),
+      ...CallScopeShape,
       context: OdooContextSchema
     }).strict(),
     output: z.object({ records: RecordsSchema, missing_ids: z.array(z.number().int().positive()) }).strict(),
-    async handler({ model, ids, fields, context: requestedContext }, context, signal) {
+    async handler({ model, ids, fields, specification, context: requestedContext, ...scope }, context, signal) {
+      if (fields && specification) throw new Error("Pass either fields or specification, not both");
       const uniqueIds = [...new Set(ids)];
-      const rows = await client.call<unknown[]>(context, model, "read", {
-        ids: uniqueIds,
-        fields: fields ?? ["display_name"],
-        context: attributedContext(requestedContext, context.correlationId)
-      }, { signal });
+      const { context: rpcContext, warnings } = resolveCallScope({ ...scope, context: requestedContext }, context.correlationId);
+      let rows: unknown[];
+      if (specification) {
+        // Reading by id must see archived records, as `read` does. The search
+        // behind web_search_read would hide them unless active_test is off.
+        const readContext = "active_test" in rpcContext ? rpcContext : { ...rpcContext, active_test: false };
+        const result = await client.call<unknown>(context, model, "web_search_read", {
+          domain: [["id", "in", uniqueIds]],
+          specification,
+          limit: uniqueIds.length,
+          order: "id asc",
+          context: readContext
+        }, { signal });
+        rows = webSearchReadRows(model, result).rows;
+      } else {
+        rows = await client.call<unknown[]>(context, model, "read", {
+          ids: uniqueIds,
+          fields: fields ?? ["display_name"],
+          context: rpcContext
+        }, { signal });
+      }
       const records = decorateRecords(context, model, rows);
       const returned = new Set(records.map((record) => record.id).filter((id): id is number => typeof id === "number"));
-      return { data: { records, missing_ids: uniqueIds.filter((id) => !returned.has(id)) } };
+      return { data: { records, missing_ids: uniqueIds.filter((id) => !returned.has(id)) }, warnings };
     }
   }));
 
@@ -456,15 +668,17 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
     name: "odoo_expand_record",
     title: "Expand Odoo Record Relations",
     description:
-      "Read one record and follow up to ten named many2one, one2many, or many2many fields by one hop. Use for ad-hoc relational exploration. It intentionally does not recurse or infer an application boundary.",
+      "Read one record and follow up to ten named many2one, one2many, or many2many fields by one hop. Superseded by specification on odoo_search_records and odoo_read_records, which follow relations to any depth in one call; retained for clients that already use it.",
     layer: "generic",
     toolsets: ["core"],
+    // Off every static profile: `specification` on the search and read tools
+    // does this to any depth in one call instead of one hop in N+1 calls.
     profiles: [],
     effect: "read",
     annotations: readAnnotations,
     keywords: ["relations", "traverse", "many2one", "one2many", "many2many", "context"],
     requiredModules: [],
-    defaultVisible: true,
+    defaultVisible: false,
     alwaysLoad: false,
     sortOrder: 50,
     input: z.object({
@@ -534,7 +748,7 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
     name: "odoo_aggregate_records",
     title: "Aggregate Odoo Records",
     description:
-      "Group and aggregate accessible records on any model using Odoo formatted grouping. Use for counts, sums, averages, and grouped cross-domain analysis. Inspect field metadata first when groupability or aggregate support is uncertain.",
+      "Group and aggregate accessible records on any model (Odoo formatted_read_group). groupby entries are field names, optionally with a date granularity such as \"invoice_date:month\"; aggregates are \"field:sum|avg|min|max|count\" or \"__count\", e.g. groupby [\"partner_id\", \"invoice_date:quarter\"] with aggregates [\"amount_total:sum\", \"__count\"]. Use for counts, sums, averages, and grouped cross-domain analysis; inspect field metadata first when groupability or aggregate support is uncertain.",
     layer: "generic",
     toolsets: ["core"],
     profiles: [],
@@ -547,25 +761,26 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
     sortOrder: 60,
     input: z.object({
       model: ModelNameSchema,
-      domain: z.array(z.unknown()).default([]),
+      domain: DomainSchema,
       groupby: z.array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*(?::[A-Za-z_]+)?$/)).max(5).default([]),
       aggregates: z.array(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*(?::[A-Za-z_]+)?$/)).min(1).max(20),
       order: z.string().max(300).optional(),
       limit: z.number().int().min(1).max(100).default(50),
+      ...CallScopeShape,
       context: OdooContextSchema
     }).strict(),
     output: z.object({ rows: RecordsSchema }).strict(),
-    async handler({ model, domain, groupby, aggregates, order, limit, context: requestedContext }, context, signal) {
-      assertBoundedDomain(domain);
+    async handler({ model, domain, groupby, aggregates, order, limit, context: requestedContext, ...scope }, context, signal) {
+      const { context: rpcContext, warnings } = resolveCallScope({ ...scope, context: requestedContext }, context.correlationId);
       const rows = await client.call<unknown[]>(context, model, "formatted_read_group", {
         domain,
         groupby,
         aggregates,
         limit,
         ...(order ? { order } : {}),
-        context: attributedContext(requestedContext, context.correlationId)
+        context: rpcContext
       }, { signal });
-      return { data: { rows: decorateRecords(context, model, rows) } };
+      return { data: { rows: decorateRecords(context, model, rows) }, warnings };
     }
   }));
 
@@ -669,7 +884,7 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
     name: "odoo_create_records",
     title: "Create Odoo Records",
     description:
-      "Create one or more records on one model in a single Odoo create call and transaction. Use only after describing the model and required fields. Do not use this to emulate a multi-step business workflow that has a purpose-built action.",
+      "Create one or more records on one model in a single Odoo call and transaction. Use only after describing the model and required fields. Relational (x2many) fields accept either raw Odoo command tuples or the named form {link|unlink|delete|set: [ids]}, {create: [values]}, {update: [{id, values}]}, {clear: true}, which is validated and lowered to those tuples. Pass specification to read the created records back in the same transaction and skip a follow-up read. Do not use this to emulate a multi-step business workflow that has a purpose-built action.",
     layer: "generic",
     toolsets: ["core"],
     profiles: [],
@@ -684,20 +899,22 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
     input: z.object({
       model: ModelNameSchema,
       values: z.array(RecordSchema).min(1).max(100),
+      specification: SpecificationSchema.optional(),
+      ...CallScopeShape,
       context: OdooContextSchema
     }).strict(),
     output: z.object({
       ids: z.array(z.number().int().positive()),
       records: z.array(z.object({ model: z.string(), id: z.number().int().positive(), display_name: z.string(), url: z.string() }).strict()),
+      read_back: RecordsSchema.optional(),
       execution: ExecutionSchema
     }).strict(),
-    async handler({ model, values, context: requestedContext }, context, signal) {
-      assertBoundedJson(values);
-      const receipt = await client.call<unknown>(context, model, "create", {
-        vals_list: values,
-        context: attributedContext(requestedContext, context.correlationId)
-      }, {
-        kind: "mutation",
+    async handler({ model, values, specification, context: requestedContext, ...scope }, context, signal) {
+      const normalized = values.map((entry) => normalizeWriteValues(entry));
+      assertBoundedJson(normalized);
+      const { context: rpcContext, warnings } = resolveCallScope({ ...scope, context: requestedContext }, context.correlationId);
+      const mutation = {
+        kind: "mutation" as const,
         signal,
         reconciliation: {
           targetModel: model,
@@ -705,15 +922,42 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
           fields: [...new Set(values.flatMap((value) => Object.keys(value)))].slice(0, 100),
           instructions: "Search with a selective domain built from stable fields in the original values. If no stable unique fields exist, report that the create cannot be reconciled safely and do not repeat it."
         }
-      });
-      return receipt.finalize((result) => {
+      };
+      // `web_save` called without ids creates one record and reads it back in
+      // the one transaction `create` would have used. Odoo's `web_save_multi`
+      // only writes to records that already exist, so a batch is created with
+      // `create` and then read back through `web_search_read` by id, the same
+      // call odoo_read_records uses; a read-back failure after a successful
+      // create reports an unknown outcome with the created ids.
+      const singleReadBack = Boolean(specification) && normalized.length === 1;
+      const receipt = singleReadBack
+        ? await client.call<unknown>(context, model, "web_save", {
+            vals: normalized[0],
+            specification,
+            context: rpcContext
+          }, mutation)
+        : await client.call<unknown>(context, model, "create", { vals_list: normalized, context: rpcContext }, mutation);
+      return receipt.finalize(async (result) => {
         const ids = resultIds(result);
+        let readBack: unknown = singleReadBack ? result : undefined;
+        if (specification && !singleReadBack) {
+          const result = await client.call<unknown>(context, model, "web_search_read", {
+            domain: [["id", "in", ids]],
+            specification,
+            limit: ids.length,
+            order: "id asc",
+            context: "active_test" in rpcContext ? rpcContext : { ...rpcContext, active_test: false }
+          }, { signal });
+          readBack = webSearchReadRows(model, result).rows;
+        }
         return {
           data: {
             ids,
             records: ids.map((id) => recordReference(context, model, id)),
+            ...(specification ? { read_back: decorateRecords(context, model, readBack) } : {}),
             execution: { correlation_id: context.correlationId, outcome: "succeeded" as const }
-          }
+          },
+          warnings
         };
       }, (result) => ({ knownIds: resultIds(result) }));
     }
@@ -724,7 +968,7 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
     name: "odoo_update_records",
     title: "Update Odoo Records",
     description:
-      "Apply one values object to 1-100 records on one model in a single Odoo write call and transaction. Read the records first. Heterogeneous updates and multi-step workflow transitions are intentionally not bundled here.",
+      "Apply one values object to 1-100 records on one model in a single Odoo call and transaction. Read the records first. Relational (x2many) fields accept either raw Odoo command tuples or the named form {link|unlink|delete|set: [ids]}, {create: [values]}, {update: [{id, values}]}, {clear: true}, which is validated and lowered to those tuples. Pass specification to read the updated records back in the same transaction and skip a follow-up read. Heterogeneous updates and multi-step workflow transitions are intentionally not bundled here.",
     layer: "generic",
     toolsets: ["core"],
     profiles: [],
@@ -740,18 +984,23 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
       model: ModelNameSchema,
       ids: z.array(PositiveIdSchema).min(1).max(100),
       values: RecordSchema,
+      specification: SpecificationSchema.optional(),
+      ...CallScopeShape,
       context: OdooContextSchema
     }).strict(),
-    output: z.object({ updated: z.boolean(), ids: z.array(z.number().int().positive()), execution: ExecutionSchema }).strict(),
-    async handler({ model, ids, values, context: requestedContext }, context, signal) {
-      assertBoundedJson(values);
+    output: z.object({
+      updated: z.boolean(),
+      ids: z.array(z.number().int().positive()),
+      read_back: RecordsSchema.optional(),
+      execution: ExecutionSchema
+    }).strict(),
+    async handler({ model, ids, values, specification, context: requestedContext, ...scope }, context, signal) {
+      const normalized = normalizeWriteValues(values);
+      assertBoundedJson(normalized);
       const uniqueIds = [...new Set(ids)];
-      const receipt = await client.call<boolean>(context, model, "write", {
-        ids: uniqueIds,
-        vals: values,
-        context: attributedContext(requestedContext, context.correlationId)
-      }, {
-        kind: "mutation",
+      const { context: rpcContext, warnings } = resolveCallScope({ ...scope, context: requestedContext }, context.correlationId);
+      const mutation = {
+        kind: "mutation" as const,
         signal,
         reconciliation: {
           targetModel: model,
@@ -760,8 +1009,26 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
           suggestedTool: "odoo_read_records",
           instructions: "Read these records and compare the named fields with the original patch. Keep matching values, and send only a minimal corrective patch for values that are still absent."
         }
-      });
-      return receipt.finalize((updated) => ({ data: { updated: Boolean(updated), ids: uniqueIds, execution: { correlation_id: context.correlationId, outcome: "succeeded" as const } } }));
+      };
+      // web_save on a recordset writes the one values object to every record
+      // and reads them back in the same transaction `write` would have used.
+      const receipt = specification
+        ? await client.call<unknown>(context, model, "web_save", {
+            ids: uniqueIds,
+            vals: normalized,
+            specification,
+            context: rpcContext
+          }, mutation)
+        : await client.call<unknown>(context, model, "write", { ids: uniqueIds, vals: normalized, context: rpcContext }, mutation);
+      return receipt.finalize((result) => ({
+        data: {
+          updated: specification ? Array.isArray(result) : Boolean(result),
+          ids: uniqueIds,
+          ...(specification ? { read_back: decorateRecords(context, model, result) } : {}),
+          execution: { correlation_id: context.correlationId, outcome: "succeeded" as const }
+        },
+        warnings
+      }));
     }
   }));
 
@@ -961,13 +1228,13 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
     name: "odoo_call_method",
     title: "Call Public Odoo Method",
     description:
-      "Call any Odoo-public JSON-2 model method with named kwargs and optional record IDs. Use as an advanced escape hatch for long-tail Distribution functionality after inspecting odoo_describe_model when possible. Do not use it to chain a supposedly atomic workflow; use one purpose-built business action instead. Private and @api.private methods remain unavailable through Odoo.",
+      "Call any Odoo-public JSON-2 model method with named kwargs and optional record IDs. Use as an advanced escape hatch for long-tail Distribution functionality, and for ORM methods with no dedicated tool such as onchange (Odoo-computed defaults and derived values for a draft), name_search (resolve a label to an id the way Odoo does), has_access, copy or get_external_id, after inspecting odoo_describe_model when possible. Odoo's own readonly classification decides the execution contract: a method Odoo publishes as readonly is retried like a read, anything else gets one attempt and may report an unknown outcome. Do not use it to chain a supposedly atomic workflow; use one purpose-built business action instead. Private and @api.private methods remain unavailable through Odoo.",
     layer: "generic",
     toolsets: ["core", "advanced"],
     profiles: ["advanced"],
     effect: "consequential",
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
-    keywords: ["public method", "JSON-2", "escape hatch", "model action", "workflow"],
+    keywords: ["public method", "JSON-2", "escape hatch", "model action", "workflow", "ORM"],
     requiredModules: [],
     defaultVisible: true,
     alwaysLoad: false,
@@ -977,20 +1244,38 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
       method: MethodNameSchema,
       ids: z.array(PositiveIdSchema).min(1).max(100).optional(),
       kwargs: RecordSchema.default({}),
+      ...CallScopeShape,
       context: OdooContextSchema
     }).strict(),
-    output: z.object({ result: z.unknown(), execution: ExecutionSchema }).strict(),
-    async handler({ model, method, ids, kwargs, context: requestedContext }, context, signal) {
+    output: z.object({ result: z.unknown(), execution: MethodExecutionSchema }).strict(),
+    async handler({ model, method, ids, kwargs, context: requestedContext, ...scope }, context, signal) {
       if ("ids" in kwargs || "context" in kwargs) {
         throw new Error("Pass ids and context through their dedicated parameters, not kwargs");
       }
       assertBoundedJson(kwargs);
       const uniqueIds = ids ? [...new Set(ids)] : undefined;
-      const receipt = await client.call<unknown>(context, model, method, {
+      const { context: rpcContext, warnings } = resolveCallScope({ ...scope, context: requestedContext }, context.correlationId);
+      const payload = {
         ...kwargs,
         ...(uniqueIds ? { ids: uniqueIds } : {}),
-        context: attributedContext(requestedContext, context.correlationId)
-      }, {
+        context: rpcContext
+      };
+      // Odoo publishes each public method's `api` classification. A method it
+      // states is readonly cannot commit, so executing it under the mutation
+      // contract would deny it retries and label a plain read destructive.
+      // Anything Odoo does not explicitly classify keeps the mutation contract.
+      const readonly = await client.methodIsReadonly(context, model, method, signal);
+      if (readonly === true) {
+        const result = await client.call<unknown>(context, model, method, payload, { signal });
+        return {
+          data: {
+            result,
+            execution: { correlation_id: context.correlationId, outcome: "succeeded" as const, mode: "read" as const }
+          },
+          warnings
+        };
+      }
+      const receipt = await client.call<unknown>(context, model, method, payload, {
         kind: "mutation",
         signal,
         reconciliation: {
@@ -1000,7 +1285,13 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
           instructions: "Inspect the method's documented effects and fetch the affected records. Because this is an arbitrary public method, retry only after its business effect is proven absent."
         }
       });
-      return receipt.finalize((result) => ({ data: { result, execution: { correlation_id: context.correlationId, outcome: "succeeded" as const } } }));
+      return receipt.finalize((result) => ({
+        data: {
+          result,
+          execution: { correlation_id: context.correlationId, outcome: "succeeded" as const, mode: "mutation" as const }
+        },
+        warnings
+      }));
     }
   }));
 }

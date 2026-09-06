@@ -59,7 +59,8 @@ function accessSnapshot(refreshedAt = Date.now()): AgentAccessSnapshot {
     surface: {
       etag: '"access-v1"',
       modules: new Set(["base", "hr_expense"]),
-      publicMethods: new Map([["hr.expense", new Set(["action_approve_expenses"])]]),
+      publicMethods: new Map([["hr.expense", new Set(["action_approve_expenses", "search_read"])]]),
+      readonlyMethods: new Map([["hr.expense", new Set(["search_read"])]]),
       modelAccess: new Map([["hr.expense", {
         read: true,
         create: true,

@@ -22,7 +22,7 @@ The most common mappings are:
 | fields/API/actions variants | `odoo_describe_model` |
 | search/compact/browse/count variants | `odoo_search_records` |
 | single/batch read variants | `odoo_read_records` |
-| relational expansion and aggregation | `odoo_expand_record`, `odoo_aggregate_records` |
+| relational expansion and aggregation | `specification` on `odoo_search_records` / `odoo_read_records`, `odoo_aggregate_records` |
 | database description | `odoo_describe_environment` |
 | create/update variants | `odoo_create_records`, `odoo_update_records` |
 | deletion | default `odoo_archive_records`; advanced `odoo_delete_records` |
@@ -33,7 +33,59 @@ The most common mappings are:
 | expense/batch workflow chains | fixed-intent `expenses_*` and `expense_batches_*` actions |
 | legacy accounting report wrappers | rebuilt `accounting_*` context/report capabilities |
 
-Old offset pagination, heterogeneous batch writes, duplicated server-specific tool names, UI button scraping as the primary method catalogue, feedback submission, and multi-call claims of atomicity are not supported.
+Duplicated server-specific tool names, UI button scraping as the method
+catalogue, and multi-call claims of atomicity are not supported.
+
+## Contract changes in the ORM-substrate work
+
+These change existing tool contracts. Clients must refresh tool schemas.
+
+- `odoo_describe_model` now projects and caps its response. `fields` and `methods`
+  carry a bounded, projected subset, and two new `fields_page`/`methods_page`
+  objects report `total`, `returned`, `has_more`, and `detail`. Callers that
+  enumerated every field must page with `filter`, `field_names`, `field_limit`,
+  or `detail: "full"`, and must read absence from the page totals. This exists
+  because the previous response reached 156,100 characters on `account.move`.
+- `odoo_call_method` gains `execution.mode`. A method Odoo publishes as
+  `readonly` now runs under the read contract and may be retried; every other
+  method keeps the one-attempt mutation contract unchanged. The tool consults
+  the authenticated API document, which adds one cached metadata request per
+  model. Its MCP annotations stay conservative because a single tool cannot
+  annotate per call.
+- `odoo_search_records` and `odoo_aggregate_records` type their `domain`. Domains
+  that were previously forwarded verbatim and rejected by Odoo are now rejected
+  by the MCP with an actionable message. Unknown operators, malformed leaves, and
+  connectives without enough operands no longer reach Odoo.
+- `odoo_create_records` and `odoo_update_records` accept the named relational
+  command form in addition to raw tuples, and normalize two-element tuples to
+  three-element ones. Plain scalar and id-list values are unchanged.
+- Generic read and write tools accept `company_ids`, `lang`, and `active_test`
+  alongside `context`.
+- `odoo_search_records` and `odoo_read_records` gain `specification`, Odoo's
+  nested read spec, executed through `web_search_read`. It is mutually exclusive
+  with `fields`. Note the value shapes differ by design and match Odoo: `fields`
+  returns many2one values as `[id, display_name]` pairs; `specification` returns
+  the raw id for a bare `{}` and a nested object when `fields` is requested on the
+  relation. `odoo_read_records` with a `specification` still returns archived
+  records, as `read` does.
+- `odoo_create_records` and `odoo_update_records` gain the same `specification`.
+  When it is passed, a single create and every update run `web_save` instead of
+  `create` / `write`, and a batch create runs `create` followed by a `web_search_read` by id.
+  The response gains `read_back` with the records as read back. Without a
+  `specification` nothing changes.
+- Searches ordered by `id asc` or `id desc` alone now page by keyset. Cursors
+  issued before this change still decode (they carry an offset), and a keyset
+  cursor is rejected by any query whose order is not id alone.
+- `odoo_expand_record` leaves every static profile and remains registered on
+  `/mcp/all` only. Its one-hop read is a strict subset of a `specification`.
+- `odoo_search_capabilities` is removed from the `default` profile, which with
+  the change above drops from 31 to 29 tools. It is unchanged on `/mcp/all`, the thematic profiles, and
+  `/mcp/read-only`. A `/mcp` client that called it must either use a profile that
+  still carries it or rely on the statically listed surface, which is complete for
+  that profile.
+- The default-profile schema-token budget enforced by `/readyz` moves from 15,000
+  to 15,500 (`DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET`). Operators gating on the
+  literal 15,000 must update that check.
 
 ## Behavior changes
 

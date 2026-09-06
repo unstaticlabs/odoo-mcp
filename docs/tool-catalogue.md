@@ -2,28 +2,51 @@
 
 The executable source of truth is the canonical registry created in `src/capabilities/index.ts`. This document describes selection policy; tool schemas and module predicates come from code.
 
-## Universal core
+This document is also the single owner of the surface numbers. Other documents
+refer here instead of repeating them.
 
-The five preferred discovery and read tools are:
+## Current default surface
+
+| Measure | Value |
+| --- | ---: |
+| Tools on `/mcp` with every feature available | 29 |
+| Tools on `/mcp` without document materialization | 27 |
+| Estimated input/output schema tokens on `/mcp` | 15,322 |
+| Budget enforced by `/readyz` (`DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET`) | 15,500 |
+
+Odoo module, method, and access availability can lower the counts further.
+Schema estimates are not measured model usage. Update this table, and only this
+table, when the surface changes.
+
+## Discovery and read primitives
+
+The preferred discovery and read tools are:
 
 | Tool | Selection rule |
 | --- | --- |
-| `odoo_search_capabilities` | Find semantic helpers or actions by intent across several toolsets. |
+| `odoo_search_capabilities` | Find semantic helpers or actions by intent across several toolsets. Not on `/mcp`; see below. |
 | `odoo_search_models` | Find accessible technical models from authenticated API metadata. |
 | `odoo_describe_model` | Inspect fields and public method signatures before guessing. |
-| `odoo_search_records` | Perform bounded cross-domain or long-tail search. |
-| `odoo_read_records` | Read selected fields from known record IDs. |
+| `odoo_search_records` | Perform bounded cross-domain or long-tail search; a `specification` reads relations to any depth in one call. |
+| `odoo_read_records` | Read known record IDs, flat or with a nested `specification`. |
+
+`odoo_search_capabilities` is deliberately absent from `/mcp`. That profile lists
+its whole surface statically, so catalogue search there only spends caller context
+to describe tools the caller can already see. It remains on `/mcp/all`, where
+deferred loading hides most schemas, and on the thematic and `/mcp/read-only`
+profiles, which each expose a subset of the catalogue and where
+`visible_in_current_profile` and the recommended fallback still carry information.
 
 Further generic substrate tools are available in every writable profile:
 
-- `odoo_expand_record`, `odoo_aggregate_records`, and `odoo_describe_environment`;
+- `odoo_aggregate_records` and `odoo_describe_environment`;
 - `odoo_create_records`, `odoo_update_records`, `odoo_archive_records`, `odoo_post_message`, and `odoo_call_method`.
 
 `odoo_submit_feedback` is also present in every writable MCP profile. It lets any active governed Agent create one structured, low-trust report in the configured MCP development Inbox, even when that Agent has no Project application access. The Odoo method fixes and validates the destination, escapes all submitted text, and creates the task plus its audit marker in one transaction. The explicit `/mcp/read-only` transport profile hides it because that profile contains no mutations.
 
 The only advanced-only generic tool is `odoo_delete_records`.
 
-Use `odoo_call_method` when a legitimate public Distribution method has no MCP shortcut or when preserving a model's versatile public API is more useful than adding a thin wrapper. Prefer a fixed-intent action when it reduces ambiguity, returns better context, or guarantees a multi-step invariant. The method tool receives one attempt and may report unknown completion.
+Use `odoo_call_method` when a legitimate public Distribution method has no MCP shortcut or when preserving a model's versatile public API is more useful than adding a thin wrapper. Prefer a fixed-intent action when it reduces ambiguity, returns better context, or guarantees a multi-step invariant. A method Odoo publishes as `readonly` runs under the read contract and is retried like any other read; every other method receives one attempt and may report unknown completion. The returned `execution.mode` states which contract applied.
 
 ## Semantic catalogue
 
@@ -33,13 +56,9 @@ Document tools use the Distribution archive facade for search, context, bounded 
 
 Thin domain list/get wrappers are intentionally absent where generic search/read already communicates the task cleanly.
 
-## Everyday ChatGPT workflows
+## Everyday workflows on `/mcp`
 
-The default profile promotes eight existing tools, without changing handlers,
-schemas, effects, authorization, or the one-attempt mutation contract. The complete
-candidate surface is 31 tools / 14,988 estimated input/output schema tokens. The
-count is 29 when materialization is disabled and can be lower when Odoo modules,
-methods or access are unavailable. Schema estimates are not measured model usage.
+These workflows are complete on the default profile without a profile switch:
 
 | Workflow | Static tools on `/mcp` |
 | --- | --- |
@@ -51,19 +70,16 @@ methods or access are unavailable. Schema estimates are not measured model usage
 | Prepare vendor bills/credit notes | `accounting_get_invoice_context`, `expenses_configure_draft_vendor_bill` |
 | Report a connector issue | `odoo_submit_feedback` |
 
-Activity rescheduling/editing still uses the generic update tool where Odoo
+Activity rescheduling and editing use the generic update tool where Odoo
 permits it; completion uses the documented public method via `odoo_call_method`.
-This release does not introduce new activity methods or expand their permissions.
-Likewise, less-common document linking/catalogue operations and expense
-approval/posting remain available in thematic profiles or through the inspected
-public-method fallback, not newly promoted into default.
+Less common document linking and catalogue operations, and expense approval and
+posting, live in the thematic profiles or behind the inspected public-method
+fallback rather than on `/mcp`.
 
-Prefer a matching visible workflow tool. Use capability search when the action
-is unclear; do not repeatedly search hoping to load an absent schema. Returning
-a tool name cannot activate it. Keep `/mcp/all` for clients with verified host-side
-tool search; its five immediate-loading primitives and deferred metadata remain
-unchanged. Reconnect and start a new ChatGPT conversation before comparing the
-actual tool list and running the golden prompts.
+Prefer a matching visible workflow tool. On `/mcp` every tool is listed, so there
+is nothing further to discover there. Keep `/mcp/all` for clients with verified
+host-side tool search. Reconnect and start a new ChatGPT conversation before
+comparing the actual tool list and running the golden prompts.
 
 ## Business action catalogue
 
@@ -84,7 +100,7 @@ Actions do not bypass Odoo state or permissions. The agent should read the relev
 
 | URL | Intended visible surface |
 | --- | --- |
-| `/mcp` | Static everyday workflows plus generic substrate; maximum 31 tools/15k estimated schema tokens. |
+| `/mcp` | Static everyday workflows plus generic substrate; maximum 29 tools/15.5k estimated schema tokens. |
 | `/mcp/all` | Complete catalogue with deferred-loading metadata. |
 | `/mcp/read-only` | Every read capability currently available. |
 | `/mcp/accounting` | Universal core plus accounting, expenses, and related document actions. |
@@ -118,3 +134,11 @@ Module, public-method, model-access, and feature predicates remove specialized t
 - Read/write/consequential/irreversible effects and MCP annotations describe behavior; they do not authorize it.
 - Search and read calls select fields and bound result counts instead of dumping arbitrary records.
 - Context reserves only connector origin and correlation metadata; caller-supplied reserved `usl_*` values are removed.
+- Domains are typed: a leaf is `[field path, operator, value]` with an enumerated operator, and `&`/`|`/`!` arity is checked the way Odoo's own `normalize_domain` checks it. A malformed filter is rejected before any Odoo call.
+- Relational (x2many) values accept raw Odoo command tuples or the named form `{link|unlink|delete|set: [ids]}`, `{create: [values]}`, `{update: [{id, values}]}`, `{clear: true}`, lowered to those tuples in a fixed order.
+- `company_ids`, `lang`, and `active_test` are named parameters that map onto `allowed_company_ids`, `lang`, and `active_test`. They override the same key supplied inside `context` and report the override as a warning.
+- `odoo_describe_model` projects and caps its payload. It returns `fields_page`/`methods_page` totals; absence must be read from those, not from the returned keys.
+- `odoo_search_records` and `odoo_read_records` accept either `fields` (flat; many2one values are `[id, display_name]` pairs, from `search_read`/`read`) or `specification`, Odoo's nested read spec (`web_search_read`): `{"name": {}, "partner_id": {"fields": {"display_name": {}}}, "line_ids": {"fields": {...}, "limit": 20}}` follows relations to any depth in one call. A bare `{}` on a relational field returns only ids. `odoo_expand_record` is superseded and registered on `all` only.
+- `odoo_create_records` and `odoo_update_records` accept the same `specification` and return the records as `read_back`, so no follow-up read is needed. A single create and every update run `web_save`, where the write and the read-back share one Odoo transaction; a batch create runs `create` and then reads the new records back by id through `web_search_read`, because Odoo's `web_save_multi` only writes to records that already exist.
+- Searches ordered by `id asc` or `id desc` alone page by keyset: the next page restricts the domain by the last id seen and cannot skip or repeat rows when records are inserted or deleted between pages. Any other order pages by offset. Cursors are bound to the query and carry their mode.
+- `odoo_call_method` reports `execution.mode`. Odoo's published `api` classification selects the contract: `read` for a method Odoo states is readonly, `mutation` otherwise, including when the classification is unknown.

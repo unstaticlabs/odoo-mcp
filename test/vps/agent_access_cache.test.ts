@@ -33,6 +33,7 @@ function completeSnapshot(refreshedAt = Date.now()): AgentAccessSnapshot {
       etag: '"agent-access-v1"',
       modules: new Set(["base", "api_doc", "contacts"]),
       publicMethods: new Map([["res.partner", new Set(["read", "search_read", "write"])]]),
+      readonlyMethods: new Map([["res.partner", new Set(["read", "search_read"])]]),
       modelAccess: new Map([["res.partner", {
         read: true,
         create: true,
