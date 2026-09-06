@@ -43,7 +43,8 @@ describe("canonical capability registry", () => {
     expect(names).toContain("activities_schedule");
     expect(names).not.toContain("odoo_delete_records");
     expect(names).not.toContain("odoo_search_capabilities");
-    expect(registry.profileBudget("default")).toMatchObject({ tools: 30 });
+    expect(names).not.toContain("odoo_expand_record");
+    expect(registry.profileBudget("default")).toMatchObject({ tools: 29 });
     expect(registry.profileBudget("default").schemaTokens)
       .toBeLessThanOrEqual(DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET);
   });
@@ -182,7 +183,7 @@ describe("canonical capability registry", () => {
     };
     const options = { profile: "default" as const, availability };
     const exposed = registry.list("default", availability).map((item) => item.name);
-    expect(exposed).toHaveLength(7);
+    expect(exposed).toHaveLength(6);
     expect(exposed).toContain("odoo_call_method");
 
     for (const query of ["expense", "write", "approve", "approve this expense"]) {

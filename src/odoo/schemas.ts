@@ -97,21 +97,76 @@ export const DomainSchema = z.array(DomainTermSchema)
   })
   .default([]);
 
+// Odoo's read specification, as consumed by web_search_read, web_read and
+// web_save: a map of field name to an options node. A bare `{}` returns the
+// field's raw value (a many2one comes back as its id); `fields` requests a
+// nested read of a relational field, and `limit`/`order` bound an x2many.
+const SPECIFICATION_MAX_DEPTH = 4;
+type SpecificationNode = {
+  fields?: Record<string, SpecificationNode>;
+  limit?: number;
+  order?: string;
+};
+const SpecificationNodeSchema: z.ZodType<SpecificationNode> = z.lazy(() => z.object({
+  fields: z.record(FieldNameSchema, SpecificationNodeSchema).optional(),
+  limit: z.number().int().min(1).max(200).optional(),
+  order: z.string().min(1).max(300).optional()
+}).strict());
+
+function specificationDepth(node: SpecificationNode): number {
+  const children = Object.values(node.fields ?? {});
+  return children.length === 0 ? 1 : 1 + Math.max(...children.map(specificationDepth));
+}
+
+export const SpecificationSchema = z.record(FieldNameSchema, SpecificationNodeSchema)
+  .superRefine((specification, ctx) => {
+    if (Object.keys(specification).length === 0) {
+      ctx.addIssue({ code: "custom", message: "specification must name at least one field" });
+      return;
+    }
+    const depth = Math.max(...Object.values(specification).map(specificationDepth));
+    if (depth > SPECIFICATION_MAX_DEPTH) {
+      ctx.addIssue({ code: "custom", message: `specification may not nest deeper than ${SPECIFICATION_MAX_DEPTH} relations` });
+      return;
+    }
+    try {
+      assertBoundedJson(specification);
+    } catch (error) {
+      ctx.addIssue({ code: "custom", message: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+export type Specification = z.infer<typeof SpecificationSchema>;
+
+// A page cursor is either an offset or, when the query is ordered by id alone,
+// the last id seen. Keyset paging cannot skip or repeat rows when records are
+// inserted or deleted between pages; offset paging can. Both are bound to the
+// query fingerprint so a cursor is never replayed against a different query.
+export type PageCursor = { kind: "offset"; offset: number } | { kind: "keyset"; after: number };
+
 interface CursorPayload {
-  offset: number;
+  offset?: number;
+  after?: number;
   fingerprint: string;
 }
 
-export function queryFingerprint(value: unknown): string {
-  return createHash("sha256").update(JSON.stringify(value)).digest("base64url").slice(0, 24);
+const KEYSET_ORDER = /^\s*id\s+(asc|desc)\s*$/i;
+
+/** The keyset direction for an order clause, or undefined when it must page by offset. */
+export function keysetDirection(order: string): "asc" | "desc" | undefined {
+  const match = KEYSET_ORDER.exec(order);
+  return match ? (match[1]!.toLowerCase() as "asc" | "desc") : undefined;
 }
 
-export function encodeCursor(offset: number, fingerprint: string): string {
-  return Buffer.from(JSON.stringify({ offset, fingerprint } satisfies CursorPayload), "utf8").toString("base64url");
+export function encodePageCursor(cursor: PageCursor, fingerprint: string): string {
+  const payload: CursorPayload = cursor.kind === "offset"
+    ? { offset: cursor.offset, fingerprint }
+    : { after: cursor.after, fingerprint };
+  return Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
 }
 
-export function decodeCursor(value: string | undefined, fingerprint: string): number {
-  if (!value) return 0;
+export function decodePageCursor(value: string | undefined, fingerprint: string): PageCursor {
+  if (!value) return { kind: "offset", offset: 0 };
   let parsed: unknown;
   try {
     parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
@@ -119,10 +174,26 @@ export function decodeCursor(value: string | undefined, fingerprint: string): nu
     throw new Error("cursor is malformed");
   }
   const cursor = z.object({
-    offset: z.number().int().nonnegative().max(10_000_000),
+    offset: z.number().int().nonnegative().max(10_000_000).optional(),
+    after: z.number().int().positive().optional(),
     fingerprint: z.string()
   }).strict().parse(parsed);
   if (cursor.fingerprint !== fingerprint) throw new Error("cursor does not match this query");
+  if (cursor.after !== undefined) return { kind: "keyset", after: cursor.after };
+  return { kind: "offset", offset: cursor.offset ?? 0 };
+}
+
+export function queryFingerprint(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(value)).digest("base64url").slice(0, 24);
+}
+
+export function encodeCursor(offset: number, fingerprint: string): string {
+  return encodePageCursor({ kind: "offset", offset }, fingerprint);
+}
+
+export function decodeCursor(value: string | undefined, fingerprint: string): number {
+  const cursor = decodePageCursor(value, fingerprint);
+  if (cursor.kind !== "offset") throw new Error("cursor does not match this query");
   return cursor.offset;
 }
 

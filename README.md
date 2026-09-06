@@ -5,7 +5,7 @@ One agent-facing MCP for the self-hosted USL Odoo Distribution. It runs as a Nod
 The interface deliberately combines:
 
 - five discovery and read primitives preferred for initial loading on `/mcp/all`;
-- a broad generic Odoo substrate for cross-domain and unanticipated work;
+- a broad generic Odoo substrate for cross-domain and unanticipated work, built on Odoo's own read specification, typed domains, and keyset paging;
 - statically callable everyday workflow tools on `/mcp`, with deferred discovery on `/mcp/all`;
 - thematic profiles generated from one capability registry;
 - Odoo-authoritative permissions, record rules, company scope, and transactions.
@@ -28,7 +28,7 @@ bearer capabilities.
 - Stateless MCP requests; no application-level MCP session store.
 - Optional, fail-open, privacy-filtered PostHog MCP Analytics.
 
-The default surface contains up to 30 statically advertised tools (15,278 estimated
+The default surface contains up to 29 statically advertised tools (15,322 estimated
 schema tokens, below the 15,500 budget). Odoo availability, access and feature flags
 may reduce the count. The budget was raised from 15,000 when domains, relational
 commands and company scope became typed parameters; see the
@@ -39,6 +39,10 @@ draft-accounting workflows do not require a profile switch. See the
 `odoo_search_capabilities` is not on `/mcp`, where every tool in the profile is
 already listed statically. It remains on `/mcp/all`, on the thematic profiles, and
 on `/mcp/read-only`, each of which exposes only part of the catalogue.
+`odoo_expand_record` is off every static profile: a `specification` on
+`odoo_search_records` or `odoo_read_records` follows relations to any depth in one
+call, and the same `specification` on the create and update tools reads the result
+back in the same transaction.
 
 Only `/mcp/all` uses deferred-loading hints. On that endpoint these five tools
 are marked for immediate loading:

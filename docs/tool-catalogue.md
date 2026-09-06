@@ -11,8 +11,8 @@ The five preferred discovery and read tools are:
 | `odoo_search_capabilities` | Find semantic helpers or actions by intent across several toolsets. Not on `/mcp`; see below. |
 | `odoo_search_models` | Find accessible technical models from authenticated API metadata. |
 | `odoo_describe_model` | Inspect fields and public method signatures before guessing. |
-| `odoo_search_records` | Perform bounded cross-domain or long-tail search. |
-| `odoo_read_records` | Read selected fields from known record IDs. |
+| `odoo_search_records` | Perform bounded cross-domain or long-tail search; a `specification` reads relations to any depth in one call. |
+| `odoo_read_records` | Read known record IDs, flat or with a nested `specification`. |
 
 `odoo_search_capabilities` is deliberately absent from `/mcp`. That profile lists
 its whole surface statically, so catalogue search there only spends caller context
@@ -23,7 +23,7 @@ profiles, which each expose a subset of the catalogue and where
 
 Further generic substrate tools are available in every writable profile:
 
-- `odoo_expand_record`, `odoo_aggregate_records`, and `odoo_describe_environment`;
+- `odoo_aggregate_records` and `odoo_describe_environment`;
 - `odoo_create_records`, `odoo_update_records`, `odoo_archive_records`, `odoo_post_message`, and `odoo_call_method`.
 
 `odoo_submit_feedback` is also present in every writable MCP profile. It lets any active governed Agent create one structured, low-trust report in the configured MCP development Inbox, even when that Agent has no Project application access. The Odoo method fixes and validates the destination, escapes all submitted text, and creates the task plus its audit marker in one transaction. The explicit `/mcp/read-only` transport profile hides it because that profile contains no mutations.
@@ -44,7 +44,7 @@ Thin domain list/get wrappers are intentionally absent where generic search/read
 
 The default profile promotes eight existing tools, without changing handlers,
 schemas, effects, authorization, or the one-attempt mutation contract. The complete
-candidate surface is 30 tools / 15,278 estimated input/output schema tokens. The
+candidate surface is 29 tools / 15,322 estimated input/output schema tokens. The
 count is 29 when materialization is disabled and can be lower when Odoo modules,
 methods or access are unavailable. Schema estimates are not measured model usage.
 
@@ -91,7 +91,7 @@ Actions do not bypass Odoo state or permissions. The agent should read the relev
 
 | URL | Intended visible surface |
 | --- | --- |
-| `/mcp` | Static everyday workflows plus generic substrate; maximum 30 tools/15.5k estimated schema tokens. |
+| `/mcp` | Static everyday workflows plus generic substrate; maximum 29 tools/15.5k estimated schema tokens. |
 | `/mcp/all` | Complete catalogue with deferred-loading metadata. |
 | `/mcp/read-only` | Every read capability currently available. |
 | `/mcp/accounting` | Universal core plus accounting, expenses, and related document actions. |
@@ -129,4 +129,7 @@ Module, public-method, model-access, and feature predicates remove specialized t
 - Relational (x2many) values accept raw Odoo command tuples or the named form `{link|unlink|delete|set: [ids]}`, `{create: [values]}`, `{update: [{id, values}]}`, `{clear: true}`, lowered to those tuples in a fixed order.
 - `company_ids`, `lang`, and `active_test` are named parameters that map onto `allowed_company_ids`, `lang`, and `active_test`. They override the same key supplied inside `context` and report the override as a warning.
 - `odoo_describe_model` projects and caps its payload. It returns `fields_page`/`methods_page` totals; absence must be read from those, not from the returned keys.
+- `odoo_search_records` and `odoo_read_records` accept either `fields` (flat; many2one values are `[id, display_name]` pairs, from `search_read`/`read`) or `specification`, Odoo's nested read spec (`web_search_read`): `{"name": {}, "partner_id": {"fields": {"display_name": {}}}, "line_ids": {"fields": {...}, "limit": 20}}` follows relations to any depth in one call. A bare `{}` on a relational field returns only ids. `odoo_expand_record` is superseded and registered on `all` only.
+- `odoo_create_records` and `odoo_update_records` accept the same `specification` and then run `web_save_multi` / `web_save`: the write and the read-back share one Odoo transaction and the result arrives as `read_back`, so no follow-up read is needed.
+- Searches ordered by `id asc` or `id desc` alone page by keyset: the next page restricts the domain by the last id seen and cannot skip or repeat rows when records are inserted or deleted between pages. Any other order pages by offset. Cursors are bound to the query and carry their mode.
 - `odoo_call_method` reports `execution.mode`. Odoo's published `api` classification selects the contract: `read` for a method Odoo states is readonly, `mutation` otherwise, including when the classification is unknown.

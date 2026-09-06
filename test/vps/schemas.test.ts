@@ -6,11 +6,15 @@ import {
   assertDomainStructure,
   attributedContext,
   decodeCursor,
+  decodePageCursor,
   DomainSchema,
   encodeCursor,
+  encodePageCursor,
+  keysetDirection,
   normalizeWriteValues,
   queryFingerprint,
-  resolveCallScope
+  resolveCallScope,
+  SpecificationSchema
 } from "../../src/odoo/schemas.js";
 
 describe("generic substrate bounds", () => {
@@ -171,5 +175,45 @@ describe("named call scope", () => {
       usl_correlation_id: "correlation-1"
     });
     expect(warnings).toEqual([]);
+  });
+});
+
+describe("page cursors", () => {
+  it("round-trips keyset and offset cursors bound to one fingerprint", () => {
+    fc.assert(fc.property(
+      fc.integer({ min: 1, max: 10_000_000 }),
+      fc.string({ minLength: 1, maxLength: 64 }),
+      (after, fingerprint) => {
+        expect(decodePageCursor(encodePageCursor({ kind: "keyset", after }, fingerprint), fingerprint))
+          .toEqual({ kind: "keyset", after });
+        expect(decodePageCursor(encodePageCursor({ kind: "offset", offset: after }, fingerprint), fingerprint))
+          .toEqual({ kind: "offset", offset: after });
+      }
+    ));
+    expect(decodePageCursor(undefined, "any")).toEqual({ kind: "offset", offset: 0 });
+  });
+
+  it("refuses a keyset cursor where an offset is required", () => {
+    const cursor = encodePageCursor({ kind: "keyset", after: 5 }, "fp");
+    expect(() => decodeCursor(cursor, "fp")).toThrow("cursor does not match");
+  });
+
+  it("pages by keyset only when the order is id alone", () => {
+    expect(keysetDirection("id asc")).toBe("asc");
+    expect(keysetDirection("  ID DESC ")).toBe("desc");
+    expect(keysetDirection("id")).toBeUndefined();
+    expect(keysetDirection("name asc, id asc")).toBeUndefined();
+    expect(keysetDirection("create_date desc")).toBeUndefined();
+  });
+});
+
+describe("read specifications", () => {
+  it("accepts nested specifications and bounds their depth", () => {
+    expect(SpecificationSchema.safeParse({ name: {}, partner_id: { fields: { display_name: {} } } }).success).toBe(true);
+    expect(SpecificationSchema.safeParse({}).success).toBe(false);
+    expect(SpecificationSchema.safeParse({ a: { bogus: 1 } }).success).toBe(false);
+    let deep: Record<string, unknown> = {};
+    for (let level = 0; level < 5; level++) deep = { fields: { [`f${level}`]: deep } };
+    expect(SpecificationSchema.safeParse({ root: deep }).success).toBe(false);
   });
 });

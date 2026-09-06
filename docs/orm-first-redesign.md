@@ -1,6 +1,6 @@
 # ORM-first MCP redesign
 
-Status: proposal. Steps 1-3 of the sequencing in §4 are implemented; steps 4-7 are not accepted.
+Status: proposal. Steps 1-3 of the sequencing in §4 are implemented, and the read and write halves of step 4 landed as `specification` on the existing tools; the remaining step-4 tools and steps 5-7 are not accepted.
 
 Baseline: `e9a7652` (`main`)
 
@@ -365,7 +365,7 @@ a catalogue that no longer exists.
 | Registered tools | 50 | ~12–16 |
 | `src/capabilities/` lines | 3,090 | ~900 (est.) |
 | Default-profile schema tokens | 14,988 | ~5,000 (est.) |
-| Relational read depth | 1 hop, 10 relations | arbitrary |
+| Relational read depth | 1 hop, 10 relations | arbitrary (landed) |
 | Heterogeneous batch write | unsupported | `web_save_multi` |
 | Odoo-derived field values | reimplemented per tool | `onchange` |
 | Label → id resolution | agent-guessed domain | `name_search` |
@@ -412,12 +412,19 @@ implemented.
    therefore moved from 15,000 to 15,500 rather than 16,500. Steps 4-7 are
    expected to take it well below 15,000 again. Deferred from this step as
    belonging to step 4's `odoo_group`: `having` on aggregation.
-4. **Add `odoo_search` (`web_search_read`), `odoo_prepare` (`onchange`),
-   `odoo_resolve` (`name_search`), `odoo_check_access`** alongside the existing
-   tools. Re-run the corpus. This is the point where the thesis is proved or
-   disproved on evidence.
-5. **Add `odoo_save` (`web_save` / `web_save_multi`)**; deprecate
-   `odoo_create_records` / `odoo_update_records`.
+4. **Partly done, differently than proposed.** Rather than a new `odoo_search`
+   tool, `web_search_read` landed as an optional `specification` on
+   `odoo_search_records` and `odoo_read_records`, which costs no new tool and
+   made `odoo_expand_record` redundant (now on `all` only). Keyset paging landed
+   with it (R4). Still to add, each reachable today through `odoo_call_method`
+   under the read contract: `odoo_prepare` (`onchange`), `odoo_resolve`
+   (`name_search`), `odoo_check_access` (`has_access`). Re-run the corpus before
+   promoting any of them.
+5. **Partly done, differently than proposed.** `web_save_multi` / `web_save`
+   landed as the same optional `specification` on `odoo_create_records` /
+   `odoo_update_records`, returning `read_back` from the one transaction.
+   Heterogeneous *update* (different values per id) is still not exposed;
+   heterogeneous *create* is, since `create` always took a `vals_list`.
 6. **Convert the `*_get_context` family to recipes**, one domain at a time,
    measuring the corpus after each.
 7. **S1–S4 — collapse the registry and the profiles** once the catalogue is

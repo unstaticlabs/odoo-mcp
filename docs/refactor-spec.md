@@ -70,7 +70,7 @@ Profiles are views over the same registry:
 
 | Profile | Surface |
 | --- | --- |
-| `default` | Broad generic substrate plus everyday document, project, collaboration and draft-accounting workflows, at most 30 tools and 15,500 schema tokens |
+| `default` | Broad generic substrate plus everyday document, project, collaboration and draft-accounting workflows, at most 29 tools and 15,500 schema tokens |
 | `all` | Entire catalogue for native tool search/deferred loading |
 | `read-only` | Every read capability; a visibility convenience, not credential authority |
 | `accounting`, `projects`, `documents`, `b2c` | Universal core plus tools carrying the corresponding tag |
@@ -87,13 +87,13 @@ Capability search normalizes case, punctuation, dots, hyphens, underscores, comm
 | `odoo_search_capabilities` | Search registry metadata; limit 1-20 |
 | `odoo_search_models` | Search models visible through `/doc-bearer`; cursor pagination, limit 1-50 |
 | `odoo_describe_model` | Fields and public methods; `/doc-bearer` primary, `fields_get` fallback |
-| `odoo_search_records` | Bounded domain, selected fields, cursor/order, limit 1-100, optional count |
-| `odoo_read_records` | One model, 1-100 IDs, at most 100 fields |
-| `odoo_expand_record` | One record, one relation hop, at most ten relations and 20 rows per relation |
+| `odoo_search_records` | Typed domain; `fields` or a nested Odoo `specification` (`web_search_read`); keyset paging when ordered by id; limit 1-100; optional count |
+| `odoo_read_records` | One model, 1-100 IDs, `fields` or a nested `specification`; archived records included |
+| `odoo_expand_record` | Superseded by `specification`; registered on `all` only |
 | `odoo_aggregate_records` | Validated `read_group`/`formatted_read_group` |
 | `odoo_describe_environment` | Current user, companies, locale, and installed modules |
-| `odoo_create_records` | One `create` call with 1-100 value objects |
-| `odoo_update_records` | One `write` call for 1-100 IDs and one value object |
+| `odoo_create_records` | One `create` call with 1-100 value objects, or `web_save_multi` with a read-back `specification` |
+| `odoo_update_records` | One `write` call for 1-100 IDs and one value object, or `web_save` with a read-back `specification` |
 | `odoo_archive_records` | Inherited `action_archive`; unsupported when the model has no active field |
 | `odoo_post_message` | One message on one record |
 | `odoo_delete_records` | Advanced `unlink` in one transaction |
