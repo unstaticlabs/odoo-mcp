@@ -420,9 +420,11 @@ implemented.
    under the read contract: `odoo_prepare` (`onchange`), `odoo_resolve`
    (`name_search`), `odoo_check_access` (`has_access`). Re-run the corpus before
    promoting any of them.
-5. **Partly done, differently than proposed.** `web_save_multi` / `web_save`
-   landed as the same optional `specification` on `odoo_create_records` /
-   `odoo_update_records`, returning `read_back` from the one transaction.
+5. **Partly done, differently than proposed.** Read-back landed as the same
+   optional `specification` on `odoo_create_records` / `odoo_update_records`,
+   returning `read_back`: `web_save` for updates and single creates, `create`
+   then a `web_search_read` by id for batch creates (Odoo's `web_save_multi`
+   only writes to existing records, so it cannot create).
    Heterogeneous *update* (different values per id) is still not exposed;
    heterogeneous *create* is, since `create` always took a `vals_list`.
 6. **Convert the `*_get_context` family to recipes**, one domain at a time,

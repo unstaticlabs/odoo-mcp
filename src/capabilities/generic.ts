@@ -165,8 +165,8 @@ function selectEntries(source: unknown, options: SelectionOptions): {
   };
 }
 
-// `create` answers with ids; `web_save`/`web_save_multi` answer with the records
-// read back, each carrying its id. Both prove which records now exist.
+// `create` answers with ids; `web_save` answers with the records read back,
+// each carrying its id. Both prove which records now exist.
 function resultIds(value: unknown): number[] {
   const values = Array.isArray(value) ? value : [value];
   const ids = values
@@ -923,22 +923,38 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
           instructions: "Search with a selective domain built from stable fields in the original values. If no stable unique fields exist, report that the create cannot be reconciled safely and do not repeat it."
         }
       };
-      // web_save_multi creates and reads back in the one transaction `create`
-      // would have used, so the read-back costs no extra round trip or risk.
-      const receipt = specification
-        ? await client.call<unknown>(context, model, "web_save_multi", {
-            vals_list: normalized,
+      // `web_save` called without ids creates one record and reads it back in
+      // the one transaction `create` would have used. Odoo's `web_save_multi`
+      // only writes to records that already exist, so a batch is created with
+      // `create` and then read back through `web_search_read` by id, the same
+      // call odoo_read_records uses; a read-back failure after a successful
+      // create reports an unknown outcome with the created ids.
+      const singleReadBack = Boolean(specification) && normalized.length === 1;
+      const receipt = singleReadBack
+        ? await client.call<unknown>(context, model, "web_save", {
+            vals: normalized[0],
             specification,
             context: rpcContext
           }, mutation)
         : await client.call<unknown>(context, model, "create", { vals_list: normalized, context: rpcContext }, mutation);
-      return receipt.finalize((result) => {
+      return receipt.finalize(async (result) => {
         const ids = resultIds(result);
+        let readBack: unknown = singleReadBack ? result : undefined;
+        if (specification && !singleReadBack) {
+          const result = await client.call<unknown>(context, model, "web_search_read", {
+            domain: [["id", "in", ids]],
+            specification,
+            limit: ids.length,
+            order: "id asc",
+            context: "active_test" in rpcContext ? rpcContext : { ...rpcContext, active_test: false }
+          }, { signal });
+          readBack = webSearchReadRows(model, result).rows;
+        }
         return {
           data: {
             ids,
             records: ids.map((id) => recordReference(context, model, id)),
-            ...(specification ? { read_back: decorateRecords(context, model, result) } : {}),
+            ...(specification ? { read_back: decorateRecords(context, model, readBack) } : {}),
             execution: { correlation_id: context.correlationId, outcome: "succeeded" as const }
           },
           warnings

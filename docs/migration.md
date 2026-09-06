@@ -68,10 +68,11 @@ These change existing tool contracts. Clients must refresh tool schemas.
   the raw id for a bare `{}` and a nested object when `fields` is requested on the
   relation. `odoo_read_records` with a `specification` still returns archived
   records, as `read` does.
-- `odoo_create_records` and `odoo_update_records` gain the same `specification`
-  and, when it is passed, run `web_save_multi` / `web_save` instead of
-  `create` / `write`. The response gains `read_back` with the records as read in
-  the same transaction. Without a `specification` nothing changes.
+- `odoo_create_records` and `odoo_update_records` gain the same `specification`.
+  When it is passed, a single create and every update run `web_save` instead of
+  `create` / `write`, and a batch create runs `create` followed by a `web_search_read` by id.
+  The response gains `read_back` with the records as read back. Without a
+  `specification` nothing changes.
 - Searches ordered by `id asc` or `id desc` alone now page by keyset. Cursors
   issued before this change still decode (they carry an offset), and a keyset
   cursor is rejected by any query whose order is not id alone.

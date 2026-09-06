@@ -310,7 +310,7 @@ describe("Odoo read specifications", () => {
 });
 
 describe("write-and-read-back", () => {
-  it("creates through web_save_multi and returns the records read back", async () => {
+  it("creates one record through web_save and returns it read back", async () => {
     const bodies: Record<string, unknown>[] = [];
     const fetcher = vi.fn<typeof fetch>(async (_url, init) => {
       bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
@@ -333,8 +333,39 @@ describe("write-and-read-back", () => {
         execution: { outcome: "succeeded" }
       }
     });
-    expect(jsonCalls(fetcher, "/project.task/web_save_multi")).toHaveLength(1);
-    expect(bodies[0]).toMatchObject({ vals_list: [{ name: "New task", tag_ids: [[4, 3, 0]] }] });
+    expect(jsonCalls(fetcher, "/project.task/web_save")).toHaveLength(1);
+    expect(jsonCalls(fetcher, "/project.task/create")).toHaveLength(0);
+    expect(bodies[0]).toMatchObject({ vals: { name: "New task", tag_ids: [[4, 3, 0]] } });
+    expect(bodies[0]).not.toHaveProperty("ids");
+  });
+
+  it("creates a batch through create and reads it back by id", async () => {
+    // Odoo's web_save_multi only writes to existing records and raises on an
+    // empty recordset, so a batch must be created first and read back after.
+    const bodies: Record<string, unknown>[] = [];
+    const fetcher = vi.fn<typeof fetch>(async (url, init) => {
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      if (String(url).endsWith("/project.task/create")) return Response.json([501, 502]);
+      return Response.json({ length: 2, records: [{ id: 501, display_name: "First" }, { id: 502, display_name: "Second" }] });
+    });
+    const client = await connected(fetcher);
+    const result = await client.callTool({
+      name: "odoo_create_records",
+      arguments: {
+        model: "project.task",
+        values: [{ name: "First" }, { name: "Second" }],
+        specification: { display_name: {} }
+      }
+    });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      data: { ids: [501, 502], read_back: [{ id: 501, display_name: "First" }, { id: 502, display_name: "Second" }] }
+    });
+    expect(jsonCalls(fetcher, "/project.task/create")).toHaveLength(1);
+    expect(jsonCalls(fetcher, "/project.task/web_search_read")).toHaveLength(1);
+    expect(jsonCalls(fetcher, "/project.task/web_save_multi")).toHaveLength(0);
+    expect(bodies[1]).toMatchObject({ domain: [["id", "in", [501, 502]]], limit: 2, specification: { display_name: {} } });
+    expect((bodies[1].context as Record<string, unknown>).active_test).toBe(false);
   });
 
   it("updates through web_save and returns the records read back", async () => {

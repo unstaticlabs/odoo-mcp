@@ -77,7 +77,7 @@ Capability search normalizes case, punctuation, dots, hyphens, underscores, comm
 | `odoo_expand_record` | Superseded by `specification`; registered on `all` only |
 | `odoo_aggregate_records` | Validated `formatted_read_group` |
 | `odoo_describe_environment` | Current user, companies, locale, and installed modules |
-| `odoo_create_records` | One `create` call with 1-100 value objects, or `web_save_multi` with a read-back `specification` |
+| `odoo_create_records` | One `create` call with 1-100 value objects; with a read-back `specification`, `web_save` for one record or `create` then a `web_search_read` by id for a batch |
 | `odoo_update_records` | One `write` call for 1-100 IDs and one value object, or `web_save` with a read-back `specification` |
 | `odoo_archive_records` | Inherited `action_archive`; unsupported when the model has no active field |
 | `odoo_post_message` | One message on one record |
