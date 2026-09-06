@@ -8,11 +8,18 @@ The five preferred discovery and read tools are:
 
 | Tool | Selection rule |
 | --- | --- |
-| `odoo_search_capabilities` | Find semantic helpers or actions by intent across several toolsets. |
+| `odoo_search_capabilities` | Find semantic helpers or actions by intent across several toolsets. Not on `/mcp`; see below. |
 | `odoo_search_models` | Find accessible technical models from authenticated API metadata. |
 | `odoo_describe_model` | Inspect fields and public method signatures before guessing. |
 | `odoo_search_records` | Perform bounded cross-domain or long-tail search. |
 | `odoo_read_records` | Read selected fields from known record IDs. |
+
+`odoo_search_capabilities` is deliberately absent from `/mcp`. That profile lists
+its whole surface statically, so catalogue search there only spends caller context
+to describe tools the caller can already see. It remains on `/mcp/all`, where
+deferred loading hides most schemas, and on the thematic and `/mcp/read-only`
+profiles, which each expose a subset of the catalogue and where
+`visible_in_current_profile` and the recommended fallback still carry information.
 
 Further generic substrate tools are available in every writable profile:
 
@@ -37,7 +44,7 @@ Thin domain list/get wrappers are intentionally absent where generic search/read
 
 The default profile promotes eight existing tools, without changing handlers,
 schemas, effects, authorization, or the one-attempt mutation contract. The complete
-candidate surface is 31 tools / 15,979 estimated input/output schema tokens. The
+candidate surface is 30 tools / 15,278 estimated input/output schema tokens. The
 count is 29 when materialization is disabled and can be lower when Odoo modules,
 methods or access are unavailable. Schema estimates are not measured model usage.
 
@@ -84,7 +91,7 @@ Actions do not bypass Odoo state or permissions. The agent should read the relev
 
 | URL | Intended visible surface |
 | --- | --- |
-| `/mcp` | Static everyday workflows plus generic substrate; maximum 31 tools/16.5k estimated schema tokens. |
+| `/mcp` | Static everyday workflows plus generic substrate; maximum 30 tools/15.5k estimated schema tokens. |
 | `/mcp/all` | Complete catalogue with deferred-loading metadata. |
 | `/mcp/read-only` | Every read capability currently available. |
 | `/mcp/accounting` | Universal core plus accounting, expenses, and related document actions. |

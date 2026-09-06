@@ -42,7 +42,8 @@ describe("canonical capability registry", () => {
     expect(names).toContain("odoo_submit_feedback");
     expect(names).toContain("activities_schedule");
     expect(names).not.toContain("odoo_delete_records");
-    expect(registry.profileBudget("default")).toMatchObject({ tools: 31 });
+    expect(names).not.toContain("odoo_search_capabilities");
+    expect(registry.profileBudget("default")).toMatchObject({ tools: 30 });
     expect(registry.profileBudget("default").schemaTokens)
       .toBeLessThanOrEqual(DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET);
   });
@@ -181,7 +182,7 @@ describe("canonical capability registry", () => {
     };
     const options = { profile: "default" as const, availability };
     const exposed = registry.list("default", availability).map((item) => item.name);
-    expect(exposed).toHaveLength(8);
+    expect(exposed).toHaveLength(7);
     expect(exposed).toContain("odoo_call_method");
 
     for (const query of ["expense", "write", "approve", "approve this expense"]) {
@@ -539,11 +540,12 @@ describe("canonical capability registry", () => {
     });
     const tools = await client.listTools();
     expect(tools.tools.map((tool) => tool.name)).toEqual(registry.list("default").map((item) => item.name));
-    const search = tools.tools.find((tool) => tool.name === "odoo_search_capabilities");
-    expect(search?.inputSchema).toMatchObject({ type: "object", additionalProperties: false });
-    expect(search?.outputSchema).toMatchObject({ type: "object", additionalProperties: false });
-    expect(search?._meta).toMatchObject({ "odoo/layer": "generic" });
-    expect(search?._meta).not.toHaveProperty("defer_loading");
+    expect(tools.tools.map((tool) => tool.name)).not.toContain("odoo_search_capabilities");
+    const models = tools.tools.find((tool) => tool.name === "odoo_search_models");
+    expect(models?.inputSchema).toMatchObject({ type: "object", additionalProperties: false });
+    expect(models?.outputSchema).toMatchObject({ type: "object", additionalProperties: false });
+    expect(models?._meta).toMatchObject({ "odoo/layer": "generic" });
+    expect(models?._meta).not.toHaveProperty("defer_loading");
     const semantic = tools.tools.find((tool) => tool.name === "projects_get_task_context");
     expect(semantic?._meta).toMatchObject({ "odoo/toolsets": expect.arrayContaining(["projects"]) });
     expect(semantic?._meta).not.toHaveProperty("defer_loading");
@@ -567,7 +569,18 @@ describe("canonical capability registry", () => {
     });
     expect(method?._meta).not.toHaveProperty("defer_loading");
 
-    const searchResult = await client.callTool({
+    // A thematic profile still carries catalogue search, and expense tools are
+    // outside it, so the "available but not visible here" report stays meaningful.
+    const projectsServer = registry.createServer({ ...requestContext(), profile: "projects" });
+    const projectsClient = new Client({ name: "projects-registry-test", version: "1.0.0" });
+    const [projectsClientTransport, projectsServerTransport] = InMemoryTransport.createLinkedPair();
+    await projectsServer.connect(projectsServerTransport);
+    await projectsClient.connect(projectsClientTransport);
+    connections.push(async () => {
+      await projectsClient.close();
+      await projectsServer.close();
+    });
+    const searchResult = await projectsClient.callTool({
       name: "odoo_search_capabilities",
       arguments: { query: "approve this expense", limit: 10 }
     });

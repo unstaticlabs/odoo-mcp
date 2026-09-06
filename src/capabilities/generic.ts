@@ -202,12 +202,16 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
       "Search the complete Odoo MCP catalogue by task, object, workflow, or domain. Results recommend callable tools and unknown-availability candidates, but never activate a tool, change the current profile, or alter tools/list. Tool visibility and Odoo authorization remain separate.",
     layer: "generic",
     toolsets: ["core"],
-    profiles: [],
+    // Absent from `default`, where every tool in the profile is already listed
+    // statically and catalogue search only costs the caller context. It stays on
+    // `all`, where deferred loading hides most schemas, and on the thematic and
+    // read-only profiles, which each expose a subset of the catalogue.
+    profiles: ["accounting", "projects", "documents", "b2c", "advanced"],
     effect: "read",
     annotations: readAnnotations,
     keywords: ["discover", "tools", "workflow", "semantic", "business action"],
     requiredModules: [],
-    defaultVisible: true,
+    defaultVisible: false,
     alwaysLoad: true,
     sortOrder: 0,
     input: z.object({

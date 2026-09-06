@@ -28,13 +28,17 @@ bearer capabilities.
 - Stateless MCP requests; no application-level MCP session store.
 - Optional, fail-open, privacy-filtered PostHog MCP Analytics.
 
-The default surface contains up to 31 statically advertised tools (15,979 estimated
-schema tokens, below the 16,500 budget). Odoo availability, access and feature flags
+The default surface contains up to 30 statically advertised tools (15,278 estimated
+schema tokens, below the 15,500 budget). Odoo availability, access and feature flags
 may reduce the count. The budget was raised from 15,000 when domains, relational
 commands and company scope became typed parameters; see the
 [ORM-first redesign](docs/orm-first-redesign.md). Everyday document, project, activity, Chatter, feedback and
 draft-accounting workflows do not require a profile switch. See the
 [workflow map](docs/tool-catalogue.md#everyday-chatgpt-workflows).
+
+`odoo_search_capabilities` is not on `/mcp`, where every tool in the profile is
+already listed statically. It remains on `/mcp/all`, on the thematic profiles, and
+on `/mcp/read-only`, each of which exposes only part of the catalogue.
 
 Only `/mcp/all` uses deferred-loading hints. On that endpoint these five tools
 are marked for immediate loading:

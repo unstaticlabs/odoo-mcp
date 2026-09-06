@@ -349,7 +349,7 @@ turns out to be wrong is a text change, not a release.
 | | Change |
 | --- | --- |
 | S1 | Collapse six visibility axes to `tags: string[]` + `tier: "core" \| "extended" \| "advanced"`. A profile becomes `{tags, maxTier}`. `layer` becomes descriptive or is dropped. |
-| S2 | Delete `recommendFallback`, the stopword list, the singulariser, and the scoring function (~150 lines). With twelve tools there is nothing to route. `odoo_search_capabilities` disappears with them. |
+| S2 | Delete `recommendFallback`, the stopword list, the singulariser, and the scoring function (~150 lines). With twelve tools there is nothing to route. `odoo_search_capabilities` disappears with them; step 3 already removed it from `default`. |
 | S3 | Profiles reduce to `/mcp` and `/mcp/read-only`. Thematic profiles exist only because the surface was too large; at twelve tools they are pure complexity — `ProfileName`, per-profile handler caches, budget tests, and the whole deferred-loading compatibility section of `tool-catalogue.md`. |
 | S4 | `requiredModules` / `requiredPublicMethods` / `requiredModelAccess` / `requiredFeatures` and the `CapabilityAvailability` machinery largely evaporate with the domain tools. Generic tools are available whenever Odoo is; Odoo decides access per call, which the invariants already declare authoritative. `agent_access_cache.ts` (563 lines) shrinks to identity plus environment. |
 
@@ -404,10 +404,14 @@ implemented.
    domain leaves with Odoo's own arity check, named x2many commands lowered to
    command tuples, and `company_ids`/`lang`/`active_test` as named parameters.
 
-   Cost: the default profile moved from 14,988 to 15,979 estimated schema tokens,
-   so the `/readyz` budget moved from 15,000 to 16,500. Steps 4-7 are expected to
-   take it well below 15,000 again. Deferred from this step as belonging to
-   step 4's `odoo_group`: `having` on aggregation.
+   Cost: the typed schemas took the default profile from 14,988 to 15,979
+   estimated schema tokens. Dropping `odoo_search_capabilities` from `default` —
+   an early instalment of S2, since that profile lists its whole surface
+   statically and catalogue search there describes only what the caller already
+   sees — paid back 701, leaving 15,278 across 30 tools. The `/readyz` budget
+   therefore moved from 15,000 to 15,500 rather than 16,500. Steps 4-7 are
+   expected to take it well below 15,000 again. Deferred from this step as
+   belonging to step 4's `odoo_group`: `having` on aggregation.
 4. **Add `odoo_search` (`web_search_read`), `odoo_prepare` (`onchange`),
    `odoo_resolve` (`name_search`), `odoo_check_access`** alongside the existing
    tools. Re-run the corpus. This is the point where the thesis is proved or

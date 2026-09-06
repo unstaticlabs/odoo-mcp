@@ -54,8 +54,13 @@ These change existing tool contracts. Clients must refresh tool schemas.
   three-element ones. Plain scalar and id-list values are unchanged.
 - Generic read and write tools accept `company_ids`, `lang`, and `active_test`
   alongside `context`.
+- `odoo_search_capabilities` is removed from the `default` profile, which drops
+  from 31 to 30 tools. It is unchanged on `/mcp/all`, the thematic profiles, and
+  `/mcp/read-only`. A `/mcp` client that called it must either use a profile that
+  still carries it or rely on the statically listed surface, which is complete for
+  that profile.
 - The default-profile schema-token budget enforced by `/readyz` moves from 15,000
-  to 16,500 (`DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET`). Operators gating on the
+  to 15,500 (`DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET`). Operators gating on the
   literal 15,000 must update that check.
 | thin project list/get wrappers | generic search/read or `projects_get_task_context` |
 | legacy document model access | `documents_*` capabilities backed by `usl.document` |

@@ -61,9 +61,10 @@ describe("stdio entrypoint", () => {
     try {
       await client.connect(transport);
       const tools = await client.listTools();
-      expect(tools.tools).toHaveLength(8);
+      expect(tools.tools).toHaveLength(7);
+      // Catalogue search is not on `default`; the remaining four read primitives are.
+      expect(tools.tools.map((tool) => tool.name)).not.toContain("odoo_search_capabilities");
       expect(tools.tools.map((tool) => tool.name)).toEqual(expect.arrayContaining([
-        "odoo_search_capabilities",
         "odoo_search_models",
         "odoo_describe_model",
         "odoo_search_records",
