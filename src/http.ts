@@ -4,6 +4,7 @@ import { toNodeHandler } from "@modelcontextprotocol/node";
 import { createMcpHandler, type AuthInfo } from "@modelcontextprotocol/server";
 import type { NextFunction, Request, Response } from "express";
 import { createOAuthService } from "./auth/oauth.js";
+import { DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET } from "./capabilities/registry.js";
 import { OdooError } from "./odoo/client.js";
 import { AgentAccessUnavailableError, AgentAccessWarmingError } from "./runtime/agent_access_cache.js";
 import {
@@ -201,7 +202,7 @@ export function createHttpApp(
         oauthStatus = "error";
       }
     }
-    const ready = budget.tools <= 31 && budget.schemaTokens <= 15_000 && oauthStatus !== "error";
+    const ready = budget.tools <= 31 && budget.schemaTokens <= DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET && oauthStatus !== "error";
     response.json({
       schema: "usl-odoo-mcp-readiness/v1",
       status: ready ? "ready" : "not_ready",

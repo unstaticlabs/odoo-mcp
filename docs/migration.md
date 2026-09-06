@@ -28,6 +28,35 @@ The most common mappings are:
 | deletion | default `odoo_archive_records`; advanced `odoo_delete_records` |
 | chatter message variants | `odoo_post_message` |
 | arbitrary model method | static `odoo_call_method` in writable named profiles; deferred only on `all` |
+
+## Contract changes in the ORM-substrate work
+
+These change existing tool contracts. Clients must refresh tool schemas.
+
+- `odoo_describe_model` now projects and caps its response. `fields` and `methods`
+  carry a bounded, projected subset, and two new `fields_page`/`methods_page`
+  objects report `total`, `returned`, `has_more`, and `detail`. Callers that
+  enumerated every field must page with `filter`, `field_names`, `field_limit`,
+  or `detail: "full"`, and must read absence from the page totals. This exists
+  because the previous response reached 156,100 characters on `account.move`.
+- `odoo_call_method` gains `execution.mode`. A method Odoo publishes as
+  `readonly` now runs under the read contract and may be retried; every other
+  method keeps the one-attempt mutation contract unchanged. The tool consults
+  the authenticated API document, which adds one cached metadata request per
+  model. Its MCP annotations stay conservative because a single tool cannot
+  annotate per call.
+- `odoo_search_records` and `odoo_aggregate_records` type their `domain`. Domains
+  that were previously forwarded verbatim and rejected by Odoo are now rejected
+  by the MCP with an actionable message. Unknown operators, malformed leaves, and
+  connectives without enough operands no longer reach Odoo.
+- `odoo_create_records` and `odoo_update_records` accept the named relational
+  command form in addition to raw tuples, and normalize two-element tuples to
+  three-element ones. Plain scalar and id-list values are unchanged.
+- Generic read and write tools accept `company_ids`, `lang`, and `active_test`
+  alongside `context`.
+- The default-profile schema-token budget enforced by `/readyz` moves from 15,000
+  to 16,500 (`DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET`). Operators gating on the
+  literal 15,000 must update that check.
 | thin project list/get wrappers | generic search/read or `projects_get_task_context` |
 | legacy document model access | `documents_*` capabilities backed by `usl.document` |
 | expense/batch workflow chains | fixed-intent `expenses_*` and `expense_batches_*` actions |

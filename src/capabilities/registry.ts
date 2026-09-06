@@ -18,6 +18,17 @@ import { emitEvent } from "../runtime/logging.js";
 import { withMcpTraceContext } from "../runtime/observability.js";
 import { SERVER_VERSION } from "../version.js";
 
+/**
+ * Ceiling on the estimated input/output schema tokens the `default` profile may
+ * advertise statically, enforced by `/readyz`.
+ *
+ * Raised from 15,000 when domains, relational commands and company scope became
+ * typed parameters: the schemas grew so malformed calls fail here, with an
+ * actionable message, instead of inside Odoo. Consolidating the catalogue onto
+ * the ORM substrate is expected to take this well below 15,000 again.
+ */
+export const DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET = 16_500;
+
 export type CapabilityLayer = "generic" | "semantic" | "business_action";
 export type CapabilityEffect = "read" | "write" | "consequential" | "irreversible";
 export type ModelOperation = "read" | "create" | "write" | "unlink";
@@ -533,6 +544,7 @@ export class CapabilityRegistry {
     context.agentIdentity = state.snapshot?.identity;
     context.availableModules = state.snapshot?.surface?.modules ?? null;
     context.availablePublicMethods = state.snapshot?.surface?.publicMethods ?? null;
+    context.readonlyPublicMethods = state.snapshot?.surface?.readonlyMethods ?? null;
     context.availableModelAccess = state.snapshot?.surface?.modelAccess ?? null;
   }
 
@@ -602,6 +614,7 @@ export class CapabilityRegistry {
             surface: context.availableModules === null ? null : {
               modules: context.availableModules ?? new Set(),
               publicMethods: context.availablePublicMethods ?? new Map(),
+              readonlyMethods: context.readonlyPublicMethods ?? new Map(),
               modelAccess: context.availableModelAccess ?? new Map()
             },
             refreshedAt: Date.now()

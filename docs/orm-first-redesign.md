@@ -1,6 +1,6 @@
 # ORM-first MCP redesign
 
-Status: proposal, not accepted
+Status: proposal. Steps 1-3 of the sequencing in §4 are implemented; steps 4-7 are not accepted.
 
 Baseline: `e9a7652` (`main`)
 
@@ -164,11 +164,20 @@ It is wrong for `web_search_read`, `name_search`, `onchange`, and `has_access`
 analysis, and each one was annotated to the client as destructive and denied
 the retry policy that `odoo_search_records` gets for the same underlying work.
 
-The information needed to fix this already exists. `/doc-bearer` reports
-`"api": ["model", "readonly"]` per method — the analysis read it directly from
-the cached document. But `discoverSurfaceStrict` in `src/odoo/client.ts:~400`
-flattens `candidate.methods` into a `Set<string>` of names and discards the
-`api` array. The signal is fetched, then thrown away.
+The information needed to fix this already exists. The per-model `/doc-bearer`
+document reports `"api": ["model", "readonly"]` for each method — the analysis
+read it directly, and `odoo_describe_model` already fetches and caches exactly
+that document. The aggregate index document that `discoverSurfaceStrict` consumes
+carries only method *names*, so the classification was never available to the
+surface cache; nothing consulted the per-model document either. The signal was
+one cached request away and unused.
+
+Resolved in the step-1 change: `methodIsReadonly` consults that document, and a
+method Odoo publishes as `readonly` now runs under the read contract. Anything
+Odoo does not explicitly classify keeps the one-attempt mutation contract, so an
+absent or unreachable document can never relax it. `discoverSurfaceStrict` also
+now accepts the descriptor-shaped `methods` map — previously it would have thrown
+on it and degraded the whole surface — and records the readonly set when present.
 
 ### 2.5 Inputs that should be typed are not
 
@@ -332,7 +341,7 @@ turns out to be wrong is a text change, not a release.
 | R3 | Promote `company_ids` → `allowed_company_ids`, `lang`, `tz`, `active_test` to named typed parameters. Free-form `context` kept for the long tail. | §2.5 |
 | R4 | Keyset pagination on `id` when the order permits; offset only as a warned fallback. | §2.6 |
 | R5 | Drop `_ref` injection. Return the public origin once in `meta`. | §2.8 |
-| R6 | Preserve per-method `api` metadata through `discoverSurfaceStrict`. | §2.4 |
+| R6 | Consult Odoo's per-method `api` classification; accept the descriptor-shaped `methods` map in `discoverSurfaceStrict`. | §2.4 |
 | R7 | Project `inspect_model` output; never return `depends`, raw `domain`, `manual`, `exportable`, `change_default` unless asked. | §2.3 |
 
 ### Registry simplification
@@ -381,13 +390,24 @@ a catalogue that no longer exists.
 ## 4. Suggested sequencing
 
 Each step is independently reversible and independently valuable. Steps 1–3
-are worth doing whether or not the consolidation is accepted.
+are worth doing whether or not the consolidation is accepted, and are now
+implemented.
 
-1. **R6 + escape-hatch split** — preserve `api` metadata, classify readonly
-   methods correctly. Small, strictly a safety fix, unlocks ORM reads today.
-2. **R7 — project `inspect_model`.** Makes the tool usable on `account.move`.
-3. **R1 + R2 + R3 — typed domains, commands, and context.** Pure reliability;
-   no contract removal.
+1. ~~**R6 + escape-hatch split**~~ — **done.** `odoo_call_method` consults Odoo's
+   published `api` classification and runs a `readonly` method under the read
+   contract, reporting which contract applied in `execution.mode`. Unknown
+   classification keeps the mutation contract.
+2. ~~**R7 — project `describe_model`**~~ — **done.** Projected attributes, name and
+   substring filters, caps, `detail: "full"`, and `fields_page`/`methods_page`
+   totals so absence is never inferred from a cap.
+3. ~~**R1 + R2 + R3 — typed domains, commands, and context**~~ — **done.** Typed
+   domain leaves with Odoo's own arity check, named x2many commands lowered to
+   command tuples, and `company_ids`/`lang`/`active_test` as named parameters.
+
+   Cost: the default profile moved from 14,988 to 15,979 estimated schema tokens,
+   so the `/readyz` budget moved from 15,000 to 16,500. Steps 4-7 are expected to
+   take it well below 15,000 again. Deferred from this step as belonging to
+   step 4's `odoo_group`: `having` on aggregation.
 4. **Add `odoo_search` (`web_search_read`), `odoo_prepare` (`onchange`),
    `odoo_resolve` (`name_search`), `odoo_check_access`** alongside the existing
    tools. Re-run the corpus. This is the point where the thesis is proved or

@@ -23,7 +23,7 @@ Further generic substrate tools are available in every writable profile:
 
 The only advanced-only generic tool is `odoo_delete_records`.
 
-Use `odoo_call_method` when a legitimate public Distribution method has no MCP shortcut or when preserving a model's versatile public API is more useful than adding a thin wrapper. Prefer a fixed-intent action when it reduces ambiguity, returns better context, or guarantees a multi-step invariant. The method tool receives one attempt and may report unknown completion.
+Use `odoo_call_method` when a legitimate public Distribution method has no MCP shortcut or when preserving a model's versatile public API is more useful than adding a thin wrapper. Prefer a fixed-intent action when it reduces ambiguity, returns better context, or guarantees a multi-step invariant. A method Odoo publishes as `readonly` runs under the read contract and is retried like any other read; every other method receives one attempt and may report unknown completion. The returned `execution.mode` states which contract applied.
 
 ## Semantic catalogue
 
@@ -37,7 +37,7 @@ Thin domain list/get wrappers are intentionally absent where generic search/read
 
 The default profile promotes eight existing tools, without changing handlers,
 schemas, effects, authorization, or the one-attempt mutation contract. The complete
-candidate surface is 31 tools / 14,988 estimated input/output schema tokens. The
+candidate surface is 31 tools / 15,979 estimated input/output schema tokens. The
 count is 29 when materialization is disabled and can be lower when Odoo modules,
 methods or access are unavailable. Schema estimates are not measured model usage.
 
@@ -84,7 +84,7 @@ Actions do not bypass Odoo state or permissions. The agent should read the relev
 
 | URL | Intended visible surface |
 | --- | --- |
-| `/mcp` | Static everyday workflows plus generic substrate; maximum 31 tools/15k estimated schema tokens. |
+| `/mcp` | Static everyday workflows plus generic substrate; maximum 31 tools/16.5k estimated schema tokens. |
 | `/mcp/all` | Complete catalogue with deferred-loading metadata. |
 | `/mcp/read-only` | Every read capability currently available. |
 | `/mcp/accounting` | Universal core plus accounting, expenses, and related document actions. |
@@ -118,3 +118,8 @@ Module, public-method, model-access, and feature predicates remove specialized t
 - Read/write/consequential/irreversible effects and MCP annotations describe behavior; they do not authorize it.
 - Search and read calls select fields and bound result counts instead of dumping arbitrary records.
 - Context reserves only connector origin and correlation metadata; caller-supplied reserved `usl_*` values are removed.
+- Domains are typed: a leaf is `[field path, operator, value]` with an enumerated operator, and `&`/`|`/`!` arity is checked the way Odoo's own `normalize_domain` checks it. A malformed filter is rejected before any Odoo call.
+- Relational (x2many) values accept raw Odoo command tuples or the named form `{link|unlink|delete|set: [ids]}`, `{create: [values]}`, `{update: [{id, values}]}`, `{clear: true}`, lowered to those tuples in a fixed order.
+- `company_ids`, `lang`, and `active_test` are named parameters that map onto `allowed_company_ids`, `lang`, and `active_test`. They override the same key supplied inside `context` and report the override as a warning.
+- `odoo_describe_model` projects and caps its payload. It returns `fields_page`/`methods_page` totals; absence must be read from those, not from the returned keys.
+- `odoo_call_method` reports `execution.mode`. Odoo's published `api` classification selects the contract: `read` for a method Odoo states is readonly, `mutation` otherwise, including when the classification is unknown.

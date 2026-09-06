@@ -37,6 +37,7 @@ export interface RequestContext {
   availableModules?: ReadonlySet<string> | null;
   agentIdentity?: AgentIdentity;
   availablePublicMethods?: ReadonlyMap<string, ReadonlySet<string>> | null;
+  readonlyPublicMethods?: ReadonlyMap<string, ReadonlySet<string>> | null;
   availableModelAccess?: ReadonlyMap<string, OdooModelAccess> | null;
   touchAgentAccess?: () => void;
   noteAgentAccessFailure?: (error: unknown) => void;

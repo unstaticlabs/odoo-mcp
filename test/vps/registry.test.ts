@@ -2,6 +2,7 @@ import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { z } from "zod";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createCapabilityRegistry } from "../../src/capabilities/index.js";
+import { DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET } from "../../src/capabilities/registry.js";
 import { CapabilityRegistry, defineCapability } from "../../src/capabilities/registry.js";
 import { OdooClient } from "../../src/odoo/client.js";
 import type { AgentAccessState } from "../../src/runtime/agent_access_cache.js";
@@ -42,7 +43,8 @@ describe("canonical capability registry", () => {
     expect(names).toContain("activities_schedule");
     expect(names).not.toContain("odoo_delete_records");
     expect(registry.profileBudget("default")).toMatchObject({ tools: 31 });
-    expect(registry.profileBudget("default").schemaTokens).toBeLessThanOrEqual(15_000);
+    expect(registry.profileBudget("default").schemaTokens)
+      .toBeLessThanOrEqual(DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET);
   });
 
   it("exposes the public method substrate through writable profiles but not read-only", () => {

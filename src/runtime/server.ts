@@ -42,6 +42,7 @@ function applySnapshot(context: ReturnType<typeof createRequestContext>, snapsho
   context.agentIdentity = snapshot.identity;
   context.availableModules = snapshot.surface?.modules ?? null;
   context.availablePublicMethods = snapshot.surface?.publicMethods ?? null;
+  context.readonlyPublicMethods = snapshot.surface?.readonlyMethods ?? null;
   context.availableModelAccess = snapshot.surface?.modelAccess ?? null;
 }
 

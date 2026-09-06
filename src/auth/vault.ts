@@ -41,6 +41,12 @@ const StoredAccessSnapshotSchema = z.object({
       z.string().min(1).max(255),
       z.array(z.string().min(1).max(255)).max(10_000)
     ])).max(10_000),
+    // Optional so a snapshot persisted before Odoo's readonly classification
+    // was recorded still loads; an absent entry means "not stated".
+    readonly_methods: z.array(z.tuple([
+      z.string().min(1).max(255),
+      z.array(z.string().min(1).max(255)).max(10_000)
+    ])).max(10_000).optional(),
     model_access: z.array(z.tuple([
       z.string().min(1).max(255),
       z.object({
@@ -352,6 +358,7 @@ export class CredentialVault implements AgentAccessSnapshotStore {
         surface: {
           modules: new Set(parsed.surface.modules),
           publicMethods: new Map(parsed.surface.public_methods.map(([model, methods]) => [model, new Set(methods)])),
+          readonlyMethods: new Map((parsed.surface.readonly_methods ?? []).map(([model, methods]) => [model, new Set(methods)])),
           modelAccess: new Map(parsed.surface.model_access),
           ...(parsed.surface.etag ? { etag: parsed.surface.etag } : {})
         }
@@ -373,6 +380,9 @@ export class CredentialVault implements AgentAccessSnapshotStore {
         ...(snapshot.surface.etag ? { etag: snapshot.surface.etag } : {}),
         modules: [...snapshot.surface.modules].sort(),
         public_methods: [...snapshot.surface.publicMethods]
+          .map(([model, methods]) => [model, [...methods].sort()] as const)
+          .sort(([left], [right]) => left.localeCompare(right)),
+        readonly_methods: [...(snapshot.surface.readonlyMethods ?? new Map())]
           .map(([model, methods]) => [model, [...methods].sort()] as const)
           .sort(([left], [right]) => left.localeCompare(right)),
         model_access: [...snapshot.surface.modelAccess]
