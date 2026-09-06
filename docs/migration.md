@@ -28,6 +28,13 @@ The most common mappings are:
 | deletion | default `odoo_archive_records`; advanced `odoo_delete_records` |
 | chatter message variants | `odoo_post_message` |
 | arbitrary model method | static `odoo_call_method` in writable named profiles; deferred only on `all` |
+| thin project list/get wrappers | generic search/read or `projects_get_task_context` |
+| legacy document model access | `documents_*` capabilities backed by `usl.document` |
+| expense/batch workflow chains | fixed-intent `expenses_*` and `expense_batches_*` actions |
+| legacy accounting report wrappers | rebuilt `accounting_*` context/report capabilities |
+
+Duplicated server-specific tool names, UI button scraping as the method
+catalogue, and multi-call claims of atomicity are not supported.
 
 ## Contract changes in the ORM-substrate work
 
@@ -78,12 +85,6 @@ These change existing tool contracts. Clients must refresh tool schemas.
 - The default-profile schema-token budget enforced by `/readyz` moves from 15,000
   to 15,500 (`DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET`). Operators gating on the
   literal 15,000 must update that check.
-| thin project list/get wrappers | generic search/read or `projects_get_task_context` |
-| legacy document model access | `documents_*` capabilities backed by `usl.document` |
-| expense/batch workflow chains | fixed-intent `expenses_*` and `expense_batches_*` actions |
-| legacy accounting report wrappers | rebuilt `accounting_*` context/report capabilities |
-
-Old offset pagination, heterogeneous batch writes, duplicated server-specific tool names, UI button scraping as the primary method catalogue, feedback submission, and multi-call claims of atomicity are not supported.
 
 ## Behavior changes
 

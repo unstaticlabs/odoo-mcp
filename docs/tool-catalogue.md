@@ -2,9 +2,25 @@
 
 The executable source of truth is the canonical registry created in `src/capabilities/index.ts`. This document describes selection policy; tool schemas and module predicates come from code.
 
-## Universal core
+This document is also the single owner of the surface numbers. Other documents
+refer here instead of repeating them.
 
-The five preferred discovery and read tools are:
+## Current default surface
+
+| Measure | Value |
+| --- | ---: |
+| Tools on `/mcp` with every feature available | 29 |
+| Tools on `/mcp` without document materialization | 27 |
+| Estimated input/output schema tokens on `/mcp` | 15,322 |
+| Budget enforced by `/readyz` (`DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET`) | 15,500 |
+
+Odoo module, method, and access availability can lower the counts further.
+Schema estimates are not measured model usage. Update this table, and only this
+table, when the surface changes.
+
+## Discovery and read primitives
+
+The preferred discovery and read tools are:
 
 | Tool | Selection rule |
 | --- | --- |
@@ -40,13 +56,9 @@ Document tools use the Distribution archive facade for search, context, bounded 
 
 Thin domain list/get wrappers are intentionally absent where generic search/read already communicates the task cleanly.
 
-## Everyday ChatGPT workflows
+## Everyday workflows on `/mcp`
 
-The default profile promotes eight existing tools, without changing handlers,
-schemas, effects, authorization, or the one-attempt mutation contract. The complete
-candidate surface is 29 tools / 15,322 estimated input/output schema tokens. The
-count is 29 when materialization is disabled and can be lower when Odoo modules,
-methods or access are unavailable. Schema estimates are not measured model usage.
+These workflows are complete on the default profile without a profile switch:
 
 | Workflow | Static tools on `/mcp` |
 | --- | --- |
@@ -58,19 +70,16 @@ methods or access are unavailable. Schema estimates are not measured model usage
 | Prepare vendor bills/credit notes | `accounting_get_invoice_context`, `expenses_configure_draft_vendor_bill` |
 | Report a connector issue | `odoo_submit_feedback` |
 
-Activity rescheduling/editing still uses the generic update tool where Odoo
+Activity rescheduling and editing use the generic update tool where Odoo
 permits it; completion uses the documented public method via `odoo_call_method`.
-This release does not introduce new activity methods or expand their permissions.
-Likewise, less-common document linking/catalogue operations and expense
-approval/posting remain available in thematic profiles or through the inspected
-public-method fallback, not newly promoted into default.
+Less common document linking and catalogue operations, and expense approval and
+posting, live in the thematic profiles or behind the inspected public-method
+fallback rather than on `/mcp`.
 
-Prefer a matching visible workflow tool. Use capability search when the action
-is unclear; do not repeatedly search hoping to load an absent schema. Returning
-a tool name cannot activate it. Keep `/mcp/all` for clients with verified host-side
-tool search; its five immediate-loading primitives and deferred metadata remain
-unchanged. Reconnect and start a new ChatGPT conversation before comparing the
-actual tool list and running the golden prompts.
+Prefer a matching visible workflow tool. On `/mcp` every tool is listed, so there
+is nothing further to discover there. Keep `/mcp/all` for clients with verified
+host-side tool search. Reconnect and start a new ChatGPT conversation before
+comparing the actual tool list and running the golden prompts.
 
 ## Business action catalogue
 

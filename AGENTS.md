@@ -1,6 +1,6 @@
 # Repository instructions
 
-This repository is the canonical MCP for the self-hosted USL Odoo Distribution. The authoritative Odoo implementation is the sibling checkout at `/Users/roger/projects/odoo`; inspect that source before changing model names, fields, public methods, permissions, or workflow assumptions.
+This repository is the canonical MCP for the self-hosted USL Odoo Distribution. The authoritative Odoo implementation is the sibling Distribution checkout (branch `19-usl`), conventionally cloned next to this repository; inspect that source before changing model names, fields, public methods, permissions, or workflow assumptions.
 
 ## Architecture invariants
 
@@ -36,7 +36,7 @@ This repository is the canonical MCP for the self-hosted USL Odoo Distribution. 
 - Durable repository rules belong here. No nested `AGENTS.md` is currently needed because the runtime, capabilities, tests, and docs share these invariants.
 - Reusable procedures belong in `.agents/skills`; do not duplicate them into tool descriptions.
 - MCP server instructions stay concise and universal. Workflow detail belongs in documentation or evaluation cases.
-- Update `docs/refactor-spec.md` only when an architectural decision or authoritative Distribution fact changes; use the focused runbooks for operational changes.
+- `docs/refactor-spec.md` records accepted architecture decisions and authoritative Distribution facts; update it only when one of those changes. `docs/tool-catalogue.md` is the single owner of tool counts and the schema-token budget; other documents refer to it rather than repeating numbers. Use the focused runbooks for operational changes.
 
 ## Required checks
 

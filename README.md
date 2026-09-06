@@ -4,17 +4,16 @@ One agent-facing MCP for the self-hosted USL Odoo Distribution. It runs as a Nod
 
 The interface deliberately combines:
 
-- five discovery and read primitives preferred for initial loading on `/mcp/all`;
-- a broad generic Odoo substrate for cross-domain and unanticipated work, built on Odoo's own read specification, typed domains, and keyset paging;
+- a generic Odoo substrate for cross-domain and unanticipated work, built on Odoo's own read specification, typed domains, and keyset paging;
 - statically callable everyday workflow tools on `/mcp`, with deferred discovery on `/mcp/all`;
 - thematic profiles generated from one capability registry;
-- Odoo-authoritative permissions, record rules, company scope, and transactions.
+- Odoo-authoritative permissions, record rules, company scope, and transactions;
 - a governed autonomous Agent identity for every connection.
 
 Tool visibility is context optimization, not authorization. `odoo_call_method` is a statically advertised, one-shot escape hatch on writable named profiles, deferred only on `/mcp/all`; Odoo remains the authority for public-method dispatch and access.
 
-Documents remain metadata/text-only until an agent explicitly invokes the
-explicit `documents_create_download_url` action. Odoo then issues a revocable,
+Documents remain metadata/text-only until an agent explicitly invokes
+`documents_create_download_url`. Odoo then issues a revocable,
 short-lived URL for one exact version; ordinary searches and reads never create
 bearer capabilities.
 
@@ -28,30 +27,11 @@ bearer capabilities.
 - Stateless MCP requests; no application-level MCP session store.
 - Optional, fail-open, privacy-filtered PostHog MCP Analytics.
 
-The default surface contains up to 29 statically advertised tools (15,322 estimated
-schema tokens, below the 15,500 budget). Odoo availability, access and feature flags
-may reduce the count. The budget was raised from 15,000 when domains, relational
-commands and company scope became typed parameters; see the
-[ORM-first redesign](docs/orm-first-redesign.md). Everyday document, project, activity, Chatter, feedback and
-draft-accounting workflows do not require a profile switch. See the
-[workflow map](docs/tool-catalogue.md#everyday-chatgpt-workflows).
-
-`odoo_search_capabilities` is not on `/mcp`, where every tool in the profile is
-already listed statically. It remains on `/mcp/all`, on the thematic profiles, and
-on `/mcp/read-only`, each of which exposes only part of the catalogue.
-`odoo_expand_record` is off every static profile: a `specification` on
-`odoo_search_records` or `odoo_read_records` follows relations to any depth in one
-call, and the same `specification` on the create and update tools reads the result
-back in the same transaction.
-
-Only `/mcp/all` uses deferred-loading hints. On that endpoint these five tools
-are marked for immediate loading:
-
-1. `odoo_search_capabilities`
-2. `odoo_search_models`
-3. `odoo_describe_model`
-4. `odoo_search_records`
-5. `odoo_read_records`
+`/mcp` advertises a bounded static surface that `/readyz` enforces; the current
+tool count, schema-token budget, and profile contents live in one place, the
+[tool catalogue](docs/tool-catalogue.md). Everyday document, project, activity,
+Chatter, feedback and draft-accounting workflows do not require a profile switch.
+Only `/mcp/all` uses deferred-loading hints.
 
 ## Quick start
 
@@ -88,12 +68,11 @@ node /absolute/path/to/odoo-mcp/dist/stdio.js
 
 ```bash
 npm run check
-npm run eval:validate
-npm run test:integration
-docker build -t usl-odoo-mcp .
 ```
 
-`test:integration` skips unless `ODOO_INTEGRATION_ORIGIN`, `ODOO_INTEGRATION_DATABASE`, and `ODOO_INTEGRATION_API_KEY` are supplied. Mutating fixture tests and pinned Codex/Claude evaluation runs are release gates, not part of the default local test command.
+That is the default gate: typecheck, the unit/protocol suite, and a production
+build. [Testing](docs/testing.md) covers the evaluation-corpus check, the
+container build, the opt-in live smoke suite, and the release gates.
 
 ## Documentation
 
@@ -106,5 +85,5 @@ docker build -t usl-odoo-mcp .
 - [Testing](docs/testing.md)
 - [Agent-interface evaluation](docs/evaluation.md)
 - [Breaking migration guide](docs/migration.md)
-- [Authoritative refactor specification](docs/refactor-spec.md)
-- [Fulfilled usage-analytics workstream](docs/issues/mcp-usage-analytics.md)
+- [Architecture decisions](docs/refactor-spec.md)
+- [ORM-first redesign (proposal and progress)](docs/orm-first-redesign.md)

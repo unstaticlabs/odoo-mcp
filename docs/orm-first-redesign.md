@@ -229,9 +229,9 @@ surface does not fit.
   JavaScript on every call.
 - `decorateRecords` is applied to `formatted_read_group` output, where rows have
   no `id` and the decoration is meaningless.
-- `ODOO_MCP_DIFFERENTIAL_REVIEW_2026-08-29.md` sits in the repository root and
-  describes the superseded Cloudflare Worker architecture (Durable Objects,
-  origin-keyed coordinators). It should move under `docs/` or be deleted.
+- `ODOO_MCP_DIFFERENTIAL_REVIEW_2026-08-29.md` sat in the repository root and
+  described the superseded Cloudflare Worker architecture (Durable Objects,
+  origin-keyed coordinators). Removed; it remains in history.
 
 ## 3. Proposed design
 
