@@ -14,7 +14,9 @@ and are assumed throughout.
 
 Every claim about the Odoo surface below was verified live against the
 Distribution through `/json/2` during the analysis, not inferred from
-documentation.
+documentation — with one exception recorded where it applies: `web_save_multi`
+was read from its `/doc-bearer` signature only, and its create path was later
+found not to work (see §4, step 5).
 
 ## 1. Where the current design stands
 
@@ -93,7 +95,7 @@ uses six of them. The unused ones are not obscure:
 | --- | --- | --- |
 | `web_search_read(domain, specification, ...)` | nested relational read, any depth, one call | 3 tools + N+1 reads |
 | `web_save(vals, specification, next_id)` | create **or** update **and** read back, one transaction | `create` then `read` |
-| `web_save_multi(vals_list, specification)` | heterogeneous multi-record write, one transaction | *nothing* — explicitly refused |
+| `web_save_multi(vals_list, specification)` | heterogeneous write to *existing* records, one transaction (signature only; it raises on an empty recordset, so it cannot create) | *nothing* — explicitly refused |
 | `onchange(values, field_names, fields_spec)` | Odoo-computed defaults and derived values | bespoke `*_configure_draft_*` tools |
 | `name_search(name, domain, operator, limit)` | resolve a label to an id the way Odoo does | agent guesses an `ilike` domain |
 | `has_access(operation)` / `has_field_access(field, op)` | preflight authorization | attempt and fail |
@@ -104,12 +106,14 @@ uses six of them. The unused ones are not obscure:
 
 Two of these are decisive.
 
-**`web_save_multi` removes a documented limitation.** `odoo_update_records`
+**`web_save_multi` would remove a documented limitation.** `odoo_update_records`
 states that "heterogeneous updates and multi-step workflow transitions are
 intentionally not bundled here" — it applies one values object to many ids.
-Odoo's own method takes a `vals_list` of different values for different records
-and commits them in one transaction, which is exactly what the "one MCP action
-maps to one Odoo transaction" invariant asks for.
+Odoo's own method takes a `vals_list` of different values for *existing*
+records and commits them in one transaction, which is exactly what the "one MCP
+action maps to one Odoo transaction" invariant asks for. This is read from the
+method's signature and has not been exercised live; what *was* established live
+is that it does not create (§4, step 5), so it is an update-only candidate.
 
 **`onchange` removes the reason most bespoke write tools exist.** Verified
 live on `account.move`:
@@ -273,8 +277,9 @@ Twelve tools replace fifty, and cover strictly more of Odoo.
 
 **Write**
 
-7. `odoo_save` — `web_save` / `web_save_multi`. One call creates and/or
-   heterogeneously updates and reads back, in one Odoo transaction. Subsumes
+7. `odoo_save` — `web_save` for create-or-update of one record, `web_save_multi`
+   for heterogeneous updates of existing records. One call writes and reads
+   back in one Odoo transaction. Subsumes
    `odoo_create_records` and `odoo_update_records` and removes the documented
    heterogeneous-update limitation. The read-back `specification` eliminates the
    follow-up read.
@@ -366,7 +371,7 @@ a catalogue that no longer exists.
 | `src/capabilities/` lines | 3,090 | ~900 (est.) |
 | Default-profile schema tokens | 14,988 | ~5,000 (est.) |
 | Relational read depth | 1 hop, 10 relations | arbitrary (landed) |
-| Heterogeneous batch write | unsupported | `web_save_multi` |
+| Heterogeneous batch update of existing records | unsupported | `web_save_multi` (proposed; not yet exercised live) |
 | Odoo-derived field values | reimplemented per tool | `onchange` |
 | Label → id resolution | agent-guessed domain | `name_search` |
 | Preflight authorization | none | `has_access` |
