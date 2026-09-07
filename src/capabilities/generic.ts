@@ -13,15 +13,19 @@ import {
   encodePageCursor,
   FieldNameSchema,
   FieldsSchema,
+  htmlBodyContract,
+  HTML_FLAG_CONTRACT,
   keysetDirection,
   ModelNameSchema,
   MethodNameSchema,
   normalizeWriteValues,
   OdooContextSchema,
+  plaintextToParagraphHtml,
   type PageCursor,
   PositiveIdSchema,
   queryFingerprint,
   resolveCallScope,
+  richTextHtml,
   SpecificationSchema
 } from "../odoo/schemas.js";
 import {
@@ -983,7 +987,7 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
     input: z.object({
       model: ModelNameSchema,
       ids: z.array(PositiveIdSchema).min(1).max(100),
-      values: RecordSchema,
+      values: RecordSchema.describe("Field values, written exactly as given. An HTML field such as description is not escaped and not wrapped here."),
       specification: SpecificationSchema.optional(),
       ...CallScopeShape,
       context: OdooContextSchema
@@ -1091,19 +1095,23 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
     input: z.object({
       model: ModelNameSchema,
       id: PositiveIdSchema,
-      body: z.string().min(1).max(50_000),
+      body: z.string().min(1).max(50_000).describe(htmlBodyContract("body_is_html")),
       subtype: z.enum(["mail.mt_note", "mail.mt_comment"]).default("mail.mt_note"),
-      body_is_html: z.boolean().default(false),
+      body_is_html: z.boolean().default(false).describe(HTML_FLAG_CONTRACT),
       context: OdooContextSchema
     }).strict(),
     output: z.object({ result: z.unknown(), execution: ExecutionSchema }).strict(),
     async handler({ model, id, body, subtype, body_is_html, context: requestedContext }, context, signal) {
-      const html = body_is_html
-        ? body
-        : `<p>${body.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll("\n", "<br>")}</p>`;
+      const message = richTextHtml({
+        value: body,
+        isHtml: body_is_html,
+        field: "body",
+        flagField: "body_is_html",
+        plaintext: plaintextToParagraphHtml
+      });
       const receipt = await client.call<unknown>(context, model, "message_post", {
         ids: [id],
-        body: html,
+        body: message.html,
         body_is_html: true,
         subtype_xmlid: subtype,
         context: attributedContext(requestedContext, context.correlationId)
@@ -1118,7 +1126,10 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
           instructions: "Read the record's chatter references and inspect recent messages for the original note before posting it again."
         }
       });
-      return receipt.finalize((result) => ({ data: { result, execution: { correlation_id: context.correlationId, outcome: "succeeded" as const } } }));
+      return receipt.finalize((result) => ({
+        data: { result, execution: { correlation_id: context.correlationId, outcome: "succeeded" as const } },
+        ...(message.warnings.length ? { warnings: message.warnings } : {})
+      }));
     }
   }));
 

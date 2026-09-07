@@ -26,10 +26,13 @@ import { SERVER_VERSION } from "../version.js";
  * typed parameters: the schemas grew so malformed calls fail here, with an
  * actionable message, instead of inside Odoo. Dropping `odoo_search_capabilities`
  * from `default` paid back 701 of those tokens, leaving the profile 278 over the
- * old ceiling. Consolidating the catalogue onto the ORM substrate is expected to
- * take this well below 15,000 again.
+ * old ceiling. Raised again from 15,500 for the rich-text escaping contract:
+ * the write paths that take a body now state in their field descriptions who
+ * escapes it, which is what an LLM client reads before it guesses. Consolidating
+ * the catalogue onto the ORM substrate is expected to take this well below
+ * 15,000 again.
  */
-export const DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET = 15_500;
+export const DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET = 16_000;
 
 export type CapabilityLayer = "generic" | "semantic" | "business_action";
 export type CapabilityEffect = "read" | "write" | "consequential" | "irreversible";

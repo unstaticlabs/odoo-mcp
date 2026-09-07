@@ -353,3 +353,79 @@ export function normalizeWriteValues(values: Record<string, unknown>): Record<st
   }
   return normalized;
 }
+
+/*
+ * The rich-text escaping contract, shared by every write path that accepts a
+ * body: the flag chooses who escapes. With the flag false the server escapes
+ * the text; with the flag true the caller sends raw HTML.
+ */
+const REAL_TAG_PATTERN = /<\/?[a-zA-Z!][^<>]*>/;
+const ESCAPED_TAG_PATTERN = /&lt;\/?[a-zA-Z][^<>]*?&gt;/;
+
+export const HTML_FLAG_CONTRACT =
+  "false (default): the server escapes the text and turns newlines into <br>. true: the server stores the string as raw HTML; the caller must not escape it.";
+
+export function htmlBodyContract(flagField: string): string {
+  return `Rich text. ${flagField} states who escapes it.`;
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function unescapeHtml(value: string): string {
+  return value
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">")
+    .replaceAll("&quot;", '"')
+    .replaceAll("&#34;", '"')
+    .replaceAll("&#39;", "'")
+    .replaceAll("&apos;", "'")
+    .replaceAll("&amp;", "&");
+}
+
+function plaintextToHtml(value: string): string {
+  return escapeHtml(value).replace(/\r?\n/g, "<br>");
+}
+
+export function plaintextToParagraphHtml(value: string): string {
+  return `<p>${plaintextToHtml(value)}</p>`;
+}
+
+export interface RichTextBody {
+  html: string;
+  warnings: string[];
+}
+
+/**
+ * Resolve one rich-text field to the HTML that Odoo stores.
+ *
+ * A caller that escapes its HTML *and* sets the flag stores visible markup,
+ * which Odoo renders as `<p>` and `<b>` characters. That body is decoded here
+ * and the decode is reported, because a silent success hides the damage until
+ * a human reads the record.
+ */
+export function richTextHtml(options: {
+  value: string;
+  isHtml: boolean;
+  field: string;
+  flagField: string;
+  plaintext?: (value: string) => string;
+}): RichTextBody {
+  const { value, isHtml, field, flagField } = options;
+  if (!isHtml) return { html: (options.plaintext ?? plaintextToHtml)(value), warnings: [] };
+  if (REAL_TAG_PATTERN.test(value) || !ESCAPED_TAG_PATTERN.test(value)) {
+    return { html: value, warnings: [] };
+  }
+  return {
+    html: unescapeHtml(value),
+    warnings: [
+      `${field} arrived with ${flagField}: true, but it held escaped HTML entities and no HTML tag. Odoo would have shown that markup as visible text, so the entities were decoded before the write. Send raw HTML when ${flagField} is true, or plain text with ${flagField} false.`
+    ]
+  };
+}

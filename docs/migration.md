@@ -84,14 +84,16 @@ These change existing tool contracts. Clients must refresh tool schemas.
   still carries it or rely on the statically listed surface, which is complete for
   that profile.
 - The default-profile schema-token budget enforced by `/readyz` moves from 15,000
-  to 15,500 (`DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET`). Operators gating on the
-  literal 15,000 must update that check.
+  to 16,000 (`DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET`). The last 500 pay for the
+  rich-text escaping contract, which each write path now states in its own field
+  descriptions. Operators gating on the literal 15,000 must update that check.
 
 ## Behavior changes
 
 - All input objects are strict and bounded; unknown fields are rejected.
 - Outputs use structured envelopes and canonical `{model,id,display_name,url}` references.
 - Cursor-oriented searches replace offset variants.
+- Rich-text bodies sent as escaped HTML with the HTML flag set are decoded before the write, and the decode is reported in `warnings`.
 - Direct mutations receive one attempt. There is no generic replay key or deployed transaction-replay service.
 - An ambiguous mutation transport failure returns unknown completion and requires Odoo reconciliation.
 - The unrestricted public-method escape hatch is preserved but renamed and truthfully annotated as potentially destructive/non-idempotent. Only `/mcp/all` defers it.

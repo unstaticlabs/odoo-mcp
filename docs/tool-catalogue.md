@@ -11,8 +11,8 @@ refer here instead of repeating them.
 | --- | ---: |
 | Tools on `/mcp` with every feature available | 29 |
 | Tools on `/mcp` without document materialization | 27 |
-| Estimated input/output schema tokens on `/mcp` | 15,322 |
-| Budget enforced by `/readyz` (`DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET`) | 15,500 |
+| Estimated input/output schema tokens on `/mcp` | 15,530 |
+| Budget enforced by `/readyz` (`DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET`) | 16,000 |
 
 Odoo module, method, and access availability can lower the counts further.
 Schema estimates are not measured model usage. Update this table, and only this
@@ -100,7 +100,7 @@ Actions do not bypass Odoo state or permissions. The agent should read the relev
 
 | URL | Intended visible surface |
 | --- | --- |
-| `/mcp` | Static everyday workflows plus generic substrate; maximum 29 tools/15.5k estimated schema tokens. |
+| `/mcp` | Static everyday workflows plus generic substrate; maximum 29 tools/16k estimated schema tokens. |
 | `/mcp/all` | Complete catalogue with deferred-loading metadata. |
 | `/mcp/read-only` | Every read capability currently available. |
 | `/mcp/accounting` | Universal core plus accounting, expenses, and related document actions. |
@@ -141,4 +141,6 @@ Module, public-method, model-access, and feature predicates remove specialized t
 - `odoo_search_records` and `odoo_read_records` accept either `fields` (flat; many2one values are `[id, display_name]` pairs, from `search_read`/`read`) or `specification`, Odoo's nested read spec (`web_search_read`): `{"name": {}, "partner_id": {"fields": {"display_name": {}}}, "line_ids": {"fields": {...}, "limit": 20}}` follows relations to any depth in one call. A bare `{}` on a relational field returns only ids. `odoo_expand_record` is superseded and registered on `all` only.
 - `odoo_create_records` and `odoo_update_records` accept the same `specification` and return the records as `read_back`, so no follow-up read is needed. A single create and every update run `web_save`, where the write and the read-back share one Odoo transaction; a batch create runs `create` and then reads the new records back by id through `web_search_read`, because Odoo's `web_save_multi` only writes to records that already exist.
 - Searches ordered by `id asc` or `id desc` alone page by keyset: the next page restricts the domain by the last id seen and cannot skip or repeat rows when records are inserted or deleted between pages. Any other order pages by offset. Cursors are bound to the query and carry their mode.
+- Every write path that takes a rich-text body states the escaping contract in its own field descriptions. With `description_is_html`, `body_is_html`, or `note_is_html` false, the server escapes the text and turns newlines into `<br>`. With the flag true, the server stores the string as raw HTML and the caller must not escape it. `odoo_update_records` stays the pass-through reference: `values.description` is written exactly as given.
+- A body that carries the flag true, holds no HTML tag, and holds escaped tags such as `&lt;p&gt;` is decoded before the write, and the decode is reported in `warnings`. Without that guard the record stores visible markup and the call still succeeds.
 - `odoo_call_method` reports `execution.mode`. Odoo's published `api` classification selects the contract: `read` for a method Odoo states is readonly, `mutation` otherwise, including when the classification is unknown.
