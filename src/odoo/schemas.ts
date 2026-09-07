@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import { CapabilityInputError } from "../runtime/envelope.js";
 
 const MODEL_PATTERN = /^[A-Za-z_][A-Za-z0-9_.]{0,254}$/;
 const FIELD_PATTERN = /^[A-Za-z_][A-Za-z0-9_]{0,254}$/;
@@ -363,10 +364,50 @@ const REAL_TAG_PATTERN = /<\/?[a-zA-Z!][^<>]*>/;
 const ESCAPED_TAG_PATTERN = /&lt;\/?[a-zA-Z][^<>]*?&gt;/;
 
 export const HTML_FLAG_CONTRACT =
-  "false (default): the server escapes the text and turns newlines into <br>. true: the server stores the string as raw HTML; the caller must not escape it.";
+  "false: the server escapes the text and turns newlines into <br>, so tags and & show as characters. "
+  + "true: the server stores the string as raw HTML; the caller must not escape it, and newlines collapse unless it writes <br>. "
+  + "Omit only for plain text: a value carrying HTML tags with no explicit flag is refused rather than escaped, "
+  + "because an Agent identity cannot repair the mangled record afterwards. Markdown is never rendered in either mode.";
 
 export function htmlBodyContract(flagField: string): string {
-  return `Rich text. ${flagField} states who escapes it.`;
+  return `Rich text. ${flagField} states who escapes it, and is required once this holds HTML tags.`;
+}
+
+/*
+ * Tags an agent actually reaches for when it means formatting. The captured
+ * name is matched against this set rather than any tag-shaped text, so that
+ * prose keeps working: `a < b`, `R&D <5%`, `Call HYPERION <before arrival>`
+ * and `<someone@example.test>` are plain text, not undeclared markup.
+ */
+const MARKUP_TAGS: ReadonlySet<string> = new Set([
+  "a", "b", "blockquote", "br", "code", "div", "em", "h1", "h2", "h3", "h4", "h5", "h6",
+  "hr", "i", "img", "li", "ol", "p", "pre", "small", "span", "strong", "sub", "sup",
+  "table", "tbody", "td", "th", "thead", "tr", "u", "ul"
+]);
+const TAG_CANDIDATE = /<\/?([a-zA-Z][a-zA-Z0-9]*)(?:\s[^<>]*)?\/?>/g;
+const MARKDOWN_SIGNALS: ReadonlyArray<readonly [RegExp, string]> = [
+  [/\*\*[^\n*]+\*\*/, "**bold**"],
+  [/(?:^|\n)[ \t]{0,3}#{1,6}[ \t]+\S/, "# heading"],
+  [/(?:^|\n)[ \t]{0,3}[-*+][ \t]+\S/, "- bullet"],
+  [/(?:^|\n)[ \t]{0,3}\d+\.[ \t]+\S/, "1. list"],
+  [/\[[^\]\n]+\]\([^\s)]+\)/, "[label](url)"],
+  [/`[^`\n]+`/, "`code`"]
+];
+
+/** The first recognised HTML tag in the value, verbatim, or null. */
+export function detectedMarkupTag(value: string): string | null {
+  for (const match of value.matchAll(TAG_CANDIDATE)) {
+    if (MARKUP_TAGS.has(match[1]!.toLowerCase())) return match[0];
+  }
+  return null;
+}
+
+/** A label for the first Markdown construct in the value, or null. */
+export function detectedMarkdown(value: string): string | null {
+  for (const [pattern, label] of MARKDOWN_SIGNALS) {
+    if (pattern.test(value)) return label;
+  }
+  return null;
 }
 
 function escapeHtml(value: string): string {
@@ -405,27 +446,62 @@ export interface RichTextBody {
 /**
  * Resolve one rich-text field to the HTML that Odoo stores.
  *
- * A caller that escapes its HTML *and* sets the flag stores visible markup,
- * which Odoo renders as `<p>` and `<b>` characters. That body is decoded here
- * and the decode is reported, because a silent success hides the damage until
- * a human reads the record.
+ * Three ways to get this wrong, and none of them fails on its own:
+ *
+ * - HTML with the flag omitted is escaped, so the record shows `<p>` and
+ *   `<strong>` as characters. That write is refused here rather than stored,
+ *   because it succeeds silently and an Agent identity has no write access to
+ *   `mail.message` to repair it. An explicit `false` is still honoured: the
+ *   caller has read the flag and asked for literal tags.
+ * - Escaped HTML *with* the flag set stores visible markup too. That body is
+ *   decoded and the decode reported.
+ * - Markdown renders in neither mode, and plain text sent as HTML loses its
+ *   line breaks. Both are warned about rather than refused.
  */
 export function richTextHtml(options: {
   value: string;
-  isHtml: boolean;
+  isHtml: boolean | undefined;
   field: string;
   flagField: string;
   plaintext?: (value: string) => string;
 }): RichTextBody {
   const { value, isHtml, field, flagField } = options;
-  if (!isHtml) return { html: (options.plaintext ?? plaintextToHtml)(value), warnings: [] };
-  if (REAL_TAG_PATTERN.test(value) || !ESCAPED_TAG_PATTERN.test(value)) {
-    return { html: value, warnings: [] };
+  const warnings: string[] = [];
+  const markdown = detectedMarkdown(value);
+  if (markdown) {
+    warnings.push(
+      `${field} contains Markdown (${markdown}), which Odoo renders in neither mode; it is stored and shown verbatim. Send HTML with ${flagField}: true to format the record.`
+    );
   }
-  return {
-    html: unescapeHtml(value),
-    warnings: [
-      `${field} arrived with ${flagField}: true, but it held escaped HTML entities and no HTML tag. Odoo would have shown that markup as visible text, so the entities were decoded before the write. Send raw HTML when ${flagField} is true, or plain text with ${flagField} false.`
-    ]
-  };
+
+  if (isHtml === undefined) {
+    const tag = detectedMarkupTag(value);
+    if (tag) {
+      throw new CapabilityInputError(
+        "markup_declaration_required",
+        `${field} contains HTML markup (${tag}) but ${flagField} was not set, so nothing was written. `
+          + `Odoo stores this field as HTML: set ${flagField}: true to keep the markup as formatting, `
+          + `or ${flagField}: false to store the tags as literal text.`,
+        `Resend the call with ${flagField} set. Use true when the tags are meant to format the record, `
+          + `false when they are meant to be read as characters. Escaping silently would leave a record `
+          + `an Agent identity cannot repair.`
+      );
+    }
+  }
+
+  if (!isHtml) {
+    return { html: (options.plaintext ?? plaintextToHtml)(value), warnings };
+  }
+  if (REAL_TAG_PATTERN.test(value) || !ESCAPED_TAG_PATTERN.test(value)) {
+    if (!detectedMarkupTag(value) && /\r?\n/.test(value)) {
+      warnings.push(
+        `${field} was sent with ${flagField}: true but carries no HTML tags, so its line breaks collapse into one run of text. Write <br> or block tags, or send it with ${flagField}: false.`
+      );
+    }
+    return { html: value, warnings };
+  }
+  warnings.push(
+    `${field} arrived with ${flagField}: true, but it held escaped HTML entities and no HTML tag. Odoo would have shown that markup as visible text, so the entities were decoded before the write. Send raw HTML when ${flagField} is true, or plain text with ${flagField} false.`
+  );
+  return { html: unescapeHtml(value), warnings };
 }

@@ -20,6 +20,7 @@ The default suite covers:
 - direct auth, OAuth enrollment/vault/revocation, HTTP Streamable MCP, legacy stateless compatibility, and stdio;
 - deterministic profiles, fail-closed exposure, unknown-aware catalogue search, schema-token budgets, deferred metadata, and structured tool outputs;
 - generic substrate behavior, one-shot mutation outcomes, document facade calls, semantic context, rebuilt Accounting views, and fixed-intent actions;
+- the rich-text escaping contract on every write path: preflight refusal of undeclared markup, the entity decode, the Markdown and collapsed-line-break warnings, and ordinary prose with angle brackets that must keep working;
 - property-based cursor/domain/JSON/context invariants;
 - the 60-task evaluation corpus, the ChatGPT golden prompts, and the A/B/C/D/E surface generator.
 

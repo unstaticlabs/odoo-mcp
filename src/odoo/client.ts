@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { RequestContext } from "../runtime/context.js";
+import { CapabilityInputError } from "../runtime/envelope.js";
 import { emitEvent } from "../runtime/logging.js";
 import { injectTraceHeaders } from "../runtime/observability.js";
 import { Semaphore } from "../runtime/semaphore.js";
@@ -854,6 +855,23 @@ export class OdooClient {
 }
 
 export function toolFailureFromError(error: unknown) {
+  if (error instanceof CapabilityInputError) {
+    return {
+      code: error.code,
+      message: error.message,
+      retryable: false,
+      condition_retryable: false,
+      outcome: "not_applied" as const,
+      retry_guidance: "after_correction" as const,
+      stage: "preflight" as const,
+      known: {
+        request_sent: "no" as const,
+        response_received: "no" as const,
+        result_received: "no" as const
+      },
+      recovery: error.recovery
+    } as const;
+  }
   if (error instanceof OdooError) {
     if (error.policyCode) {
       return {

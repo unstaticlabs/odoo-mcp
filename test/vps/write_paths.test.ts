@@ -308,10 +308,111 @@ describe("the rich-text escaping contract", () => {
       ["activities_schedule", "note", "note_is_html"]
     ] as const) {
       expect(property(tool, field), `${tool}.${field}`).toContain(flag);
-      expect(property(tool, flag), `${tool}.${flag}`).toContain("false (default): the server escapes");
+      expect(property(tool, flag), `${tool}.${flag}`).toContain("false: the server escapes");
       expect(property(tool, flag), `${tool}.${flag}`).toContain("raw HTML");
+      expect(property(tool, flag), `${tool}.${flag}`).toContain("refused rather than escaped");
+      expect(property(tool, flag), `${tool}.${flag}`).toContain("Markdown is never rendered");
     }
     expect(property("odoo_update_records", "values")).toContain("exactly as given");
+  });
+
+  it("leaves the declaration flag optional rather than silently defaulted", async () => {
+    const client = await connected(vi.fn<typeof fetch>(async () => Response.json(true)));
+    const tools = new Map((await client.listTools()).tools.map((tool) => [tool.name, tool]));
+
+    for (const [tool, flag] of [
+      ["projects_create_task", "description_is_html"],
+      ["odoo_post_message", "body_is_html"],
+      ["activities_schedule", "note_is_html"]
+    ] as const) {
+      const schema = tools.get(tool)!.inputSchema as {
+        properties?: Record<string, Record<string, unknown>>;
+        required?: string[];
+      };
+      expect(schema.properties?.[flag], `${tool}.${flag}`).not.toHaveProperty("default");
+      expect(schema.required ?? [], `${tool}.${flag}`).not.toContain(flag);
+    }
+  });
+
+  it("refuses undeclared markup on every rich-text write path without calling Odoo", async () => {
+    for (const [name, args] of [
+      ["odoo_post_message", { model: "project.task", id: 2543, body: RAW_HTML }],
+      ["projects_create_task", { name: "Add haptics", project_id: 15, description: RAW_HTML }],
+      ["activities_schedule", {
+        model: "project.task", id: 492, activity_type_id: 4, user_id: 9,
+        summary: "Review the card", note: RAW_HTML
+      }]
+    ] as const) {
+      const fetcher = vi.fn<typeof fetch>();
+      const client = await connected(fetcher);
+      const result = await client.callTool({ name, arguments: args });
+
+      expect(result.isError, name).toBe(true);
+      expect(jsonCalls(fetcher), name).toHaveLength(0);
+      const [content] = result.content as Array<{ text: string }>;
+      const { error } = JSON.parse(content!.text) as { error: Record<string, unknown> };
+      expect(error, name).toMatchObject({
+        code: "markup_declaration_required",
+        outcome: "not_applied",
+        retryable: false,
+        retry_guidance: "after_correction",
+        stage: "preflight",
+        known: { request_sent: "no", response_received: "no", result_received: "no" }
+      });
+      expect(String(error.message), name).toContain("<p>");
+    }
+  });
+
+  it("still escapes tag-shaped prose once the caller says it is plain text", async () => {
+    const fetcher = vi.fn<typeof fetch>(async () => Response.json({ id: 79 }));
+    const client = await connected(fetcher);
+
+    const result = await client.callTool({
+      name: "odoo_post_message",
+      arguments: { model: "project.task", id: 492, body: RAW_HTML, body_is_html: false }
+    });
+
+    expect(result.isError).not.toBe(true);
+    expect(requestBody(fetcher, "project.task/message_post").body)
+      .toBe("<p>&lt;p&gt;&lt;b&gt;Context:&lt;/b&gt;&lt;br&gt;Most users open this on a phone.&lt;/p&gt;</p>");
+  });
+
+  it("reads ordinary prose with angle brackets as plain text, not as a missing flag", async () => {
+    const fetcher = vi.fn<typeof fetch>(async () => Response.json({ id: 80 }));
+    const client = await connected(fetcher);
+
+    for (const body of [
+      PLAIN_ANGLE,
+      "Marge brute a < b sur ce dossier",
+      "R&D <5% du budget",
+      "Contact the owner <valentin@example.test> before Friday",
+      "Use the <placeholder> naming convention"
+    ]) {
+      const result = await client.callTool({
+        name: "odoo_post_message",
+        arguments: { model: "project.task", id: 492, body }
+      });
+      expect(result.isError, body).not.toBe(true);
+    }
+  });
+
+  it("warns that Markdown and flagged plain text do not render as the caller expects", async () => {
+    const fetcher = vi.fn<typeof fetch>(async () => Response.json({ id: 81 }));
+    const client = await connected(fetcher);
+
+    const markdown = await client.callTool({
+      name: "odoo_post_message",
+      arguments: { model: "project.task", id: 492, body: "**Nouveau**\nSuite du dossier." }
+    });
+    const flaggedPlain = await client.callTool({
+      name: "odoo_post_message",
+      arguments: { model: "project.task", id: 492, body: PLAIN_LINES, body_is_html: true }
+    });
+
+    expect(markdown.isError).not.toBe(true);
+    expect(warningsOf(markdown)[0]).toContain("Markdown (**bold**)");
+    expect(flaggedPlain.isError).not.toBe(true);
+    expect(warningsOf(flaggedPlain)[0]).toContain("line breaks collapse");
   });
 
   it("leaves a body that only mentions an escaped tag inside real markup untouched", async () => {

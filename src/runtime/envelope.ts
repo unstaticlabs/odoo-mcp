@@ -70,6 +70,22 @@ export interface ToolFailure {
   recovery?: string;
 }
 
+/**
+ * A handler refused its own input before any Odoo call was attempted. The
+ * request never left this process, so the outcome is definitively not_applied
+ * and the caller must correct the request rather than reconcile Odoo state.
+ */
+export class CapabilityInputError extends Error {
+  constructor(
+    readonly code: string,
+    message: string,
+    readonly recovery: string
+  ) {
+    super(message);
+    this.name = "CapabilityInputError";
+  }
+}
+
 export function toolError(failure: ToolFailure, context: RequestContext) {
   const value = {
     error: {
