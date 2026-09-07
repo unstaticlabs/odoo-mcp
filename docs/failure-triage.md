@@ -107,9 +107,52 @@ guidance, and nothing to correlate against a server log.
 | Do not require interactive approval for read-only operations | Client-side. Read capabilities already advertise `readOnlyHint: true`, uniformly |
 | Document any per-turn limit | No such limit exists here. `MCP_TARGET_CONCURRENCY` bounds concurrent Odoo calls per target and queues rather than rejecting; nothing in this server counts calls per turn or per session |
 
-Model access for `account.return`, `stock.valuation.layer`,
-`project.project.stage_id` and the `rebuild.*` models is granted in the Odoo
-Distribution, not here: those calls failed correctly, with
-`agent_read_only_action_denied`. Confirm what an identity actually holds with
-`odoo_describe_environment`, which reports `effective_applications` and
-`effective_company_ids`.
+## What `agent_read_only_action_denied` actually means
+
+The message reads *"This Agent has no approved application access for
+`<model>.<method>`"*, which points the owner at the Agent's application grants.
+That is only one of the reasons it is raised. `_api_method_access` in the
+Distribution's `usl_access_control/models/agent.py` returns `None`, and so
+produces this identical message, in three unrelated cases:
+
+1. **The `(model, method)` pair is absent from the qualified action policy.**
+   `access_for` looks up `rpc:<model>.<method>` in
+   `policy/agent_readonly_runtime_policy.json` and returns `None` when it is
+   missing. A model that does not exist in the build has no entry at all, so
+   every method on it is denied.
+2. **The model has no `ir.model.access` row.** `_allows_model_operation`
+   requires a matching ACL row whose group is implied by the Agent's delegated
+   groups. Report and `_auto = False` models often carry no ACL row, so the
+   check fails for every Agent regardless of grants.
+3. **The ACL rows name groups the Agent does not hold.** This is the only case
+   the message actually describes, and the only one an application grant fixes.
+
+Verified against the live deployment on 2026-09-07 for Agent *Elio* (`usl.agent`
+id 1, user 9), which holds 22 applications — all `read_write`, including
+Accounting, Inventory, Bank and Settings — with `authority_reduced: false`:
+
+| Model | Cause | Fixable by a grant? |
+|---|---|---|
+| `account.return` | 1 — no `ir.model` row, absent from `action_surface.json`, no `_name` in the Distribution source. Odoo 19 does not ship it | No; use `account.report` (readable — the French Tax Report is id 4) |
+| `stock.valuation.layer` | 1 — same; Odoo 19 replaced it with `stock_account.stock.valuation.report` | No |
+| `stock_account.stock.valuation.report` | 2 — classified `read_only` in the policy but has zero `ir.model.access` rows | No |
+| `project.project.stage_id` | Neither — a field-level group (`project.group_project_stages`), not an application | No; grant the group |
+
+Diagnosing one of these means asking, in order: does `ir.model` hold a row for
+the model, does `action_surface.json` list it, does `ir.model.access` have a row
+for it, and only then whether the Agent holds the naming group.
+`odoo_describe_environment` reports what the identity actually holds
+(`effective_applications`, `effective_company_ids`).
+
+Two defects follow, both owned by the Distribution's `usl_access_control`:
+
+- The message should distinguish these causes. As written it sends an owner who
+  has already granted everything to re-check grants that cannot be the cause.
+- `web_search_read` is classified `write` for the 766 models that carry it,
+  while `search_read`, `read` and `formatted_read_group` are `read_only`. It is
+  a read RPC, and it is the method `odoo_search_records` and `odoo_read_records`
+  use whenever a `specification` is passed — which this server's own
+  instructions recommend for relational context. A read-only Agent, or any
+  model an Agent holds through `read_only_group_ids`, therefore cannot use
+  `specification` at all, and a read that does succeed is scoped and audited as
+  a write.
