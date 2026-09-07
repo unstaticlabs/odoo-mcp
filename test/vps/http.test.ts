@@ -171,6 +171,27 @@ describe("VPS HTTP MCP transport", () => {
     expect(tools.tools.every((tool) => !("defer_loading" in (tool._meta ?? {})))).toBe(true);
   });
 
+  it("advertises an icon the deployment serves without credentials", async () => {
+    const origin = await listeningServer();
+    const transport = new StreamableHTTPClientTransport(new URL(`${origin}/mcp`), {
+      requestInit: { headers: credentialHeaders }
+    });
+    const client = new Client({ name: "http-icon-test", version: "1.0.0" });
+    await client.connect(transport);
+    closeCallbacks.push(async () => client.close());
+    expect(client.getServerVersion()).toMatchObject({
+      websiteUrl: "https://odoo-mcp.unstaticlabs.com",
+      icons: [{ src: "https://odoo-mcp.unstaticlabs.com/icon.png", mimeType: "image/png", sizes: ["128x128"] }]
+    });
+
+    for (const [path, mimeType] of [["/icon.png", "image/png"], ["/favicon.ico", "image/vnd.microsoft.icon"]]) {
+      const response = await fetch(`${origin}${path}`);
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toContain(mimeType);
+      expect((await response.arrayBuffer()).byteLength).toBeGreaterThan(0);
+    }
+  });
+
   it("lists every fixed workflow schema on /mcp while reserving deferral for /mcp/all", async () => {
     const origin = await listeningServer({ ...configuration(), documentMaterializationEnabled: true });
     for (const profile of ["default", "all"] as const) {
