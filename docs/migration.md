@@ -94,6 +94,7 @@ These change existing tool contracts. Clients must refresh tool schemas.
 - Outputs use structured envelopes and canonical `{model,id,display_name,url}` references.
 - Cursor-oriented searches replace offset variants.
 - Rich-text bodies sent as escaped HTML with the HTML flag set are decoded before the write, and the decode is reported in `warnings`.
+- Rich-text bodies carrying HTML tags with no explicit HTML flag are refused in preflight rather than escaped, because that write succeeds silently and stores a record an Agent cannot repair.
 - Direct mutations receive one attempt. There is no generic replay key or deployed transaction-replay service.
 - An ambiguous mutation transport failure returns unknown completion and requires Odoo reconciliation.
 - The unrestricted public-method escape hatch is preserved but renamed and truthfully annotated as potentially destructive/non-idempotent. Only `/mcp/all` defers it.

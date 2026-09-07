@@ -163,7 +163,7 @@ export function registerOperationalCapabilities(registry: CapabilityRegistry, cl
       name: z.string().trim().min(1).max(500),
       project_id: PositiveIdSchema,
       description: z.string().max(100_000).optional().describe(htmlBodyContract("description_is_html")),
-      description_is_html: z.boolean().default(false).describe(HTML_FLAG_CONTRACT),
+      description_is_html: z.boolean().optional().describe(HTML_FLAG_CONTRACT),
       stage_id: PositiveIdSchema.optional(),
       assignee_ids: z.array(PositiveIdSchema).max(50).optional(),
       tag_ids: z.array(PositiveIdSchema).max(100).optional(),
@@ -305,7 +305,7 @@ export function registerOperationalCapabilities(registry: CapabilityRegistry, cl
       user_id: PositiveIdSchema,
       summary: z.string().trim().min(1).max(500),
       note: z.string().max(20_000).optional().describe(htmlBodyContract("note_is_html")),
-      note_is_html: z.boolean().default(false).describe(HTML_FLAG_CONTRACT),
+      note_is_html: z.boolean().optional().describe(HTML_FLAG_CONTRACT),
       date_deadline: DateSchema.optional(),
       context: OdooContextSchema
     }).strict(),

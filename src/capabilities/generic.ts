@@ -1097,7 +1097,7 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
       id: PositiveIdSchema,
       body: z.string().min(1).max(50_000).describe(htmlBodyContract("body_is_html")),
       subtype: z.enum(["mail.mt_note", "mail.mt_comment"]).default("mail.mt_note"),
-      body_is_html: z.boolean().default(false).describe(HTML_FLAG_CONTRACT),
+      body_is_html: z.boolean().optional().describe(HTML_FLAG_CONTRACT),
       context: OdooContextSchema
     }).strict(),
     output: z.object({ result: z.unknown(), execution: ExecutionSchema }).strict(),
