@@ -2,9 +2,12 @@ import { z } from "zod";
 import { OdooClient } from "../odoo/client.js";
 import {
   attributedContext,
+  htmlBodyContract,
+  HTML_FLAG_CONTRACT,
   ModelNameSchema,
   OdooContextSchema,
-  PositiveIdSchema
+  PositiveIdSchema,
+  richTextHtml
 } from "../odoo/schemas.js";
 import type { RequestContext } from "../runtime/context.js";
 import { CapabilityRegistry, defineCapability } from "./registry.js";
@@ -116,16 +119,6 @@ function createdId(value: unknown): number {
   return candidate as number;
 }
 
-function plaintextToHtml(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;")
-    .replace(/\r?\n/g, "<br>");
-}
-
 function decodedBase64Bytes(value: string): { normalized: string; bytes: number } {
   const normalized = value.replace(/\s+/g, "");
   if (!normalized || normalized.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(normalized)) {
@@ -169,8 +162,8 @@ export function registerOperationalCapabilities(registry: CapabilityRegistry, cl
     input: z.object({
       name: z.string().trim().min(1).max(500),
       project_id: PositiveIdSchema,
-      description: z.string().max(100_000).optional(),
-      description_is_html: z.boolean().default(false),
+      description: z.string().max(100_000).optional().describe(htmlBodyContract("description_is_html")),
+      description_is_html: z.boolean().default(false).describe(HTML_FLAG_CONTRACT),
       stage_id: PositiveIdSchema.optional(),
       assignee_ids: z.array(PositiveIdSchema).max(50).optional(),
       tag_ids: z.array(PositiveIdSchema).max(100).optional(),
@@ -181,12 +174,16 @@ export function registerOperationalCapabilities(registry: CapabilityRegistry, cl
     }).strict(),
     output: ActionOutputSchema,
     async handler(input, context, signal) {
+      const description = input.description === undefined ? undefined : richTextHtml({
+        value: input.description,
+        isHtml: input.description_is_html,
+        field: "description",
+        flagField: "description_is_html"
+      });
       const values = {
         name: input.name,
         project_id: input.project_id,
-        ...(input.description !== undefined ? {
-          description: input.description_is_html ? input.description : plaintextToHtml(input.description)
-        } : {}),
+        ...(description ? { description: description.html } : {}),
         ...(input.stage_id ? { stage_id: input.stage_id } : {}),
         ...(input.assignee_ids ? { user_ids: [[6, 0, input.assignee_ids]] } : {}),
         ...(input.tag_ids ? { tag_ids: [[6, 0, input.tag_ids]] } : {}),
@@ -214,7 +211,8 @@ export function registerOperationalCapabilities(registry: CapabilityRegistry, cl
             correlation_id: context.correlationId,
             outcome: "succeeded" as const,
             record: recordRef(context, "project.task", id, input.name)
-          }
+          },
+          ...(description?.warnings.length ? { warnings: description.warnings } : {})
         };
       }, (result) => ({ knownIds: [createdId(result)] }));
     }
@@ -306,19 +304,25 @@ export function registerOperationalCapabilities(registry: CapabilityRegistry, cl
       activity_type_id: PositiveIdSchema,
       user_id: PositiveIdSchema,
       summary: z.string().trim().min(1).max(500),
-      note: z.string().max(20_000).optional(),
-      note_is_html: z.boolean().default(false),
+      note: z.string().max(20_000).optional().describe(htmlBodyContract("note_is_html")),
+      note_is_html: z.boolean().default(false).describe(HTML_FLAG_CONTRACT),
       date_deadline: DateSchema.optional(),
       context: OdooContextSchema
     }).strict(),
     output: ActionOutputSchema,
     async handler(input, context, signal) {
+      const note = input.note === undefined ? undefined : richTextHtml({
+        value: input.note,
+        isHtml: input.note_is_html,
+        field: "note",
+        flagField: "note_is_html"
+      });
       const receipt = await client.call<unknown>(context, input.model, "activity_schedule", {
         ids: [input.id],
         activity_type_id: input.activity_type_id,
         user_id: input.user_id,
         summary: input.summary,
-        ...(input.note !== undefined ? { note: input.note_is_html ? input.note : plaintextToHtml(input.note) } : {}),
+        ...(note ? { note: note.html } : {}),
         ...(input.date_deadline ? { date_deadline: input.date_deadline } : {}),
         context: rpcContext(input.context, context)
       }, {
@@ -338,7 +342,8 @@ export function registerOperationalCapabilities(registry: CapabilityRegistry, cl
           correlation_id: context.correlationId,
           outcome: "succeeded" as const,
           record: recordRef(context, input.model, input.id)
-        }
+        },
+        ...(note?.warnings.length ? { warnings: note.warnings } : {})
       }));
     }
   }));
