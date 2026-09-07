@@ -65,11 +65,24 @@ Required runtime configuration:
 3. Run `node dist/auth/cli.js prepare` with the candidate image and production mounts so migrations complete and active OAuth access snapshots are warm.
 4. Start the candidate container without removing the preceding image.
 5. Require `GET /healthz` to return `status=ok`.
-6. Require `GET /readyz` to return `status=ready`, the default tool budget within the limits the [tool catalogue](tool-catalogue.md) documents, OAuth `ready` or deliberately `disabled`, and analytics `ready` or deliberately `disabled`. Analytics `degraded` does not make the MCP unavailable, but fix it before treating telemetry as complete.
+6. Require `GET /readyz` to return `status=ready`, `mcp_commit` equal to the revision you promoted, the default tool budget within the limits the [tool catalogue](tool-catalogue.md) documents, OAuth `ready` or deliberately `disabled`, and analytics `ready` or deliberately `disabled`. Analytics `degraded` does not make the MCP unavailable, but fix it before treating telemetry as complete.
 7. Run the authenticated MCP initialization/tool-list smoke test and a bounded Odoo read.
 8. Run a hosted OAuth reconnect test when OAuth is enabled.
 9. Rescan and reconnect the ChatGPT connector, start a new conversation, then manually run `evals/chatgpt-golden-prompts.json`. Verify the named schemas, not just the count or catalogue recommendations.
 10. Shift reverse-proxy traffic and monitor content-free error/latency events.
+
+`mcp_commit` is the running revision, taken from `MCP_BUILD_ID`. A value that is
+not an exact 40-character revision reads as `unknown`, so a container without a
+correct `MCP_BUILD_ID` cannot be verified this way. This is the only public
+signal that a promotion landed when the release changes no tool schema:
+
+```bash
+curl -s https://<mcp-public-origin>/readyz | python3 -m json.tool
+```
+
+The readiness document keeps the GitOps ledger commit off the public endpoint.
+`odoo_submit_feedback` reports both `mcp_commit` and `gitops_commit` to the
+governed Inbox for an authenticated caller.
 
 The process handles `SIGTERM`/`SIGINT` by closing the listener and OAuth vault, then attempting a bounded two-second analytics flush. Give the container a normal termination grace period; PostHog failure never delays shutdown beyond that bound and in-flight mutations are not replayed after termination.
 
@@ -80,7 +93,7 @@ The process handles `SIGTERM`/`SIGINT` by closing the listener and OAuth vault, 
 - Enforce a body limit no larger than the configured MCP maximum.
 - Do not buffer or automatically replay failed POST requests.
 - Route `/.well-known/*`, `/api/auth/*`, and `/oauth/*` when OAuth is enabled.
-- Apply network access controls to `/healthz` and `/readyz` if operational metadata should not be public.
+- Apply network access controls to `/healthz` and `/readyz` if operational metadata, including the running revision, should not be public.
 
 ## Data and backup
 
