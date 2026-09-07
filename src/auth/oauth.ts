@@ -124,15 +124,20 @@ export function credentialEndpointHeaders(publicOrigin: string, source: Request)
   return headers;
 }
 
-function bearerAuthInfo(claims: JWTPayload, principal: ReturnType<CredentialVault["resolve"]>, request: Request): AuthInfo {
+function correlationIdFromRequest(request: Request): string {
+  const submitted = request.headers.get("X-Correlation-Id")?.trim();
+  return submitted && /^[A-Za-z0-9._-]{1,128}$/.test(submitted) ? submitted : crypto.randomUUID();
+}
+
+function bearerAuthInfo(
+  claims: JWTPayload,
+  principal: ReturnType<CredentialVault["resolve"]>,
+  identifiers: { requestId: string; correlationId: string }
+): AuthInfo {
   const scope = typeof claims.scope === "string" ? claims.scope.split(/\s+/).filter(Boolean) : [];
   const clientId = typeof claims.client_id === "string"
     ? claims.client_id
     : typeof claims.azp === "string" ? claims.azp : "oauth";
-  const correlation = request.headers.get("X-Correlation-Id")?.trim();
-  const correlationId = correlation && /^[A-Za-z0-9._-]{1,128}$/.test(correlation)
-    ? correlation
-    : crypto.randomUUID();
   return {
     token: "oauth-bearer",
     clientId,
@@ -140,8 +145,8 @@ function bearerAuthInfo(claims: JWTPayload, principal: ReturnType<CredentialVaul
     ...(typeof claims.exp === "number" ? { expiresAt: claims.exp } : {}),
     extra: {
       odoo: principal,
-      requestId: crypto.randomUUID(),
-      correlationId
+      requestId: identifiers.requestId,
+      correlationId: identifiers.correlationId
     }
   };
 }
@@ -398,12 +403,26 @@ button.addEventListener('click', async () => { button.disabled = true; const res
     handler: { fetch(request: Request, options?: { authInfo?: AuthInfo }): Promise<Response> }
   ) {
     const protectedHandler = requireMcpAuth(auth, async (request, claims) => {
+      // Minted before the first rejection can be written: every client-visible
+      // MCP failure must be traceable to the server events it produced.
+      const identifiers = { requestId: crypto.randomUUID(), correlationId: correlationIdFromRequest(request) };
+      const traceable = (body: Record<string, unknown>) => ({
+        ...body,
+        request_id: identifiers.requestId,
+        correlation_id: identifiers.correlationId
+      });
       const enrollmentId = typeof claims.odoo_enrollment_id === "string" ? claims.odoo_enrollment_id : null;
-      if (!enrollmentId) return json({ error: "invalid_token", message: "The token has no Odoo enrollment" }, 401);
+      if (!enrollmentId) {
+        return json(traceable({
+          error: "invalid_token",
+          message: "The token has no Odoo enrollment",
+          retryable: false
+        }), 401);
+      }
       const started = Date.now();
       try {
         const principal = vault.resolve(enrollmentId);
-        const authInfo = bearerAuthInfo(claims, principal, request);
+        const authInfo = bearerAuthInfo(claims, principal, identifiers);
         const context = createRequestContext(profile, principal, authInfo);
         context.eventObserver = services.observability;
         context.analyticsPrincipalId = services.observability.principalId(principal);
@@ -412,11 +431,9 @@ button.addEventListener('click', async () => { button.disabled = true; const res
           timeoutMs: Math.min(5_000, config.accessRefreshTimeoutMs)
         });
         services.accessCache.touch(context);
-        const requestId = typeof authInfo.extra?.requestId === "string" ? authInfo.extra.requestId : undefined;
-        const correlationId = typeof authInfo.extra?.correlationId === "string" ? authInfo.extra.correlationId : undefined;
         emitEvent("auth.resolved", {
-          request_id: requestId,
-          correlation_id: correlationId,
+          request_id: identifiers.requestId,
+          correlation_id: identifiers.correlationId,
           target_id: principal.targetId,
           auth_mode: "oauth",
           profile,
@@ -426,6 +443,8 @@ button.addEventListener('click', async () => { button.disabled = true; const res
         return await handler.fetch(request, { authInfo });
       } catch (error) {
         emitEvent("auth.resolved", {
+          request_id: identifiers.requestId,
+          correlation_id: identifiers.correlationId,
           auth_mode: "oauth",
           profile,
           status: "rejected",
@@ -434,12 +453,21 @@ button.addEventListener('click', async () => { button.disabled = true; const res
         });
         if (error instanceof AgentAccessWarmingError) {
           return json(
-            { error: "surface_warming", message: error.message },
+            traceable({
+              error: "surface_warming",
+              message: error.message,
+              retryable: true,
+              retry_after_seconds: error.retryAfterSeconds
+            }),
             503,
             { "Retry-After": String(error.retryAfterSeconds) }
           );
         }
-        return json({ error: "invalid_token", message: error instanceof Error ? error.message : "Invalid Odoo enrollment" }, 401);
+        return json(traceable({
+          error: "invalid_token",
+          message: error instanceof Error ? error.message : "Invalid Odoo enrollment",
+          retryable: false
+        }), 401);
       }
     }, { resource, requiredScopes: ["odoo"] });
     return { fetch: async (request: Request) => { await ready; return await protectedHandler(request); } };

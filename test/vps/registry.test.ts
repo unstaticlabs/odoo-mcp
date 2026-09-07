@@ -619,4 +619,108 @@ describe("canonical capability registry", () => {
     expect(search?._meta).toMatchObject({ defer_loading: false });
     expect(semantic?._meta).toMatchObject({ defer_loading: true });
   });
+
+  it("answers schema-invalid arguments with the canonical error envelope", async () => {
+    const registry = createCapabilityRegistry(new OdooClient());
+    const server = registry.createServer(requestContext());
+    const client = new Client({ name: "invalid-input-registry-test", version: "1.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    connections.push(async () => {
+      await client.close();
+      await server.close();
+    });
+
+    const listed = (await client.listTools()).tools.find((tool) => tool.name === "odoo_search_records");
+    const result = await client.callTool({
+      name: "odoo_search_records",
+      arguments: { model: 42, domain: "not-a-domain" }
+    });
+    expect(result.isError).toBe(true);
+    const [content] = result.content as [{ type: "text"; text: string }];
+    // No client-visible failure may be a bare string: the agent has to be able
+    // to tell a correctable argument from a denial or a transient condition,
+    // and an operator has to be able to find the call in the server events.
+    expect(JSON.parse(content.text)).toMatchObject({
+      error: {
+        code: "MCP_INVALID_TOOL_INPUT",
+        message: expect.stringContaining("Invalid arguments for odoo_search_records"),
+        retryable: false,
+        outcome: "not_applied",
+        retry_guidance: "after_correction",
+        stage: "preflight",
+        recovery: expect.any(String),
+        request_id: expect.any(String),
+        correlation_id: expect.any(String)
+      }
+    });
+    expect(content.text).toContain("model:");
+    expect(content.text).toContain("domain:");
+    // Deferring validation into the handler must not alter the advertised schema.
+    const relisted = (await client.listTools()).tools.find((tool) => tool.name === "odoo_search_records");
+    expect(relisted?.inputSchema).toEqual(listed?.inputSchema);
+    expect(relisted?.inputSchema).toMatchObject({
+      type: "object",
+      properties: expect.objectContaining({ model: expect.objectContaining({ type: "string" }) })
+    });
+  });
+
+  it("keeps the generic read substrate advertised regardless of backend metadata", () => {
+    const registry = createCapabilityRegistry(new OdooClient());
+    const substrate = ["odoo_describe_model", "odoo_search_records", "odoo_read_records", "odoo_aggregate_records"];
+    const known = requestContext();
+    const surfaces = [
+      { modules: null, publicMethods: null, modelAccess: null, enabledFeatures: new Set<string>() },
+      { modules: new Set(["base"]), publicMethods: new Map(), modelAccess: new Map(), enabledFeatures: new Set<string>() },
+      {
+        modules: known.availableModules,
+        publicMethods: known.availablePublicMethods,
+        modelAccess: known.availableModelAccess,
+        enabledFeatures: known.enabledFeatures
+      }
+    ];
+    // These four carry no module, method or model-access requirement, so a
+    // refreshing or degraded Agent access snapshot can never withdraw them
+    // mid-session. Read failures on them are never a catalogue effect.
+    for (const availability of surfaces) {
+      expect(registry.list("default", availability).map((item) => item.name))
+        .toEqual(expect.arrayContaining(substrate));
+    }
+  });
+
+  it("advertises one read annotation set across every read capability", async () => {
+    const registry = createCapabilityRegistry(new OdooClient());
+    const server = registry.createServer({ ...requestContext(), profile: "all" });
+    const client = new Client({ name: "annotation-registry-test", version: "1.0.0" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    connections.push(async () => {
+      await client.close();
+      await server.close();
+    });
+
+    const effects = new Map(registry.list("all").map((item) => [item.name, item.effect]));
+    const { tools } = await client.listTools();
+    const reads = tools.filter((tool) => effects.get(tool.name) === "read");
+    expect(reads.map((tool) => tool.name)).toEqual(expect.arrayContaining([
+      "odoo_describe_model",
+      "odoo_search_records",
+      "odoo_read_records",
+      "odoo_aggregate_records",
+      "projects_get_task_context"
+    ]));
+    // A generic read and a semantic read are indistinguishable to a client's
+    // approval policy: no advertised difference can explain one being allowed
+    // and the other not.
+    const distinct = new Set(reads.map((tool) => JSON.stringify(tool.annotations)));
+    expect(distinct.size).toBe(1);
+    expect(JSON.parse([...distinct][0]!)).toEqual({
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true
+    });
+  });
 });

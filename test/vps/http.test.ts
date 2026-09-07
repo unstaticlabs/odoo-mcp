@@ -137,10 +137,16 @@ describe("VPS HTTP MCP transport", () => {
     const response = await fetch(`${origin}/mcp`, { headers: credentialHeaders });
     expect(response.status).toBe(503);
     expect(response.headers.get("Retry-After")).toBe("5");
-    await expect(response.json()).resolves.toEqual({
+    const body = await response.json() as Record<string, unknown>;
+    expect(body).toMatchObject({
       error: "mcp_upstream_unavailable",
-      message: "Odoo is temporarily unavailable. Retry after the indicated delay."
+      message: "Odoo is temporarily unavailable. Retry after the indicated delay.",
+      retryable: true,
+      retry_after_seconds: 5
     });
+    // A client-visible MCP rejection must be traceable to the events it emitted.
+    expect(body.request_id).toEqual(expect.any(String));
+    expect(body.correlation_id).toEqual(expect.any(String));
   });
 
   it("serves health/readiness and a modern stateless MCP client", async () => {

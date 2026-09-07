@@ -116,12 +116,20 @@ export function createHttpApp(
 
   async function authenticate(request: AuthenticatedRequest, response: Response, next: NextFunction): Promise<void> {
     const started = Date.now();
+    // Minted before the first rejection can be written: every client-visible
+    // MCP failure must be traceable to the server events it produced.
+    const requestId = crypto.randomUUID();
+    const correlationId = correlationIdFromRequest(request);
+    const reject = (status: number, body: Record<string, unknown>): void => {
+      response.status(status).json({ ...body, request_id: requestId, correlation_id: correlationId });
+    };
     try {
       if (request.headers.authorization) {
         if (!oauth) {
-          response.status(401).json({
+          reject(401, {
             error: "oauth_not_configured",
-            message: "OAuth bearer authentication is not configured for this deployment"
+            message: "OAuth bearer authentication is not configured for this deployment",
+            retryable: false
           });
           return;
         }
@@ -130,14 +138,13 @@ export function createHttpApp(
       }
       const principal = resolveDirectConnection(config, requestHeaders(request));
       if (!principal) {
-        response.status(401).json({
+        reject(401, {
           error: "odoo_credentials_required",
-          message: "Supply X-Odoo-Url, X-Odoo-Database, and X-Odoo-Api-Key"
+          message: "Supply X-Odoo-Url, X-Odoo-Database, and X-Odoo-Api-Key",
+          retryable: false
         });
         return;
       }
-      const requestId = crypto.randomUUID();
-      const correlationId = correlationIdFromRequest(request);
       request.auth = directAuthInfo(principal, requestId, correlationId);
       const context = createRequestContext("default", principal, request.auth);
       context.eventObserver = services.observability;
@@ -155,6 +162,8 @@ export function createHttpApp(
       next();
     } catch (error) {
       emitEvent("auth.resolved", {
+        request_id: requestId,
+        correlation_id: correlationId,
         auth_mode: "direct",
         status: "rejected",
         duration_ms: Date.now() - started,
@@ -162,7 +171,12 @@ export function createHttpApp(
       }, services.observability);
       if (error instanceof AgentAccessWarmingError) {
         response.setHeader("Retry-After", String(error.retryAfterSeconds));
-        response.status(503).json({ error: "surface_warming", message: error.message });
+        reject(503, {
+          error: "surface_warming",
+          message: error.message,
+          retryable: true,
+          retry_after_seconds: error.retryAfterSeconds
+        });
         return;
       }
       if (error instanceof OdooError && (
@@ -171,19 +185,22 @@ export function createHttpApp(
         || ["network_error", "timeout"].includes(error.code)
       )) {
         response.setHeader("Retry-After", "5");
-        response.status(503).json({
+        reject(503, {
           error: "mcp_upstream_unavailable",
-          message: "Odoo is temporarily unavailable. Retry after the indicated delay."
+          message: "Odoo is temporarily unavailable. Retry after the indicated delay.",
+          retryable: true,
+          retry_after_seconds: 5
         });
         return;
       }
-      response.status(401).json({
+      reject(401, {
         error: error instanceof OdooError
           ? error.policyCode ?? "invalid_odoo_credentials"
           : error instanceof AgentAccessUnavailableError
             ? error.policyCode ?? "agent_principal_required"
           : "agent_principal_required",
-        message: error instanceof Error ? error.message : "Invalid Odoo connection"
+        message: error instanceof Error ? error.message : "Invalid Odoo connection",
+        retryable: false
       });
     }
   }
@@ -261,7 +278,12 @@ export function createHttpApp(
     try {
       profile = profileFromRequest(request);
     } catch {
-      response.status(404).json({ error: "unknown_profile" });
+      response.status(404).json({
+        error: "unknown_profile",
+        message: "The requested MCP profile does not exist",
+        retryable: false,
+        correlation_id: correlationIdFromRequest(request)
+      });
       return;
     }
     const requestId = request.auth?.extra?.requestId;

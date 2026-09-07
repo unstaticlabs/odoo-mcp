@@ -82,6 +82,7 @@ container build, the opt-in live smoke suite, and the release gates.
 - [Tool catalogue and profiles](docs/tool-catalogue.md)
 - [VPS deployment and rollback](docs/deployment.md)
 - [MCP observability and privacy](docs/observability.md)
+- [Triaging a failed MCP call](docs/failure-triage.md)
 - [Testing](docs/testing.md)
 - [Agent-interface evaluation](docs/evaluation.md)
 - [Breaking migration guide](docs/migration.md)

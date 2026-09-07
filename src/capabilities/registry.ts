@@ -13,7 +13,7 @@ import {
 import type { OdooModelAccess } from "../odoo/client.js";
 import type { AgentAccessState } from "../runtime/agent_access_cache.js";
 import type { ProfileName, RequestContext } from "../runtime/context.js";
-import { envelopeSchema, resultEnvelope, toolError, toolResult } from "../runtime/envelope.js";
+import { envelopeSchema, resultEnvelope, toolError, toolResult, type ToolFailure } from "../runtime/envelope.js";
 import { emitEvent } from "../runtime/logging.js";
 import { withMcpTraceContext } from "../runtime/observability.js";
 import { SERVER_VERSION } from "../version.js";
@@ -161,6 +161,84 @@ export function instrumentCancellation(
   return () => signal.removeEventListener("abort", emitCancellation);
 }
 
+/**
+ * Schema-invalid `tools/call` arguments are the one client-visible failure the
+ * MCP SDK answers with a bare `isError` string: it rejects them before the tool
+ * handler runs, so the rejection carries no code, no retry guidance, and
+ * neither the request nor the correlation ID. Advertised input schemas are
+ * therefore wrapped so validation issues travel into the handler as a marker
+ * value, and every rejection leaves through the canonical error envelope.
+ */
+const INVALID_TOOL_INPUT = Symbol("usl-odoo-mcp/invalid-tool-input");
+
+interface DeferredInputFailure {
+  readonly [INVALID_TOOL_INPUT]: readonly string[];
+}
+
+type StandardIssue = Readonly<{
+  message: string;
+  path?: ReadonlyArray<PropertyKey | { readonly key: PropertyKey }>;
+}>;
+
+export class InvalidToolInputError extends Error {
+  constructor(toolName: string, readonly issues: readonly string[]) {
+    super(`Invalid arguments for ${toolName}: ${issues.join(", ")}`);
+    this.name = "InvalidToolInputError";
+  }
+}
+
+function describeIssue(issue: StandardIssue): string {
+  const path = (issue.path ?? [])
+    .map((segment) => typeof segment === "object" && segment !== null && "key" in segment
+      ? String(segment.key)
+      : String(segment))
+    .join(".");
+  return path ? `${path}: ${issue.message}` : issue.message;
+}
+
+/**
+ * Wraps an input schema so failed validation resolves successfully with a
+ * marker instead of throwing inside the SDK. The advertised JSON Schema, vendor
+ * and version are passed through untouched, so `tools/list` stays byte-equal.
+ */
+function deferInputValidation(schema: StandardSchemaWithJSON): StandardSchemaWithJSON {
+  const standard = schema["~standard"];
+  const settle = (result: { issues?: readonly StandardIssue[] | undefined }) =>
+    result.issues && result.issues.length > 0
+      ? { value: { [INVALID_TOOL_INPUT]: result.issues.map(describeIssue) } satisfies DeferredInputFailure }
+      : result;
+  return {
+    "~standard": {
+      ...standard,
+      validate: (value: unknown) => {
+        const result = standard.validate(value);
+        return result instanceof Promise ? result.then(settle) : settle(result);
+      }
+    }
+  } as unknown as StandardSchemaWithJSON;
+}
+
+function deferredInputFailure(input: unknown): readonly string[] | undefined {
+  return typeof input === "object" && input !== null && INVALID_TOOL_INPUT in input
+    ? (input as DeferredInputFailure)[INVALID_TOOL_INPUT]
+    : undefined;
+}
+
+function invalidToolInputFailure(error: InvalidToolInputError): ToolFailure {
+  return {
+    code: "MCP_INVALID_TOOL_INPUT",
+    message: error.message,
+    retryable: false,
+    condition_retryable: false,
+    outcome: "not_applied",
+    retry_guidance: "after_correction",
+    stage: "preflight",
+    known: { request_sent: "no", response_received: "no", result_received: "no" },
+    recovery:
+      "Correct the reported arguments against the advertised tool input schema, then retry. Inspect the model with odoo_describe_model when a field, method or model name is uncertain."
+  };
+}
+
 export function defineCapability<I extends ObjectSchema, O extends ObjectSchema>(
   spec: CapabilitySpec<I, O>
 ): Capability {
@@ -175,7 +253,7 @@ export function defineCapability<I extends ObjectSchema, O extends ObjectSchema>
   return {
     metadata,
     register(server, context, options = {}) {
-      const inputSchema: StandardSchemaWithJSON = spec.input;
+      const inputSchema: StandardSchemaWithJSON = deferInputValidation(spec.input);
       const outputSchema: StandardSchemaWithJSON = envelopeSchema(spec.output);
       const toolMeta: Record<string, unknown> = {
         "odoo/capabilityId": spec.id,
@@ -216,6 +294,8 @@ export function defineCapability<I extends ObjectSchema, O extends ObjectSchema>
             effect: spec.effect
           }, activeContext.eventObserver);
           try {
+            const invalidInput = deferredInputFailure(input);
+            if (invalidInput) throw new InvalidToolInputError(spec.name, invalidInput);
             const result = await spec.handler(input as z.infer<I>, activeContext, signal);
             const render = (value: CapabilityHandlerResult<O>) => {
               const envelope = envelopeSchema(spec.output).parse(
@@ -247,8 +327,10 @@ export function defineCapability<I extends ObjectSchema, O extends ObjectSchema>
             }, activeContext.eventObserver);
             return response;
           } catch (error) {
-            activeContext.noteAgentAccessFailure?.(error);
-            const failure = toolFailureFromError(error);
+            if (!(error instanceof InvalidToolInputError)) activeContext.noteAgentAccessFailure?.(error);
+            const failure = error instanceof InvalidToolInputError
+              ? invalidToolInputFailure(error)
+              : toolFailureFromError(error);
             const response = toolError(failure, activeContext);
             emitEvent("mcp.tool.completed", {
               request_id: activeContext.requestId,
