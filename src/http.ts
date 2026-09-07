@@ -207,6 +207,9 @@ export function createHttpApp(
       schema: "usl-odoo-mcp-readiness/v1",
       status: ready ? "ready" : "not_ready",
       server_version: SERVER_VERSION,
+      // The exact revision this process runs, so an operator can prove a
+      // promotion landed without a schema change to read it from.
+      mcp_commit: config.releaseIdentity.mcpCommit,
       targets: config.targets.length,
       default_profile: budget,
       oauth: {

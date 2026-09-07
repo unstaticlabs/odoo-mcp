@@ -143,6 +143,19 @@ describe("VPS HTTP MCP transport", () => {
     });
   });
 
+  // A promotion that changes no schema leaves no other public signal, so the
+  // readiness document must name the revision the process runs.
+  it("reports the running revision so an operator can verify a deploy", async () => {
+    const origin = await listeningServer({
+      ...configuration(),
+      releaseIdentity: { mcpCommit: "c".repeat(40), gitopsCommit: "d".repeat(40) }
+    });
+    const readiness = await fetch(`${origin}/readyz`).then((response) => response.json()) as Record<string, unknown>;
+    expect(readiness.mcp_commit).toBe("c".repeat(40));
+    // The GitOps ledger identity stays off the public endpoint.
+    expect(readiness).not.toHaveProperty("gitops_commit");
+  });
+
   it("serves health/readiness and a modern stateless MCP client", async () => {
     const origin = await listeningServer();
     await expect(fetch(`${origin}/healthz`).then((response) => response.json())).resolves.toEqual({ status: "ok" });
@@ -151,6 +164,7 @@ describe("VPS HTTP MCP transport", () => {
     expect(readiness).toMatchObject({
       schema: "usl-odoo-mcp-readiness/v1",
       server_version: "1.1.0",
+      mcp_commit: "unknown",
       oauth: { status: "disabled", schema_version: 1 }
     });
 
