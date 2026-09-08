@@ -493,7 +493,7 @@ export function registerOperationalCapabilities(registry: CapabilityRegistry, cl
     name: "expenses_configure_draft_vendor_bill",
     title: "Configure Draft Vendor Bill",
     description:
-      "Atomically update curated header fields and existing product lines on one draft vendor bill or credit note, including taxes and analytics. Odoo validates company, ownership, locks, access, type, and state, then returns recomputed totals, tax lines, and payable lines. This never posts, pays, reconciles, deletes user-entered lines, or accepts generated lines as input.",
+      "Atomically update curated header fields on one draft vendor bill or credit note, patch its existing product lines, and add product lines the import left out, including taxes and analytics. Odoo validates company, ownership, locks, access, type, and state, then returns recomputed totals, tax lines, and payable lines. Use line_creates for a bill whose document exists but whose lines are missing. This never posts, pays, reconciles, deletes user-entered lines, or accepts generated lines as input.",
     layer: "business_action",
     toolsets: ["expenses", "accounting"],
     profiles: ["accounting"],
@@ -530,6 +530,18 @@ export function registerOperationalCapabilities(registry: CapabilityRegistry, cl
           .refine((distribution) => Object.keys(distribution).length <= 100, "At most 100 analytic entries are allowed")
           .optional()
       }).strict()).max(100).optional(),
+      line_creates: z.array(z.object({
+        name: z.string().trim().min(1).max(2_000),
+        price_unit: z.number().finite(),
+        product_id: PositiveIdSchema.optional(),
+        account_id: PositiveIdSchema.optional(),
+        quantity: z.number().finite().optional(),
+        discount: z.number().finite().min(0).max(100).optional(),
+        tax_ids: z.array(PositiveIdSchema).max(50).optional(),
+        analytic_distribution: z.record(z.string().min(1).max(200), z.number().finite())
+          .refine((distribution) => Object.keys(distribution).length <= 100, "At most 100 analytic entries are allowed")
+          .optional()
+      }).strict()).max(100).optional(),
       context: OdooContextSchema
     }).strict(),
     output: VendorBillConfigurationOutputSchema,
@@ -547,8 +559,8 @@ export function registerOperationalCapabilities(registry: CapabilityRegistry, cl
         ...(input.payment_reference !== undefined ? { payment_reference: input.payment_reference } : {}),
         ...(input.review_state !== undefined ? { review_state: input.review_state } : {})
       };
-      if (Object.keys(headerValues).length === 0 && !input.line_patches?.length) {
-        throw new Error("Supply at least one draft vendor bill field or line patch");
+      if (Object.keys(headerValues).length === 0 && !input.line_patches?.length && !input.line_creates?.length) {
+        throw new Error("Supply at least one draft vendor bill field, line patch, or new line");
       }
       const receipt = await client.call<z.infer<typeof VendorBillConfigurationResultSchema>>(
         context,
@@ -558,6 +570,7 @@ export function registerOperationalCapabilities(registry: CapabilityRegistry, cl
           ids: [input.bill_id],
           header_values: headerValues,
           line_patches: input.line_patches ?? [],
+          line_creates: input.line_creates ?? [],
           context: common
         }, {
           kind: "mutation",
@@ -565,9 +578,9 @@ export function registerOperationalCapabilities(registry: CapabilityRegistry, cl
           reconciliation: {
             targetModel: "account.move",
             knownIds: [input.bill_id],
-            fields: [...Object.keys(headerValues), ...(input.line_patches?.length ? ["invoice_line_ids"] : [])],
+            fields: [...Object.keys(headerValues), ...(input.line_patches?.length || input.line_creates?.length ? ["invoice_line_ids"] : [])],
             suggestedTool: "odoo_read_records",
-            instructions: "Read the draft vendor bill totals, review state, invoice lines, taxes, and payment terms. Compare them with the requested patch and do not repeat fields whose intended result is already present."
+            instructions: "Read the draft vendor bill totals, review state, invoice lines, taxes, and payment terms. Compare them with the requested patch and do not repeat fields whose intended result is already present. A repeated line_creates call appends the lines a second time, so check the existing lines before retrying."
           }
         }
       );

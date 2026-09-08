@@ -178,6 +178,7 @@ describe("fixed-intent operational capabilities", () => {
       ids: [5161],
       header_values: { review_state: "reviewed" },
       line_patches: [{ line_id: 12390, tax_ids: [26], price_unit: 8.61 }],
+      line_creates: [],
       context: {
         allowed_company_ids: [1],
         usl_agent_origin: "odoo-mcp",
@@ -191,6 +192,84 @@ describe("fixed-intent operational capabilities", () => {
         record: { model: "account.move", id: 5161 }
       }
     });
+  });
+
+  it("completes a draft vendor bill whose import produced no line", async () => {
+    const completed = {
+      bill: {
+        id: 5162,
+        display_name: "BILL/2026/5162",
+        move_type: "in_invoice",
+        state: "draft",
+        company: { id: 1, name: "Unstatic Labs" },
+        partner: { id: 21, name: "Anthropic Ireland" },
+        currency: { id: 1, name: "EUR" },
+        invoice_date: "2026-09-01",
+        accounting_date: "2026-09-01",
+        invoice_date_due: "2026-09-01",
+        reference: "AN-2026-09",
+        review_state: "todo",
+        amount_untaxed: 120,
+        amount_tax: 0,
+        amount_total: 120
+      },
+      invoice_lines: [{
+        id: 12500,
+        name: "Claude Max subscription",
+        product: null,
+        account: { id: 60, name: "Services" },
+        quantity: 1,
+        price_unit: 120,
+        discount: 0,
+        tax_ids: [],
+        analytic_distribution: {},
+        price_subtotal: 120,
+        price_total: 120
+      }],
+      tax_lines: [],
+      payable_lines: [{
+        id: 12501,
+        name: "AN-2026-09",
+        account: { id: 62, name: "Payable" },
+        date_maturity: "2026-09-01",
+        balance: -120,
+        amount_currency: -120
+      }]
+    };
+    const fetcher = vi.fn<typeof fetch>(async () => Response.json(completed));
+    const client = await connected(fetcher);
+    const result = await client.callTool({
+      name: "expenses_configure_draft_vendor_bill",
+      arguments: {
+        bill_id: 5162,
+        line_creates: [{ name: "Claude Max subscription", price_unit: 120, quantity: 1 }],
+        context: {}
+      }
+    });
+
+    expect(result.isError).not.toBe(true);
+    const [, init] = fetcher.mock.calls[0]!;
+    expect(JSON.parse(String(init?.body))).toMatchObject({
+      ids: [5162],
+      header_values: {},
+      line_patches: [],
+      line_creates: [{ name: "Claude Max subscription", price_unit: 120, quantity: 1 }]
+    });
+    expect(result.structuredContent).toMatchObject({
+      data: { result: { invoice_lines: [{ id: 12500 }] }, outcome: "succeeded" }
+    });
+  });
+
+  it("refuses a draft vendor bill call that changes nothing", async () => {
+    const fetcher = vi.fn<typeof fetch>(async () => Response.json({}));
+    const client = await connected(fetcher);
+    const result = await client.callTool({
+      name: "expenses_configure_draft_vendor_bill",
+      arguments: { bill_id: 5162, context: {} }
+    });
+
+    expect(result.isError).toBe(true);
+    expect(fetcher).not.toHaveBeenCalled();
   });
 
   it("reports when Odoo returns an approval wizard without reaching the approved state", async () => {
