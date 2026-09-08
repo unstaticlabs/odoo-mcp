@@ -16,7 +16,7 @@ import type { ProfileName, RequestContext } from "../runtime/context.js";
 import { envelopeSchema, resultEnvelope, toolError, toolResult } from "../runtime/envelope.js";
 import { emitEvent } from "../runtime/logging.js";
 import { withMcpTraceContext } from "../runtime/observability.js";
-import { SERVER_VERSION } from "../version.js";
+import { SERVER_ICON_URL, SERVER_VERSION, SERVER_WEBSITE_URL } from "../version.js";
 
 /**
  * Ceiling on the estimated input/output schema tokens the `default` profile may
@@ -561,7 +561,14 @@ export class CapabilityRegistry {
     } = {}
   ): McpServer {
     const server = new McpServer(
-      { name: "usl-odoo-mcp-server", version: SERVER_VERSION },
+      {
+        name: "usl-odoo-mcp-server",
+        version: SERVER_VERSION,
+        websiteUrl: SERVER_WEBSITE_URL,
+        // Referenced by URL, not inlined: a data URI would ride along on every
+        // initialize response. The deployment serves it from the same origin.
+        icons: [{ src: SERVER_ICON_URL, mimeType: "image/png", sizes: ["128x128"] }]
+      },
       {
         instructions: [
           "Use a matching visible specialized tool first for compact context or one business action. Use generic tools for cross-domain exploration; inspect models with odoo_describe_model instead of guessing.",
