@@ -193,6 +193,105 @@ describe("fixed-intent operational capabilities", () => {
     });
   });
 
+  it("completes a draft vendor bill whose import produced no line", async () => {
+    const completed = {
+      bill: {
+        id: 5162,
+        display_name: "BILL/2026/5162",
+        move_type: "in_invoice",
+        state: "draft",
+        company: { id: 1, name: "Unstatic Labs" },
+        partner: { id: 21, name: "Anthropic Ireland" },
+        currency: { id: 1, name: "EUR" },
+        invoice_date: "2026-09-01",
+        accounting_date: "2026-09-01",
+        invoice_date_due: "2026-09-01",
+        reference: "AN-2026-09",
+        review_state: "todo",
+        amount_untaxed: 120,
+        amount_tax: 0,
+        amount_total: 120
+      },
+      invoice_lines: [{
+        id: 12500,
+        name: "Claude Max subscription",
+        product: null,
+        account: { id: 60, name: "Services" },
+        quantity: 1,
+        price_unit: 120,
+        discount: 0,
+        tax_ids: [],
+        analytic_distribution: {},
+        price_subtotal: 120,
+        price_total: 120
+      }],
+      tax_lines: [],
+      payable_lines: [{
+        id: 12501,
+        name: "AN-2026-09",
+        account: { id: 62, name: "Payable" },
+        date_maturity: "2026-09-01",
+        balance: -120,
+        amount_currency: -120
+      }]
+    };
+    const fetcher = vi.fn<typeof fetch>(async () => Response.json(completed));
+    const client = await connected(fetcher);
+    const result = await client.callTool({
+      name: "expenses_configure_draft_vendor_bill",
+      arguments: {
+        bill_id: 5162,
+        line_creates: [{ name: "Claude Max subscription", price_unit: 120, quantity: 1 }],
+        context: {}
+      }
+    });
+
+    expect(result.isError).not.toBe(true);
+    const [, init] = fetcher.mock.calls[0]!;
+    const body = JSON.parse(String(init?.body));
+    expect(body).toMatchObject({
+      ids: [5162],
+      header_values: {},
+      line_patches: [],
+      line_creates: [{ name: "Claude Max subscription", price_unit: 120, quantity: 1 }]
+    });
+    expect(result.structuredContent).toMatchObject({
+      data: { result: { invoice_lines: [{ id: 12500 }] }, outcome: "succeeded" }
+    });
+  });
+
+  it("refuses a draft vendor bill call that changes nothing", async () => {
+    const fetcher = vi.fn<typeof fetch>(async () => Response.json({}));
+    const client = await connected(fetcher);
+    const result = await client.callTool({
+      name: "expenses_configure_draft_vendor_bill",
+      arguments: { bill_id: 5162, context: {} }
+    });
+
+    expect(result.isError).toBe(true);
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("omits line_creates when there is nothing to create", async () => {
+    const fetcher = vi.fn<typeof fetch>(async () => Response.json({
+      bill: {
+        id: 5163, display_name: "BILL/2026/5163", move_type: "in_invoice", state: "draft",
+        company: { id: 1, name: "Unstatic Labs" }, partner: null, currency: { id: 1, name: "EUR" },
+        invoice_date: null, accounting_date: "2026-09-01", invoice_date_due: null, reference: null,
+        review_state: "reviewed", amount_untaxed: 0, amount_tax: 0, amount_total: 0
+      },
+      invoice_lines: [], tax_lines: [], payable_lines: []
+    }));
+    const client = await connected(fetcher);
+    const result = await client.callTool({
+      name: "expenses_configure_draft_vendor_bill",
+      arguments: { bill_id: 5163, review_state: "reviewed", context: {} }
+    });
+
+    expect(result.isError).not.toBe(true);
+    expect(JSON.parse(String(fetcher.mock.calls[0]![1]?.body))).not.toHaveProperty("line_creates");
+  });
+
   it("reports when Odoo returns an approval wizard without reaching the approved state", async () => {
     const fetcher = vi.fn<typeof fetch>(async (url) => String(url).endsWith("/action_approve")
       ? Response.json({ type: "ir.actions.act_window", res_model: "hr.expense.approve.duplicate" })
@@ -226,5 +325,25 @@ describe("fixed-intent operational capabilities", () => {
     });
     expect(result.isError).toBe(true);
     expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("omits line_creates when there is nothing to create", async () => {
+    const fetcher = vi.fn<typeof fetch>(async () => Response.json({
+      bill: {
+        id: 5163, display_name: "BILL/2026/5163", move_type: "in_invoice", state: "draft",
+        company: { id: 1, name: "Unstatic Labs" }, partner: null, currency: { id: 1, name: "EUR" },
+        invoice_date: null, accounting_date: "2026-09-01", invoice_date_due: null, reference: null,
+        review_state: "reviewed", amount_untaxed: 0, amount_tax: 0, amount_total: 0
+      },
+      invoice_lines: [], tax_lines: [], payable_lines: []
+    }));
+    const client = await connected(fetcher);
+    const result = await client.callTool({
+      name: "expenses_configure_draft_vendor_bill",
+      arguments: { bill_id: 5163, review_state: "reviewed", context: {} }
+    });
+
+    expect(result.isError).not.toBe(true);
+    expect(JSON.parse(String(fetcher.mock.calls[0]![1]?.body))).not.toHaveProperty("line_creates");
   });
 });
