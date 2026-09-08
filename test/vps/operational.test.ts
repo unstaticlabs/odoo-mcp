@@ -178,7 +178,6 @@ describe("fixed-intent operational capabilities", () => {
       ids: [5161],
       header_values: { review_state: "reviewed" },
       line_patches: [{ line_id: 12390, tax_ids: [26], price_unit: 8.61 }],
-      line_creates: [],
       context: {
         allowed_company_ids: [1],
         usl_agent_origin: "odoo-mcp",
@@ -249,7 +248,8 @@ describe("fixed-intent operational capabilities", () => {
 
     expect(result.isError).not.toBe(true);
     const [, init] = fetcher.mock.calls[0]!;
-    expect(JSON.parse(String(init?.body))).toMatchObject({
+    const body = JSON.parse(String(init?.body));
+    expect(body).toMatchObject({
       ids: [5162],
       header_values: {},
       line_patches: [],
@@ -270,6 +270,26 @@ describe("fixed-intent operational capabilities", () => {
 
     expect(result.isError).toBe(true);
     expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("omits line_creates when there is nothing to create", async () => {
+    const fetcher = vi.fn<typeof fetch>(async () => Response.json({
+      bill: {
+        id: 5163, display_name: "BILL/2026/5163", move_type: "in_invoice", state: "draft",
+        company: { id: 1, name: "Unstatic Labs" }, partner: null, currency: { id: 1, name: "EUR" },
+        invoice_date: null, accounting_date: "2026-09-01", invoice_date_due: null, reference: null,
+        review_state: "reviewed", amount_untaxed: 0, amount_tax: 0, amount_total: 0
+      },
+      invoice_lines: [], tax_lines: [], payable_lines: []
+    }));
+    const client = await connected(fetcher);
+    const result = await client.callTool({
+      name: "expenses_configure_draft_vendor_bill",
+      arguments: { bill_id: 5163, review_state: "reviewed", context: {} }
+    });
+
+    expect(result.isError).not.toBe(true);
+    expect(JSON.parse(String(fetcher.mock.calls[0]![1]?.body))).not.toHaveProperty("line_creates");
   });
 
   it("reports when Odoo returns an approval wizard without reaching the approved state", async () => {
@@ -305,5 +325,25 @@ describe("fixed-intent operational capabilities", () => {
     });
     expect(result.isError).toBe(true);
     expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("omits line_creates when there is nothing to create", async () => {
+    const fetcher = vi.fn<typeof fetch>(async () => Response.json({
+      bill: {
+        id: 5163, display_name: "BILL/2026/5163", move_type: "in_invoice", state: "draft",
+        company: { id: 1, name: "Unstatic Labs" }, partner: null, currency: { id: 1, name: "EUR" },
+        invoice_date: null, accounting_date: "2026-09-01", invoice_date_due: null, reference: null,
+        review_state: "reviewed", amount_untaxed: 0, amount_tax: 0, amount_total: 0
+      },
+      invoice_lines: [], tax_lines: [], payable_lines: []
+    }));
+    const client = await connected(fetcher);
+    const result = await client.callTool({
+      name: "expenses_configure_draft_vendor_bill",
+      arguments: { bill_id: 5163, review_state: "reviewed", context: {} }
+    });
+
+    expect(result.isError).not.toBe(true);
+    expect(JSON.parse(String(fetcher.mock.calls[0]![1]?.body))).not.toHaveProperty("line_creates");
   });
 });

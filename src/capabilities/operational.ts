@@ -570,7 +570,10 @@ export function registerOperationalCapabilities(registry: CapabilityRegistry, cl
           ids: [input.bill_id],
           header_values: headerValues,
           line_patches: input.line_patches ?? [],
-          line_creates: input.line_creates ?? [],
+          // Only sent when there is something to create: an Odoo that predates
+          // the keyword rejects the call outright, so a header-only
+          // configuration keeps working during the Distribution rollout.
+          ...(input.line_creates?.length ? { line_creates: input.line_creates } : {}),
           context: common
         }, {
           kind: "mutation",
