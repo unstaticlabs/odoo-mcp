@@ -2,6 +2,11 @@ import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createCapabilityRegistry } from "../../src/capabilities/index.js";
 import { OdooClient } from "../../src/odoo/client.js";
+import {
+  EXPENSE_ATTACHMENT_FIELDS,
+  EXPENSE_CONTEXT_FIELDS,
+  EXPENSE_DRAFT_WRITABLE_FIELDS
+} from "../../src/capabilities/curated_fields.js";
 import { requestContext } from "./fixtures.js";
 
 const closeCallbacks: Array<() => Promise<void>> = [];
@@ -345,5 +350,34 @@ describe("fixed-intent operational capabilities", () => {
 
     expect(result.isError).not.toBe(true);
     expect(JSON.parse(String(fetcher.mock.calls[0]![1]?.body))).not.toHaveProperty("line_creates");
+  });
+
+  it("reads expense context only through the declared curated field contract", async () => {
+    const bodies: string[] = [];
+    const fetcher = vi.fn<typeof fetch>(async (_url, init) => {
+      bodies.push(String(init?.body));
+      return Response.json([]);
+    });
+    const client = await connected(fetcher);
+    const result = await client.callTool({
+      name: "expenses_get_context",
+      arguments: { expense_ids: [5161], context: {} }
+    });
+
+    expect(result.isError).not.toBe(true);
+    const requested = bodies.map((body) => JSON.parse(body).fields as string[]);
+    expect(requested).toContainEqual([...EXPENSE_CONTEXT_FIELDS]);
+    expect(requested).toContainEqual([...EXPENSE_ATTACHMENT_FIELDS]);
+    // hr.expense lost `reference` in Odoo 19; naming it fails the whole read.
+    expect(requested.flat()).not.toContain("reference");
+  });
+
+  it("offers exactly the draft expense fields the curated contract declares", async () => {
+    const client = await connected(vi.fn<typeof fetch>());
+    const { tools } = await client.listTools();
+    const tool = tools.find((candidate) => candidate.name === "expenses_update_draft");
+    const properties = Object.keys(tool?.inputSchema.properties ?? {})
+      .filter((name) => name !== "expense_id" && name !== "context");
+    expect(properties.sort()).toEqual([...EXPENSE_DRAFT_WRITABLE_FIELDS].sort());
   });
 });
