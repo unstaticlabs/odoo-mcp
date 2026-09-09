@@ -30,4 +30,16 @@ describe("CI workflow contracts", () => {
     expect(publishJob).toContain("needs.test.outputs.evidence_sha256");
     expect(publishJob).toContain("cache-from: type=gha,scope=odoo-mcp");
   });
+
+  it("retries the GitOps hand-off instead of losing a release to one slow response", () => {
+    const trigger = release.split("name: Trigger protected GitOps MCP ingestion", 2)[1]!;
+
+    // The image is already published when this call is made, so a single
+    // timeout defers the release with nothing red to notice. The distribution
+    // repository lost six hours of production to exactly this on 2026-09-07.
+    expect(trigger).toContain("--retry 5");
+    expect(trigger).toContain("--retry-delay 10");
+    expect(trigger).toContain("--retry-all-errors");
+    expect(trigger).toContain("--fail-with-body");
+  });
 });
