@@ -10,6 +10,7 @@ import {
   richTextHtml
 } from "../odoo/schemas.js";
 import type { RequestContext } from "../runtime/context.js";
+import { EXPENSE_ATTACHMENT_FIELDS, EXPENSE_CONTEXT_FIELDS } from "./curated_fields.js";
 import { CapabilityRegistry, defineCapability } from "./registry.js";
 
 const RecordSchema = z.record(z.string(), z.unknown());
@@ -378,18 +379,12 @@ export function registerOperationalCapabilities(registry: CapabilityRegistry, cl
       const [expenses, attachments] = await Promise.all([
         client.call<Record<string, unknown>[]>(context, "hr.expense", "read", {
           ids: expense_ids,
-          fields: [
-            "display_name", "state", "date", "employee_id", "product_id", "account_id", "analytic_distribution",
-            "tax_ids", "payment_mode", "currency_id", "total_amount", "total_amount_currency", "reference", "company_id",
-            "expense_batch_id", "batch_readiness", "batch_incomplete_reason", "batch_attachment_status",
-            "account_context_source", "analytic_context_source", "batch_context_revision", "batch_context_status",
-            "batch_warning_reason", "batch_attention_level", "batch_attention_message", "rebuild_receipt_state", "rebuild_next_step"
-          ],
+          fields: [...EXPENSE_CONTEXT_FIELDS],
           context: common
         }, { signal }),
         client.call<Record<string, unknown>[]>(context, "ir.attachment", "search_read", {
           domain: [["res_model", "=", "hr.expense"], ["res_id", "in", expense_ids]],
-          fields: ["name", "mimetype", "file_size", "res_id", "create_date"],
+          fields: [...EXPENSE_ATTACHMENT_FIELDS],
           order: "res_id asc, id asc",
           limit: 200,
           context: common
@@ -436,7 +431,6 @@ export function registerOperationalCapabilities(registry: CapabilityRegistry, cl
       price_unit: z.number().finite().optional(),
       total_amount: z.number().finite().optional(),
       tax_ids: z.array(PositiveIdSchema).max(50).optional(),
-      reference: z.string().max(500).optional(),
       payment_mode: z.enum(["own_account", "company_account"]).optional(),
       context: OdooContextSchema
     }).strict(),
@@ -460,7 +454,6 @@ export function registerOperationalCapabilities(registry: CapabilityRegistry, cl
         ...(input.price_unit !== undefined ? { price_unit: input.price_unit } : {}),
         ...(input.total_amount !== undefined ? { total_amount: input.total_amount } : {}),
         ...(input.tax_ids !== undefined ? { tax_ids: [[6, 0, input.tax_ids]] } : {}),
-        ...(input.reference !== undefined ? { reference: input.reference } : {}),
         ...(input.payment_mode !== undefined ? { payment_mode: input.payment_mode } : {})
       };
       if (Object.keys(values).length === 0) throw new Error("Supply at least one draft expense field to update");
