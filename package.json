@@ -23,18 +23,18 @@
     "check": "npm run typecheck && npm test && npm run build"
   },
   "dependencies": {
-    "@better-auth/cimd": "1.7.2",
-    "@better-auth/mcp": "1.7.2",
+    "@better-auth/cimd": "1.7.4",
+    "@better-auth/mcp": "1.7.4",
     "@modelcontextprotocol/express": "2.0.0",
     "@modelcontextprotocol/node": "2.0.0",
     "@modelcontextprotocol/server": "2.0.0",
     "@opentelemetry/api": "1.9.1",
-    "@opentelemetry/core": "2.10.0",
-    "@posthog/mcp": "0.12.0",
-    "better-auth": "1.7.2",
+    "@opentelemetry/core": "2.11.0",
+    "@posthog/mcp": "0.16.0",
+    "better-auth": "1.7.4",
     "better-sqlite3": "^12.2.0",
     "express": "^5.1.0",
-    "posthog-node": "5.51.4",
+    "posthog-node": "5.52.1",
     "zod": "^4.4.3"
   },
   "devDependencies": {
