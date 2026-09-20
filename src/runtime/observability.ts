@@ -487,6 +487,7 @@ class PostHogObservability implements Observability {
 
   captureRuntimeEvent(event: EventName, dimensions: EventDimensions): void {
     if (this.currentStatus !== "ready" || !this.posthog || this.closed) return;
+    if (!worthCapturing(event, dimensions)) return;
     const common: Record<string, unknown> = {
       usl_event_schema: "1",
       usl_environment: this.config.environment,
@@ -531,25 +532,6 @@ class PostHogObservability implements Observability {
       properties.usl_status = status;
       const duration = safeNumber(dimensions.duration_ms);
       if (duration !== undefined) properties.usl_duration_ms = duration;
-    } else if (event === "mcp.tool.completed") {
-      eventName = "usl_mcp_tool_completed";
-      for (const name of ["capability_id", "tool_name", "effect", "layer"]) {
-        const value = safeIdentifier(dimensions[name]);
-        if (value) properties[`usl_${name}`] = value;
-      }
-      if (typeof dimensions.toolsets === "string") {
-        properties.usl_toolsets = dimensions.toolsets
-          .split(",")
-          .map((value) => safeIdentifier(value, 64))
-          .filter((value): value is string => Boolean(value))
-          .slice(0, 20);
-      }
-      properties.usl_status = normalizedErrorClass(dimensions.status) ?? "unknown";
-      if (dimensions.status === "ok") properties.usl_status = "ok";
-      for (const name of ["duration_ms", "request_bytes", "response_bytes"]) {
-        const value = safeNumber(dimensions[name]);
-        if (value !== undefined) properties[`usl_${name}`] = value;
-      }
     } else if (event === "mcp.request.cancelled") {
       eventName = "usl_mcp_request_cancelled";
       for (const name of ["capability_id", "tool_name", "effect"]) {
@@ -593,6 +575,25 @@ class PostHogObservability implements Observability {
       // A bounded analytics flush is best effort during process shutdown.
     }
   }
+}
+
+/**
+ * Whether one runtime event is worth a row in Product Analytics.
+ *
+ * Every event still reaches the structured stderr log, which is the operational record. This
+ * asks the narrower question: does PostHog learn anything from it?
+ *
+ * Two answers are no. `mcp.tool.completed` duplicated the canonical `$mcp_tool_call` that the
+ * PostHog MCP instrumentation already sends: in the 30 days to 2026-09-20 all 9,863 custom events
+ * had a matching canonical event on the same `usl_request_id`, and the canonical one carries the
+ * tool name, the duration, the error state, the client and server metadata and the USL trace
+ * fields. The branch that built it is gone; this function documents why. And a scheduled snapshot
+ * refresh that succeeded is the expected case, 4,946 rows of it, so only the refreshes that went
+ * stale, partial, slow or wrong are kept.
+ */
+function worthCapturing(event: EventName, dimensions: EventDimensions): boolean {
+  if (event !== "agent.snapshot.refresh") return true;
+  return !(dimensions.reason === "scheduled" && dimensions.status === "ok");
 }
 
 export function createObservability(
