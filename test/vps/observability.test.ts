@@ -252,17 +252,11 @@ describe("privacy-safe PostHog MCP analytics", () => {
       usl_effect: "read",
       usl_toolsets: ["core"]
     });
-    const completionEvents = events.filter((event) => event.event === "usl_mcp_tool_completed");
-    expect(completionEvents).toHaveLength(2);
-    expect(completionEvents[0]?.properties).toMatchObject({
-      usl_capability_id: "test.analytics",
-      usl_status: "ok",
-      usl_request_bytes: Buffer.byteLength(JSON.stringify({
-        fail: false,
-        secret: "successful-secret"
-      })),
-      usl_response_bytes: expect.any(Number)
-    });
+    /**
+     * The canonical `$mcp_tool_call` is the only completion row. `usl_mcp_tool_completed` sent a
+     * second one for every call and carried nothing the canonical event lacks.
+     */
+    expect(events.filter((event) => event.event === "usl_mcp_tool_completed")).toHaveLength(0);
   });
 
   it("leaves the advertised tool interface unchanged", async () => {
@@ -470,5 +464,43 @@ describe("privacy-safe PostHog MCP analytics", () => {
     expect(serialized).not.toContain("res.partner");
     expect(serialized).not.toContain("secret-api-key");
     expect(serialized).not.toContain("Sensitive partner");
+  });
+
+  /**
+   * A scheduled refresh that worked is the expected case and told nobody anything. The stderr
+   * line still records it; only PostHog stops receiving it.
+   */
+  it("sends no event for a scheduled snapshot refresh that succeeded", () => {
+    const { posthog, events } = capturingPostHog();
+    const observability = createObservability(readyConfiguration(), { posthog });
+
+    observability.captureRuntimeEvent("agent.snapshot.refresh", {
+      principal_id: "a".repeat(64),
+      reason: "scheduled",
+      status: "ok",
+      cache_source: "live",
+      duration_ms: 12
+    });
+
+    expect(events).toHaveLength(0);
+  });
+
+  it("keeps a scheduled refresh that did not succeed", () => {
+    const { posthog, events } = capturingPostHog();
+    const observability = createObservability(readyConfiguration(), { posthog });
+
+    observability.captureRuntimeEvent("agent.snapshot.refresh", {
+      principal_id: "a".repeat(64),
+      reason: "scheduled",
+      status: "partial",
+      cache_source: "live",
+      duration_ms: 12
+    });
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      event: "usl_agent_snapshot_refresh",
+      properties: { usl_reason: "scheduled", usl_status: "partial" }
+    });
   });
 });

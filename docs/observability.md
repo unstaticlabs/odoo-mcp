@@ -87,8 +87,9 @@ After deployment, verify:
 
 1. `/readyz` reports `analytics: ready`.
 2. A test `tools/list` and harmless read produce `$mcp_tools_list`,
-   `$mcp_tool_call`, `usl_mcp_tool_completed`, and
-   `usl_odoo_call_completed` events.
+   `$mcp_tool_call`, and `usl_odoo_call_completed` events. There is no
+   `usl_mcp_tool_completed`: it duplicated `$mcp_tool_call` one for one, so it
+   was removed on 2026-09-20.
 3. Tool arguments/results and the three Odoo credential headers are absent
    from the captured event JSON.
 4. `usl_build_id`, `usl_deployment_id`, `usl_profile`, and the stable
@@ -106,8 +107,16 @@ content-free stderr events remain available.
 
 The official integration supplies MCP lifecycle events, including
 `$mcp_initialize`, `$mcp_tools_list`, and one `$mcp_tool_call` per completed
-call. The local completion hooks add exact serialized byte counts and Odoo
-attempt information without duplicating start events remotely.
+call. `$mcp_tool_call` is the only completion row: it already carries the tool
+name, the duration, the error state, the client and server metadata and the
+USL trace fields, and the capability properties ride on it through
+`eventProperties`. The local hooks add Odoo attempt information and serialized
+byte counts without duplicating start events remotely.
+
+A scheduled `agent.snapshot.refresh` that succeeded reaches the stderr log and
+stops there. Only a refresh that went stale, partial or wrong is exported: the
+successful scheduled case was 4,946 rows in 30 days and answered no question.
+Both rules live in `worthCapturing` in `src/runtime/observability.ts`.
 
 The built-in per-tool usage, client, latency, response-size, and failure views
 are the primary operational surface. Intent clustering, missing-capability,
