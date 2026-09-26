@@ -18,6 +18,7 @@ RUN install -d -m 0700 -o node -g node /data
 COPY --from=build --chown=node:node /app/package.json /app/package-lock.json ./
 COPY --from=build --chown=node:node /app/node_modules ./node_modules
 COPY --from=build --chown=node:node /app/dist ./dist
+COPY --chown=node:node assets ./assets
 USER node
 VOLUME ["/data"]
 EXPOSE 3000
