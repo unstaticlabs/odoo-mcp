@@ -77,6 +77,7 @@ describe("rebuilt accounting capabilities", () => {
         return Response.json([{ account_id: [42, "Bank"], debit: 100, credit: 25, balance: 75 }]);
       }
       if (url.endsWith("/json/2/account.move.line/search_read")) return Response.json([]);
+      if (url.endsWith("/json/2/account.move.line/search_count")) return Response.json(0);
       return Response.json({ message: "unexpected test request" }, { status: 500 });
     });
     const client = await connected(fetcher);
@@ -101,6 +102,69 @@ describe("rebuilt accounting capabilities", () => {
       aggregates: ["debit:sum", "credit:sum", "balance:sum"],
       limit: 50
     });
+  });
+
+  it("reports the full visible open-item population independently of its bounded sample", async () => {
+    const fetcher = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/account.account/search_read")) return Response.json([{ id: 42, code: "512000" }]);
+      if (url.endsWith("/account.move.line/formatted_read_group")) return Response.json([]);
+      if (url.endsWith("/account.move.line/search_count")) return Response.json(137);
+      if (url.endsWith("/account.move.line/search_read")) return Response.json([{ id: 91 }, { id: 90 }]);
+      return Response.json({ message: "unexpected test request" }, { status: 500 });
+    });
+    const client = await connected(fetcher);
+    const result = await client.callTool({ name: "accounting_review_key_accounts", arguments: {
+      company_id: 3, account_codes: ["512000", "512000", "999999"], date_to: "2026-08-30",
+      open_item_limit: 2, context: { allowed_company_ids: [3, 4] }
+    } });
+    expect(result.isError).not.toBe(true);
+    const domain = [["company_id", "=", 3], ["move_id.state", "=", "posted"], ["date", "<=", "2026-08-30"],
+      ["account_id", "in", [42]], ["reconciled", "=", false]];
+    expect(result.structuredContent).toMatchObject({ data: {
+      open_item_count: 137, open_item_domain: domain, open_items_returned: 2,
+      open_items_truncated: true, read_consistency: "separate_reads", missing_codes: ["999999"]
+    } });
+    for (const method of ["search_count", "search_read"]) {
+      const call = fetcher.mock.calls.find(([url]) => String(url).endsWith(`/account.move.line/${method}`));
+      expect(call).toBeDefined();
+      expect(JSON.parse(String(call?.[1]?.body))).toMatchObject({ domain,
+        context: { allowed_company_ids: [3], company_id: 3 } });
+    }
+    const sample = fetcher.mock.calls.find(([url]) => String(url).endsWith("/account.move.line/search_read"));
+    expect(JSON.parse(String(sample?.[1]?.body))).toMatchObject({ limit: 2, order: "date desc, id desc" });
+    const count = fetcher.mock.calls.find(([url]) => String(url).endsWith("/account.move.line/search_count"));
+    expect(JSON.parse(String(count?.[1]?.body))).not.toHaveProperty("limit");
+  });
+
+  it("returns an empty explicit population when no requested accounts are readable", async () => {
+    const fetcher = vi.fn<typeof fetch>(async () => Response.json([]));
+    const client = await connected(fetcher);
+    const result = await client.callTool({ name: "accounting_review_key_accounts", arguments: {
+      company_id: 4, account_codes: ["999999", "999999"], date_to: "2026-08-30", context: {}
+    } });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({ data: {
+      accounts: [], balances: [], open_items: [], missing_codes: ["999999"],
+      open_item_count: 0, open_items_returned: 0, open_items_truncated: false,
+      open_item_domain: [["company_id", "=", 4], ["move_id.state", "=", "posted"],
+        ["date", "<=", "2026-08-30"], ["account_id", "in", []], ["reconciled", "=", false]]
+    } });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not invent a total when the native count is unavailable", async () => {
+    const fetcher = vi.fn<typeof fetch>(async (input) => {
+      const url = String(input);
+      if (url.endsWith("/account.account/search_read")) return Response.json([{ id: 42, code: "512000" }]);
+      if (url.endsWith("/account.move.line/search_count")) return Response.json({ message: "Count unavailable" }, { status: 403 });
+      return Response.json([]);
+    });
+    const client = await connected(fetcher);
+    const result = await client.callTool({ name: "accounting_review_key_accounts", arguments: {
+      company_id: 3, account_codes: ["512000"], date_to: "2026-08-30", context: {}
+    } });
+    expect(result.isError).toBe(true);
   });
 
   it("keeps rebuilt report tools out of the generic default while making overview broad", () => {
