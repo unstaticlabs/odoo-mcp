@@ -448,6 +448,8 @@ export interface RichTextBody {
  *
  * Three ways to get this wrong, and none of them fails on its own:
  *
+ * - Chatter opts into recognized HTML detection when the flag is omitted.
+ *   Other write paths require an explicit markup declaration.
  * - HTML with the flag omitted is escaped, so the record shows `<p>` and
  *   `<strong>` as characters. That write is refused here rather than stored,
  *   because it succeeds silently and an Agent identity has no write access to
@@ -464,8 +466,12 @@ export function richTextHtml(options: {
   field: string;
   flagField: string;
   plaintext?: (value: string) => string;
+  autoDetectHtml?: boolean;
 }): RichTextBody {
-  const { value, isHtml, field, flagField } = options;
+  const { value, field, flagField } = options;
+  const isHtml = options.isHtml ?? (options.autoDetectHtml
+    ? Boolean(detectedMarkupTag(value) || detectedMarkupTag(unescapeHtml(value)))
+    : undefined);
   const warnings: string[] = [];
   const markdown = detectedMarkdown(value);
   if (markdown) {

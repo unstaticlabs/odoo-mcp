@@ -17,6 +17,7 @@ export const EXPENSE_CONTEXT_FIELDS = [
   "display_name", "state", "date", "employee_id", "product_id", "account_id", "analytic_distribution",
   "tax_ids", "payment_mode", "currency_id", "total_amount", "total_amount_currency", "company_id",
   "vendor_id", "existing_bill_id", "has_existing_bill", "account_move_id",
+  "split_expense_origin_id", "split_expense_count",
   "expense_batch_id", "batch_readiness", "batch_incomplete_reason", "batch_attachment_status",
   "account_context_source", "analytic_context_source", "batch_context_revision", "batch_context_status",
   "batch_warning_reason", "batch_attention_level", "batch_attention_message", "rebuild_receipt_state",
