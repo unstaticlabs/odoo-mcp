@@ -9,14 +9,22 @@ refer here instead of repeating them.
 
 | Measure | Value |
 | --- | ---: |
-| Tools on `/mcp` with every feature available | 31 |
-| Tools on `/mcp` without document materialization | 29 |
-| Estimated input/output schema tokens on `/mcp` | 17,884 |
-| Budget enforced by `/readyz` (`DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET`) | 18,432 |
+| Tools on `/mcp` with every feature available | 32 |
+| Tools on `/mcp` without document materialization | 30 |
+| Estimated input/output schema tokens on `/mcp` | 18,655 |
+| Budget enforced by `/readyz` (`DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET`) | 19,456 |
 
 Odoo module, method, and access availability can lower the counts further.
 Schema estimates are not measured model usage. Update this table, and only this
 table, when the surface changes.
+
+## Direct source evidence
+
+`documents_attach_source_evidence` accepts a connector-supplied `file` and an existing `hr.expense` or `account.move` target. The connector injects the file reference through `openai/fileParams`; binary content is transferred by the server, without model-call base64. The exact file is stored as native owned evidence, with optional explicit main-attachment selection. The result includes filename, MIME, byte size, SHA-256, native checksum, uploader/time, attachment ID, archive status and the target URL. An archive-pending result is not a completed external archive.
+
+Same-target uploads with the same filename, MIME and checksum reuse the attachment; another authorized target receives its own attachment row, with native physical binary deduplication. The action does not submit, approve, post, pay or reconcile. Expired download references require a refreshed file reference. Unknown mutation completion requires native attachment readback before retry. Source URLs and connector file IDs are neither returned nor stored in Odoo.
+
+See [source evidence handoff](source-evidence-handoff.md) for the supported file contract and configured local stdio roots.
 
 ## Discovery and read primitives
 

@@ -32,7 +32,7 @@ import { SERVER_VERSION } from "../version.js";
  * the catalogue onto the ORM substrate is expected to take this well below
  * 15,000 again.
  */
-export const DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET = 18_432;
+export const DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET = 19_456;
 
 export type CapabilityLayer = "generic" | "semantic" | "business_action";
 export type CapabilityEffect = "read" | "write" | "consequential" | "irreversible";
@@ -117,6 +117,7 @@ export interface CapabilitySpec<I extends ObjectSchema, O extends ObjectSchema>
   requiredAnyPublicMethods?: readonly string[];
   requiredModelAccess?: readonly ModelAccessRequirement[];
   requiredFeatures?: readonly string[];
+  fileParams?: readonly string[];
   input: I;
   output: O;
   handler(
@@ -188,6 +189,7 @@ export function defineCapability<I extends ObjectSchema, O extends ObjectSchema>
         "odoo/alwaysLoad": spec.alwaysLoad
       };
       if (options.deferLoading !== undefined) toolMeta.defer_loading = options.deferLoading;
+      if (spec.fileParams?.length) toolMeta["openai/fileParams"] = [...spec.fileParams];
       return server.registerTool(
         spec.name,
         {
