@@ -96,6 +96,7 @@ export function requestContext(accessMode: "read_only" | "read_write" | "mixed" 
         : new Set<string>()],
       ["hr.expense", writeAccess
         ? new Set([
+            "configure_draft_expense",
             "action_reset",
             "action_submit",
             "action_approve",

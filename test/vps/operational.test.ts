@@ -15,9 +15,9 @@ afterEach(async () => {
   await Promise.all(closeCallbacks.splice(0).map((close) => close()));
 });
 
-async function connected(fetcher: typeof fetch) {
+async function connected(fetcher: typeof fetch, availability = requestContext()) {
   const odoo = new OdooClient(8, 1024 * 1024, fetcher);
-  const server = createCapabilityRegistry(odoo).createServer({ ...requestContext(), profile: "all" });
+  const server = createCapabilityRegistry(odoo).createServer({ ...availability, profile: "all" });
   const client = new Client({ name: "operational-test", version: "1.0.0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await server.connect(serverTransport);
@@ -379,5 +379,73 @@ describe("fixed-intent operational capabilities", () => {
     const properties = Object.keys(tool?.inputSchema.properties ?? {})
       .filter((name) => name !== "expense_id" && name !== "context");
     expect(properties.sort()).toEqual([...EXPENSE_DRAFT_WRITABLE_FIELDS].sort());
+  });
+});
+
+describe("atomic draft expense correction", () => {
+  it("corrects a valid company and employee through one native transaction with readback", async () => {
+    const expense = { id: 91, display_name: "[QA] Corrected draft", state: "draft", company_id: [2, "[QA] Target"], employee_id: [12, "[QA] Employee"], tax_ids: [], analytic_distribution: {} };
+    const fetcher = vi.fn<typeof fetch>(async () => Response.json({ result: true, expense }));
+    const client = await connected(fetcher);
+    const result = await client.callTool({ name: "expenses_update_draft", arguments: {
+      expense_id: 91, company_id: 2, employee_id: 12, product_id: false, account_id: false,
+      tax_ids: [], analytic_distribution: {}, expense_batch_id: false, context: { allowed_company_ids: [1, 2] }
+    }});
+    expect(result.isError).not.toBe(true);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    const [url, init] = fetcher.mock.calls[0]!;
+    expect(String(url)).toMatch(/\/json\/2\/hr\.expense\/configure_draft_expense$/);
+    expect(JSON.parse(String(init?.body))).toMatchObject({ ids: [91], values: {
+      company_id: 2, employee_id: 12, product_id: false, account_id: false,
+      tax_ids: [], analytic_distribution: {}, expense_batch_id: false
+    }, context: { allowed_company_ids: [1, 2] } });
+    expect(result.structuredContent).toMatchObject({ data: { result: true, expense, outcome: "succeeded", record: { model: "hr.expense", id: 91 } } });
+  });
+
+  it("does not replay a correction when the connection loses the response", async () => {
+    const fetcher = vi.fn<typeof fetch>(async () => { throw new TypeError("Connection closed"); });
+    const client = await connected(fetcher);
+    const result = await client.callTool({ name: "expenses_update_draft", arguments: {
+      expense_id: 91, company_id: 2, employee_id: 12, context: { allowed_company_ids: [1, 2] }
+    }});
+    expect(result.isError).toBe(true);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(result)).toContain('unknown');
+  });
+
+  it("passes native validation denials through without another read or write", async () => {
+    const fetcher = vi.fn<typeof fetch>(async () => Response.json({
+      name: "odoo.exceptions.ValidationError", message: "Choose an employee belonging to the target company."
+    }, { status: 400 }));
+    const client = await connected(fetcher);
+    const result = await client.callTool({ name: "expenses_update_draft", arguments: {
+      expense_id: 91, company_id: 2, employee_id: 11
+    }});
+    expect(result.isError).toBe(true);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(result)).toContain("Choose an employee");
+  });
+
+  it("rejects forged identity values and financial state fields before transport", async () => {
+    const fetcher = vi.fn<typeof fetch>();
+    const client = await connected(fetcher);
+    for (const arguments_ of [
+      { expense_id: 91, company_id: true }, { expense_id: 91, employee_id: false },
+      { expense_id: 91, state: "approved" }, { expense_id: 91, currency_id: 2 }
+    ]) {
+      const result = await client.callTool({ name: "expenses_update_draft", arguments: arguments_ });
+      expect(result.isError).toBe(true);
+    }
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("only advertises the shortcut when the installed native transaction is available", async () => {
+    const availability = requestContext();
+    availability.availablePublicMethods = new Map(availability.availablePublicMethods);
+    (availability.availablePublicMethods as Map<string, ReadonlySet<string>>).set("hr.expense", new Set(["action_submit"]));
+    const client = await connected(vi.fn<typeof fetch>(), availability);
+    const { tools } = await client.listTools();
+    expect(tools.some((tool) => tool.name === "expenses_update_draft")).toBe(false);
+    expect(tools.some((tool) => tool.name === "odoo_update_records")).toBe(true);
   });
 });

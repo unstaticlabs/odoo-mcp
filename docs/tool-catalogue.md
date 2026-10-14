@@ -11,8 +11,8 @@ refer here instead of repeating them.
 | --- | ---: |
 | Tools on `/mcp` with every feature available | 29 |
 | Tools on `/mcp` without document materialization | 27 |
-| Estimated input/output schema tokens on `/mcp` | 15,530 |
-| Budget enforced by `/readyz` (`DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET`) | 16,000 |
+| Estimated input/output schema tokens on `/mcp` | 16,123 |
+| Budget enforced by `/readyz` (`DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET`) | 16,384 |
 
 Odoo module, method, and access availability can lower the counts further.
 Schema estimates are not measured model usage. Update this table, and only this
@@ -69,6 +69,18 @@ These workflows are complete on the default profile without a profile switch:
 | Prepare expenses | `expenses_get_context`, `expenses_update_draft` |
 | Prepare vendor bills/credit notes | `accounting_get_invoice_context`, `expenses_configure_draft_vendor_bill` |
 | Report a connector issue | `odoo_submit_feedback` |
+
+`expenses_update_draft` uses one native transaction and returns the final expense.
+For a draft company correction, supply a matching employee and select both
+authorized companies in `context.allowed_company_ids`. Replace incompatible
+category/account links or clear them with `false`; clear taxes with `[]` and
+analytics with `{}`. A batch or supplier bill/vendor from the previous company
+also needs an explicit compatible replacement or clear. Odoo preserves receipt
+identity and document currency, recalculates the target company amount, and
+records the company correction in Chatter. Submitted or accounted expenses are
+refused. Split ownership requires a coordinated family correction; this shortcut
+does not silently move sibling expenses. The generic ORM tools remain available
+under their normal native access rules.
 
 Activity rescheduling and editing use the generic update tool where Odoo
 permits it; completion uses the documented public method via `odoo_call_method`.

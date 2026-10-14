@@ -90,6 +90,12 @@ These change existing tool contracts. Clients must refresh tool schemas.
 
 ## Behavior changes
 
+- Draft expense preparation now corrects company and employee in one native
+  transaction, with explicit replacements or clears for incompatible financial
+  references and a final expense readback. The default surface keeps these
+  fields and all existing tools within the updated readiness budget documented
+  in [the tool catalogue](tool-catalogue.md#current-default-surface).
+
 - All input objects are strict and bounded; unknown fields are rejected.
 - Outputs use structured envelopes and canonical `{model,id,display_name,url}` references.
 - Cursor-oriented searches replace offset variants.
