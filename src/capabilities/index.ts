@@ -5,6 +5,7 @@ import { registerFeedbackCapability } from "./feedback.js";
 import { CapabilityRegistry } from "./registry.js";
 import { registerOperationalCapabilities } from "./operational.js";
 import { registerExpenseFamilyCapabilities } from "./expense_family.js";
+import { registerSourceEvidenceCapability } from "./source_evidence.js";
 import {
   registerBusinessActions,
   registerDocumentCapabilities,
@@ -33,6 +34,7 @@ export function createCapabilityRegistry(
   registerBusinessActions(registry, client);
   registerOperationalCapabilities(registry, client);
   registerExpenseFamilyCapabilities(registry, client);
+  registerSourceEvidenceCapability(registry, client);
   registerFeedbackCapability(registry, client, releaseIdentity);
   return registry;
 }
