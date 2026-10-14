@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { OdooClient } from "../odoo/client.js";
-import { attributedContext, OdooContextSchema, PositiveIdSchema } from "../odoo/schemas.js";
+import { attributedContext, DomainSchema, OdooContextSchema, PositiveIdSchema } from "../odoo/schemas.js";
 import type { RequestContext } from "../runtime/context.js";
 import { CapabilityRegistry, defineCapability } from "./registry.js";
 
@@ -84,7 +84,7 @@ export function registerAccountingCapabilities(registry: CapabilityRegistry, cli
     name: "accounting_review_key_accounts",
     title: "Review Key Accounts",
     description:
-      "Read balances and a bounded sample of unreconciled journal items for selected account codes in one company. Use for factual close review; the helper reports missing codes and raw balances without inventing tax or accounting conclusions.",
+      "Read balances, the full visible count and a bounded sample of posted unreconciled journal items through date_to for selected account codes in one company. Returns the native query domain and sample truncation. Count, balances and sample are separate reads, not an atomic snapshot. Reports missing codes without inventing accounting conclusions.",
     layer: "semantic",
     toolsets: ["accounting"],
     profiles: ["accounting"],
@@ -106,7 +106,12 @@ export function registerAccountingCapabilities(registry: CapabilityRegistry, cli
       open_item_limit: z.number().int().min(1).max(100).default(50),
       context: OdooContextSchema
     }).strict(),
-    output: z.object({ accounts: RecordsSchema, balances: RecordsSchema, open_items: RecordsSchema, missing_codes: z.array(z.string()) }).strict(),
+    output: z.object({
+      accounts: RecordsSchema, balances: RecordsSchema, open_items: RecordsSchema,
+      missing_codes: z.array(z.string()), open_item_count: z.number().int().nonnegative(),
+      open_item_domain: DomainSchema, open_items_returned: z.number().int().nonnegative(),
+      open_items_truncated: z.boolean(), read_consistency: z.literal("separate_reads")
+    }).strict(),
     async handler({ company_id, account_codes, date_to, open_item_limit, context: requestedContext }, context, signal) {
       const common = companyContext(requestedContext, company_id, context);
       const codes = [...new Set(account_codes)];
@@ -118,25 +123,42 @@ export function registerAccountingCapabilities(registry: CapabilityRegistry, cli
         context: common
       }, { signal });
       const accountIds = accounts.map((account) => account.id).filter((id): id is number => Number.isInteger(id));
-      if (accountIds.length === 0) return { data: { accounts: [], balances: [], open_items: [], missing_codes: codes } };
-      const [balances, openItems] = await Promise.all([
+      const balanceDomain: z.infer<typeof DomainSchema> = [
+        ["company_id", "=", company_id], ["move_id.state", "=", "posted"],
+        ["date", "<=", date_to], ["account_id", "in", accountIds]
+      ];
+      const openItemDomain: z.infer<typeof DomainSchema> = [...balanceDomain, ["reconciled", "=", false]];
+      if (accountIds.length === 0) return { data: {
+        accounts: [], balances: [], open_items: [], missing_codes: codes,
+        open_item_count: 0, open_item_domain: openItemDomain, open_items_returned: 0,
+        open_items_truncated: false, read_consistency: "separate_reads" as const
+      } };
+      const [balances, openItems, openItemCount] = await Promise.all([
         client.call<Record<string, unknown>[]>(context, "account.move.line", "formatted_read_group", {
-          domain: [["company_id", "=", company_id], ["move_id.state", "=", "posted"], ["date", "<=", date_to], ["account_id", "in", accountIds]],
+          domain: balanceDomain,
           groupby: ["account_id"],
           aggregates: ["debit:sum", "credit:sum", "balance:sum"],
           limit: 50,
           context: common
         }, { signal }),
         client.call<Record<string, unknown>[]>(context, "account.move.line", "search_read", {
-          domain: [["company_id", "=", company_id], ["move_id.state", "=", "posted"], ["date", "<=", date_to], ["account_id", "in", accountIds], ["reconciled", "=", false]],
+          domain: openItemDomain,
           fields: ["date", "move_id", "account_id", "partner_id", "name", "ref", "debit", "credit", "balance", "amount_residual", "currency_id", "amount_currency"],
           order: "date desc, id desc",
           limit: open_item_limit,
           context: common
+        }, { signal }),
+        client.call<number>(context, "account.move.line", "search_count", {
+          domain: openItemDomain, context: common
         }, { signal })
       ]);
       const found = new Set(accounts.map((account) => String(account.code ?? "")));
-      return { data: { accounts, balances, open_items: openItems, missing_codes: codes.filter((code) => !found.has(code)) } };
+      return { data: {
+        accounts, balances, open_items: openItems, missing_codes: codes.filter((code) => !found.has(code)),
+        open_item_count: openItemCount, open_item_domain: openItemDomain,
+        open_items_returned: openItems.length, open_items_truncated: openItemCount > openItems.length,
+        read_consistency: "separate_reads" as const
+      } };
     }
   }));
 
