@@ -118,6 +118,12 @@ These change existing tool contracts. Clients must refresh tool schemas.
 
 Do not use a narrower profile as a permission boundary. Preserve the intended Odoo identity and company access independently.
 
+Draft split creation and explicit all-member ownership correction require the
+corresponding native Expense Batch version 15 actions. The shortcuts remain
+hidden until those methods are available; generic access rules remain unchanged.
+See the [tool catalogue](tool-catalogue.md) for mappings, result links, unknown
+completion recovery and the measured default schema budget.
+
 ## Rollback
 
 Keep the last pre-migration service/image available until direct, stdio, and hosted connections are qualified. Runtime rollback is a reverse-proxy/image change. Restore the pre-migration SQLite backup only when rolling back an OAuth schema change, and use its matching secrets.

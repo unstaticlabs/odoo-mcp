@@ -32,7 +32,7 @@ import { SERVER_VERSION } from "../version.js";
  * the catalogue onto the ORM substrate is expected to take this well below
  * 15,000 again.
  */
-export const DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET = 16_384;
+export const DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET = 18_432;
 
 export type CapabilityLayer = "generic" | "semantic" | "business_action";
 export type CapabilityEffect = "read" | "write" | "consequential" | "irreversible";

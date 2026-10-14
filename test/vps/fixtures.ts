@@ -97,6 +97,8 @@ export function requestContext(accessMode: "read_only" | "read_write" | "mixed" 
       ["hr.expense", writeAccess
         ? new Set([
             "configure_draft_expense",
+            "split_draft_expense",
+            "configure_draft_expense_family",
             "action_reset",
             "action_submit",
             "action_approve",

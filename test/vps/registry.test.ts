@@ -44,7 +44,7 @@ describe("canonical capability registry", () => {
     expect(names).not.toContain("odoo_delete_records");
     expect(names).not.toContain("odoo_search_capabilities");
     expect(names).not.toContain("odoo_expand_record");
-    expect(registry.profileBudget("default")).toMatchObject({ tools: 29 });
+    expect(registry.profileBudget("default")).toMatchObject({ tools: 31 });
     expect(registry.profileBudget("default").schemaTokens)
       .toBeLessThanOrEqual(DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET);
   });
@@ -65,7 +65,7 @@ describe("canonical capability registry", () => {
     const registry = createCapabilityRegistry(new OdooClient());
     const added = ["documents_search", "documents_get_content", "documents_create_download_url",
       "documents_revoke_download_url", "projects_create_task", "expenses_get_context",
-      "expenses_update_draft", "expenses_configure_draft_vendor_bill"];
+      "expenses_update_draft", "expenses_configure_draft_vendor_bill", "expenses_split_draft", "expenses_correct_draft_family"];
     expect(await listedToolNames(registry)).toEqual(expect.arrayContaining(added));
     const readOnly = await listedToolNames(registry, { ...requestContext(), profile: "read-only" });
     expect(readOnly).toEqual(expect.arrayContaining(["documents_search", "documents_get_content", "expenses_get_context"]));
@@ -81,7 +81,7 @@ describe("canonical capability registry", () => {
     restricted.availableModelAccess!.set("hr.expense", { read: true, create: false, write: false, unlink: false });
     restricted.availableModelAccess!.set("account.move", { read: true, create: false, write: false, unlink: false });
     const names = await listedToolNames(registry, restricted);
-    for (const name of ["projects_create_task", "expenses_update_draft", "expenses_configure_draft_vendor_bill"]) {
+    for (const name of ["projects_create_task", "expenses_update_draft", "expenses_configure_draft_vendor_bill", "expenses_split_draft", "expenses_correct_draft_family"]) {
       expect(names).not.toContain(name);
     }
   });
