@@ -11,8 +11,8 @@ refer here instead of repeating them.
 | --- | ---: |
 | Tools on `/mcp` with every feature available | 32 |
 | Tools on `/mcp` without document materialization | 30 |
-| Estimated input/output schema tokens on `/mcp` | Recalculate with `npm run eval:surfaces` (new note tool) |
-| Budget enforced by `/readyz` (`DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET`) | 19,456 |
+| Estimated input/output schema tokens on `/mcp` | 18,222 |
+| Budget enforced by `/readyz` (`DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET`) | 18,432 |
 
 Odoo module, method, and access availability can lower the counts further.
 Schema estimates are not measured model usage. Update this table, and only this
@@ -22,7 +22,7 @@ table, when the surface changes.
 
 Each public tool explicitly advertises `readOnlyHint`, `destructiveHint`, and `openWorldHint`. Bounded Odoo reads and specialized draft/preparatory actions stay in the authenticated private workspace and have `openWorldHint=false`. Generic arbitrary-model writes and public-method dispatch remain conservatively classified because Odoo business hooks may overwrite data or contact third parties.
 
-`odoo_add_internal_note` appends an internal-subtype note with zero direct recipients and `notify_skip_followers=true`, supported by Odoo 19's `mail.thread.message_post`, without sending notifications. It is not idempotent. `odoo_post_message` still supports potentially notifying comments and retains consequential hints. Unattended internal documentation should prefer the note-only tool.
+`odoo_add_internal_note` appends an internal-subtype note with zero direct recipients and `notify_skip_followers=true`. This skips native Chatter follower and direct-recipient notifications; ordinary model hooks still run. It is not idempotent. `odoo_post_message` remains available for notifying comments and other Chatter workflows.
 
 Annotations describe behavior, not a bypass for host safety checks or server authorization. Inspect emitted `tools/list` and compare real scheduled-run results before claiming any safety regression fixed.
 

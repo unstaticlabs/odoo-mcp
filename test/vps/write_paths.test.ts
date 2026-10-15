@@ -248,7 +248,10 @@ describe("the rich-text escaping contract", () => {
     const client = await connected(fetcher);
     const result = await client.callTool({
       name: "odoo_add_internal_note",
-      arguments: { model: "project.task", id: 492, body: RAW_HTML, body_is_html: true }
+      arguments: {
+        model: "project.task", id: 492, body: RAW_HTML, body_is_html: true,
+        context: { allowed_company_ids: [2, 3], lang: "fr_FR" }
+      }
     });
     expect(result.isError).not.toBe(true);
     expect(jsonCalls(fetcher)).toHaveLength(1);
@@ -260,6 +263,7 @@ describe("the rich-text escaping contract", () => {
       partner_ids: [],
       notify_skip_followers: true,
       context: {
+        allowed_company_ids: [2, 3], lang: "fr_FR",
         mail_post_autofollow: false,
         mail_post_autofollow_author_skip: true,
         usl_agent_origin: "odoo-mcp",

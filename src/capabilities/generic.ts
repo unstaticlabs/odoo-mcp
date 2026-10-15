@@ -1078,7 +1078,7 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
     name: "odoo_post_message",
     title: "Post Odoo Message",
     description:
-      "Post one Chatter note or comment. Comments may notify followers or external recipients; use odoo_add_internal_note for a private no-notification note. Recognized HTML is formatted automatically; plain text is escaped.",
+      "Post one Chatter note or comment. Comments may notify followers or external recipients; odoo_add_internal_note skips native follower notifications. Recognized HTML is formatted automatically; plain text is escaped.",
     layer: "generic",
     toolsets: ["core", "activities"],
     profiles: [],
@@ -1136,9 +1136,9 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
   registry.add(defineCapability({
     id: "core.messages.internal_note",
     name: "odoo_add_internal_note",
-    title: "Append Private Odoo Internal Note",
+    title: "Append Odoo Internal Note",
     description:
-      "Append an internal Chatter note to one existing record without notifying followers or addressing external recipients. The server fixes mail.mt_note, clears direct recipients and skips follower notifications. This is additive but not idempotent: inspect recent Chatter before retrying.",
+      "Append an internal Chatter note, skipping native follower and direct-recipient notifications. Uses mail.mt_note; model hooks still run. Inspect recent Chatter before retrying: repeating an append duplicates it.",
     layer: "business_action",
     toolsets: ["core", "activities"],
     profiles: [],
@@ -1159,10 +1159,11 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
       model: ModelNameSchema,
       id: PositiveIdSchema,
       body: z.string().min(1).max(50_000).describe("Internal note text or HTML; use body_is_html to specify raw HTML."),
-      body_is_html: z.boolean().optional().describe("true: render supplied HTML; false: escape literal text; omit to detect recognized HTML.")
+      body_is_html: z.boolean().optional().describe("true: render supplied HTML; false: escape literal text; omit to detect recognized HTML."),
+      context: OdooContextSchema
     }).strict(),
     output: z.object({ result: z.unknown(), execution: ExecutionSchema }).strict(),
-    async handler({ model, id, body, body_is_html }, context, signal) {
+    async handler({ model, id, body, body_is_html, context: requestedContext }, context, signal) {
       const message = richTextHtml({
         value: body, isHtml: body_is_html, field: "body",
         flagField: "body_is_html", plaintext: plaintextToParagraphHtml,
@@ -1176,6 +1177,7 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
         partner_ids: [],
         notify_skip_followers: true,
         context: attributedContext({
+          ...requestedContext,
           mail_post_autofollow: false,
           mail_post_autofollow_author_skip: true
         }, context.correlationId)
