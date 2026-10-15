@@ -32,7 +32,7 @@ import { SERVER_VERSION } from "../version.js";
  * the catalogue onto the ORM substrate is expected to take this well below
  * 15,000 again.
  */
-export const DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET = 18_432;
+export const DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET = 19_456;
 
 export type CapabilityLayer = "generic" | "semantic" | "business_action";
 export type CapabilityEffect = "read" | "write" | "consequential" | "irreversible";
@@ -342,6 +342,11 @@ export class CapabilityRegistry {
     if (this.values.has(metadata.name)) throw new Error(`Duplicate capability name: ${metadata.name}`);
     if ([...this.values.values()].some((item) => item.metadata.id === metadata.id)) {
       throw new Error(`Duplicate capability id: ${metadata.id}`);
+    }
+    for (const hint of ["readOnlyHint", "destructiveHint", "openWorldHint"] as const) {
+      if (typeof metadata.annotations[hint] !== "boolean") {
+        throw new Error(`Capability ${metadata.name} must explicitly set ${hint}`);
+      }
     }
     if (metadata.effect === "read" && metadata.annotations.readOnlyHint !== true) {
       throw new Error(`Read capability ${metadata.name} must set readOnlyHint`);

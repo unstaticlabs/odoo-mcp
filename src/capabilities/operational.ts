@@ -20,13 +20,13 @@ const actionAnnotations = {
   readOnlyHint: false,
   destructiveHint: false,
   idempotentHint: false,
-  openWorldHint: true
+  openWorldHint: false
 } as const;
 const readAnnotations = {
   readOnlyHint: true,
   destructiveHint: false,
   idempotentHint: true,
-  openWorldHint: true
+  openWorldHint: false
 } as const;
 
 const ActionOutputSchema = z.object({

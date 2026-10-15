@@ -9,14 +9,22 @@ refer here instead of repeating them.
 
 | Measure | Value |
 | --- | ---: |
-| Tools on `/mcp` with every feature available | 31 |
-| Tools on `/mcp` without document materialization | 29 |
-| Estimated input/output schema tokens on `/mcp` | 17,884 |
-| Budget enforced by `/readyz` (`DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET`) | 18,432 |
+| Tools on `/mcp` with every feature available | 32 |
+| Tools on `/mcp` without document materialization | 30 |
+| Estimated input/output schema tokens on `/mcp` | Recalculate with `npm run eval:surfaces` (new note tool) |
+| Budget enforced by `/readyz` (`DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET`) | 19,456 |
 
 Odoo module, method, and access availability can lower the counts further.
 Schema estimates are not measured model usage. Update this table, and only this
 table, when the surface changes.
+
+## MCP risk annotations
+
+Each public tool explicitly advertises `readOnlyHint`, `destructiveHint`, and `openWorldHint`. Bounded Odoo reads and specialized draft/preparatory actions stay in the authenticated private workspace and have `openWorldHint=false`. Generic arbitrary-model writes and public-method dispatch remain conservatively classified because Odoo business hooks may overwrite data or contact third parties.
+
+`odoo_add_internal_note` appends an internal-subtype note with zero direct recipients and `notify_skip_followers=true`, supported by Odoo 19's `mail.thread.message_post`, without sending notifications. It is not idempotent. `odoo_post_message` still supports potentially notifying comments and retains consequential hints. Unattended internal documentation should prefer the note-only tool.
+
+Annotations describe behavior, not a bypass for host safety checks or server authorization. Inspect emitted `tools/list` and compare real scheduled-run results before claiming any safety regression fixed.
 
 ## Discovery and read primitives
 
@@ -65,7 +73,7 @@ These workflows are complete on the default profile without a profile switch:
 | Find and read documents | `documents_search`, `documents_get_context`, `documents_get_content` |
 | Obtain original bytes and clean up | `documents_create_download_url`, `documents_revoke_download_url` |
 | Create and maintain tasks | `projects_create_task`, `projects_get_task_context`, `odoo_update_records` |
-| Chatter and follow-ups | `odoo_post_message`, `activities_list_for_record`, `activities_schedule` |
+| Chatter and follow-ups | `odoo_add_internal_note` (no notifications), `odoo_post_message` (may notify), `activities_list_for_record`, `activities_schedule` |
 | Prepare expenses | `expenses_get_context`, `expenses_update_draft` |
 | Split a draft or correct all linked parts | `expenses_split_draft`, `expenses_correct_draft_family` |
 | Prepare vendor bills/credit notes | `accounting_get_invoice_context`, `expenses_configure_draft_vendor_bill` |

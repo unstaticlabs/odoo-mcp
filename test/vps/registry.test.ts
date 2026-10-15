@@ -39,14 +39,54 @@ describe("canonical capability registry", () => {
     expect(names).toContain("odoo_search_records");
     expect(names).toContain("odoo_create_records");
     expect(names).toContain("odoo_call_method");
+    expect(names).toContain("odoo_add_internal_note");
     expect(names).toContain("odoo_submit_feedback");
     expect(names).toContain("activities_schedule");
     expect(names).not.toContain("odoo_delete_records");
     expect(names).not.toContain("odoo_search_capabilities");
     expect(names).not.toContain("odoo_expand_record");
-    expect(registry.profileBudget("default")).toMatchObject({ tools: 31 });
+    expect(registry.profileBudget("default")).toMatchObject({ tools: 32 });
     expect(registry.profileBudget("default").schemaTokens)
       .toBeLessThanOrEqual(DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET);
+  });
+
+
+  it("advertises accurate risk hints and distinguishes non-notifying notes", async () => {
+    const registry = createCapabilityRegistry(new OdooClient());
+    const metadata = new Map(registry.list("all").map((item) => [item.name, item]));
+    const note = metadata.get("odoo_add_internal_note");
+    expect(note?.annotations).toMatchObject({
+      readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false
+    });
+    for (const name of ["odoo_search_records", "documents_search", "expenses_get_context",
+      "expenses_update_draft", "expenses_configure_draft_vendor_bill", "projects_create_task"]) {
+      expect(metadata.get(name)?.annotations.openWorldHint, name).toBe(false);
+    }
+    for (const name of ["odoo_create_records", "odoo_update_records",
+      "odoo_archive_records", "odoo_post_message", "odoo_call_method"]) {
+      expect(metadata.get(name)?.annotations.destructiveHint, name).toBe(true);
+      expect(metadata.get(name)?.annotations.openWorldHint, name).toBe(true);
+    }
+    expect(metadata.get("documents_create_download_url")?.annotations.openWorldHint).toBe(true);
+    expect(metadata.get("documents_revoke_download_url")?.annotations.destructiveHint).toBe(true);
+    for (const item of metadata.values()) {
+      for (const hint of ["readOnlyHint", "destructiveHint", "openWorldHint"] as const) {
+        expect(typeof item.annotations[hint], `${item.name}.${hint}`).toBe("boolean");
+      }
+    }
+    const client = new Client({ name: "risk-hints-test", version: "1.0.0" });
+    const server = registry.createServer(requestContext());
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    connections.push(async () => { await client.close(); await server.close(); });
+    const advertised = (await client.listTools()).tools;
+    expect(advertised.find((item) => item.name === "odoo_add_internal_note")?.annotations)
+      .toMatchObject(note!.annotations);
+    expect(advertised.find((item) => item.name === "odoo_post_message")?.annotations.destructiveHint)
+      .toBe(true);
+    expect((await listedToolNames(registry, { ...requestContext(), profile: "read-only" })))
+      .not.toContain("odoo_add_internal_note");
   });
 
   it("exposes the public method substrate through writable profiles but not read-only", () => {

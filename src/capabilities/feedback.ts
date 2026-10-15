@@ -67,7 +67,7 @@ export function registerFeedbackCapability(
       readOnlyHint: false,
       destructiveHint: false,
       idempotentHint: false,
-      openWorldHint: true
+      openWorldHint: false
     },
     keywords: ["feedback", "bug", "issue", "feature request", "documentation", "usability", "report MCP problem"],
     requiredModules: ["usl_access_control", "project"],
