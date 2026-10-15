@@ -6,6 +6,7 @@ This repository is the canonical MCP for the self-hosted USL Odoo Distribution. 
 
 - Register every tool through `src/capabilities/registry.ts`; do not create separately implemented domain MCP servers.
 - Keep the generic substrate capable of cross-domain and long-tail work. Semantic tools are shortcuts, not walls.
+- Give Agents precise context for informed decisions while preserving their delegated human capabilities. Do not add Agent-only business restrictions or MCP policy gates; native Odoo permissions and workflows remain authoritative.
 - Treat profiles and `defer_loading` metadata as visibility controls only. Odoo credentials, ACLs, record rules, field access, company context, public-method dispatch, and workflow validation are the authority.
 - Keep transport details behind `src/odoo/client.ts`. MCP contracts must not mirror incidental HTTP routes.
 - One MCP business action must map to one Odoo-side transaction. Do not simulate atomicity by chaining mutations.

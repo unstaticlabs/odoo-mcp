@@ -52,14 +52,14 @@ const readAnnotations = {
   readOnlyHint: true,
   destructiveHint: false,
   idempotentHint: true,
-  openWorldHint: true
+  openWorldHint: false
 } as const;
 
 const actionAnnotations = {
   readOnlyHint: false,
   destructiveHint: false,
   idempotentHint: false,
-  openWorldHint: true
+  openWorldHint: false
 } as const;
 
 function rpcContext(requested: Record<string, unknown>, context: RequestContext) {
@@ -744,7 +744,7 @@ export function registerBusinessActions(registry: CapabilityRegistry, client: Od
     toolsets: ["documents"],
     profiles: ["documents"],
     effect: "consequential",
-    annotations: actionAnnotations,
+    annotations: { ...actionAnnotations, openWorldHint: true },
     keywords: ["download", "materialize", "PDF", "image", "binary", "short-lived URL"],
     requiredModules: ["usl_documents"],
     requiredPublicMethods: [{ model: "usl.document", method: "mcp_create_download_grant" }],
@@ -819,9 +819,9 @@ export function registerBusinessActions(registry: CapabilityRegistry, client: Od
     effect: "write",
     annotations: {
       readOnlyHint: false,
-      destructiveHint: false,
+      destructiveHint: true,
       idempotentHint: true,
-      openWorldHint: true
+      openWorldHint: false
     },
     keywords: ["revoke", "download URL", "grant", "materialization"],
     requiredModules: ["usl_documents"],
@@ -880,7 +880,7 @@ export function registerBusinessActions(registry: CapabilityRegistry, client: Od
     toolsets: ["documents"],
     profiles: ["documents"],
     effect: "write",
-    annotations: actionAnnotations,
+    annotations: { ...actionAnnotations, destructiveHint: true },
     keywords: ["unlink document", "remove relationship", "archive"],
     requiredModules: ["usl_documents"],
     requiredPublicMethods: [{ model: "usl.document", method: "unlink_from_record" }],

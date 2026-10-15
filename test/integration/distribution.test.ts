@@ -118,4 +118,60 @@ describe.skipIf(!live).sequential("live USL Odoo Distribution", () => {
     expect(JSON.stringify(read.structuredContent)).not.toContain("&lt;strong&gt;");
   }, 60_000);
 
+  it.skipIf(process.env.ODOO_INTEGRATION_MUTATION_QA !== "1" || !process.env.ODOO_INTEGRATION_NOTE_TASK_ID)(
+    "appends internal notes without native notifications while ordinary comments still notify",
+    async () => {
+      // This dedicated disposable task must have real subscribed followers.
+      // The notifying control proves empty notification lists are meaningful.
+      const taskId = Number(process.env.ODOO_INTEGRATION_NOTE_TASK_ID);
+      const client = await connected("default");
+      async function message(marker: string) {
+        const result = await client.callTool({
+          name: "odoo_search_records",
+          arguments: {
+            model: "mail.message",
+            domain: [["model", "=", "project.task"], ["res_id", "=", taskId], ["body", "ilike", marker]],
+            fields: ["body", "notification_ids", "partner_ids", "subtype_id"], limit: 1, order: "id desc"
+          }
+        });
+        expect(result.isError).not.toBe(true);
+        const records = (result.structuredContent as { data: { records: Record<string, unknown>[] } }).data.records;
+        expect(records).toHaveLength(1);
+        return records[0]!;
+      }
+      const controlMarker = `[QA] Notifying control ${crypto.randomUUID()}`;
+      const control = await client.callTool({
+        name: "odoo_post_message",
+        arguments: {
+          model: "project.task", id: taskId, body: controlMarker, subtype: "mail.mt_comment",
+          context: { mail_notify_force_send: false }
+        }
+      });
+      expect(control.isError).not.toBe(true);
+      expect((await message(controlMarker)).notification_ids).not.toHaveLength(0);
+
+      for (const html of [false, true]) {
+        const marker = `[QA] Internal note ${crypto.randomUUID()}`;
+        const posted = await client.callTool({
+          name: "odoo_add_internal_note",
+          arguments: {
+            model: "project.task", id: taskId,
+            body: html ? `<p><strong>${marker}</strong></p>` : `${marker} <literal>`, body_is_html: html
+          }
+        });
+        expect(posted.isError).not.toBe(true);
+        const saved = await message(marker);
+        expect(saved.notification_ids).toEqual([]);
+        expect(saved.partner_ids).toEqual([]);
+        expect(saved.body).toContain(html ? `<strong>${marker}</strong>` : "&lt;literal&gt;");
+        const subtype = await client.callTool({
+          name: "odoo_read_records",
+          arguments: { model: "mail.message.subtype", ids: [(saved.subtype_id as [number, string])[0]], fields: ["internal"] }
+        });
+        expect(subtype.isError).not.toBe(true);
+        expect(subtype.structuredContent).toMatchObject({ data: { records: [{ internal: true }] } });
+      }
+    }, 60_000
+  );
+
 });

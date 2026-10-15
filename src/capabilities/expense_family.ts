@@ -46,7 +46,7 @@ function output(reply: NativeReply, context: RequestContext, sourceId: number) {
 const metadata = {
   layer: "business_action" as const, toolsets: ["expenses", "accounting"], profiles: ["accounting"] as const,
   effect: "write" as const,
-  annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+  annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   requiredModules: ["hr_expense", "usl_expense_batch"],
   requiredModelAccess: [{ model: "hr.expense", operation: "write" as const }],
   defaultVisible: true, alwaysLoad: false
