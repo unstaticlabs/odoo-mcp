@@ -310,7 +310,11 @@ describe("the rich-text escaping contract", () => {
       expect(property(tool, field), `${tool}.${field}`).toContain(flag);
       expect(property(tool, flag), `${tool}.${flag}`).toContain("false: the server escapes");
       expect(property(tool, flag), `${tool}.${flag}`).toContain("raw HTML");
-      expect(property(tool, flag), `${tool}.${flag}`).toContain("refused rather than escaped");
+      if (tool !== "odoo_post_message") {
+        expect(property(tool, flag), `${tool}.${flag}`).toContain("refused rather than escaped");
+      } else {
+        expect(property(tool, flag), `${tool}.${flag}`).toContain("detect recognized HTML");
+      }
       expect(property(tool, flag), `${tool}.${flag}`).toContain("Markdown is never rendered");
     }
     expect(property("odoo_update_records", "values")).toContain("exactly as given");
@@ -336,7 +340,6 @@ describe("the rich-text escaping contract", () => {
 
   it("refuses undeclared markup on every rich-text write path without calling Odoo", async () => {
     for (const [name, args] of [
-      ["odoo_post_message", { model: "project.task", id: 2543, body: RAW_HTML }],
       ["projects_create_task", { name: "Add haptics", project_id: 15, description: RAW_HTML }],
       ["activities_schedule", {
         model: "project.task", id: 492, activity_type_id: 4, user_id: 9,
@@ -360,6 +363,24 @@ describe("the rich-text escaping contract", () => {
         known: { request_sent: "no", response_received: "no", result_received: "no" }
       });
       expect(String(error.message), name).toContain("<p>");
+    }
+  });
+
+  it("formats recognized chatter HTML automatically in one mutation", async () => {
+    const fetcher = vi.fn<typeof fetch>(async () => Response.json({ id: 79 }));
+    const client = await connected(fetcher);
+    for (const body of [RAW_HTML, "<ul><li>Follow up</li></ul>", "&lt;p&gt;Follow up&lt;/p&gt;"]) {
+      fetcher.mockClear();
+      const result = await client.callTool({
+        name: "odoo_post_message",
+        arguments: { model: "project.task", id: 492, body }
+      });
+      expect(result.isError).not.toBe(true);
+      expect(jsonCalls(fetcher)).toHaveLength(1);
+      expect(requestBody(fetcher, "project.task/message_post")).toMatchObject({
+        body: body === "&lt;p&gt;Follow up&lt;/p&gt;" ? "<p>Follow up</p>" : body,
+        body_is_html: true
+      });
     }
   });
 

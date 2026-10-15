@@ -94,4 +94,28 @@ describe.skipIf(!live).sequential("live USL Odoo Distribution", () => {
       }
     });
   }, 60_000);
+
+  it.skipIf(!process.env.ODOO_INTEGRATION_CHATTER_TASK_ID)("formats undeclared HTML through the live Agent chatter workflow", async () => {
+    const taskId = Number(process.env.ODOO_INTEGRATION_CHATTER_TASK_ID);
+    const client = await connected("default");
+    const posted = await client.callTool({
+      name: "odoo_post_message",
+      arguments: {
+        model: "project.task", id: taskId,
+        body: "<p><strong>[QA] Review ready</strong></p><ul><li>Deadline corrected in place</li><li>History retained</li></ul>"
+      }
+    });
+    expect(posted.isError).not.toBe(true);
+    const read = await client.callTool({
+      name: "odoo_search_records",
+      arguments: {
+        model: "mail.message", domain: [["model", "=", "project.task"], ["res_id", "=", taskId]],
+        fields: ["body"], limit: 1, order: "id desc"
+      }
+    });
+    expect(read.isError).not.toBe(true);
+    expect(JSON.stringify(read.structuredContent)).toContain("<strong>[QA] Review ready</strong>");
+    expect(JSON.stringify(read.structuredContent)).not.toContain("&lt;strong&gt;");
+  }, 60_000);
+
 });

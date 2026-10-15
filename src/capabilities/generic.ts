@@ -13,8 +13,6 @@ import {
   encodePageCursor,
   FieldNameSchema,
   FieldsSchema,
-  htmlBodyContract,
-  HTML_FLAG_CONTRACT,
   keysetDirection,
   ModelNameSchema,
   MethodNameSchema,
@@ -1080,7 +1078,7 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
     name: "odoo_post_message",
     title: "Post Odoo Message",
     description:
-      "Post one note or message to one chatter-enabled record. Use a separate call for each record so failures and side effects remain clear. Plain text is escaped before being sent as HTML.",
+      "Post one note or message to one chatter-enabled record. Use a separate call for each record so failures and side effects remain clear. Recognized HTML is formatted automatically; plain text is escaped. Set body_is_html false to show literal tags.",
     layer: "generic",
     toolsets: ["core", "activities"],
     profiles: [],
@@ -1095,9 +1093,9 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
     input: z.object({
       model: ModelNameSchema,
       id: PositiveIdSchema,
-      body: z.string().min(1).max(50_000).describe(htmlBodyContract("body_is_html")),
+      body: z.string().min(1).max(50_000).describe("Chatter text or HTML. Recognized HTML is formatted automatically unless body_is_html is false."),
       subtype: z.enum(["mail.mt_note", "mail.mt_comment"]).default("mail.mt_note"),
-      body_is_html: z.boolean().optional().describe(HTML_FLAG_CONTRACT),
+      body_is_html: z.boolean().optional().describe("false: the server escapes literal text; true: send raw HTML. Omitted: detect recognized HTML formatting, otherwise escape plain text. Markdown is never rendered."),
       context: OdooContextSchema
     }).strict(),
     output: z.object({ result: z.unknown(), execution: ExecutionSchema }).strict(),
@@ -1107,7 +1105,8 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
         isHtml: body_is_html,
         field: "body",
         flagField: "body_is_html",
-        plaintext: plaintextToParagraphHtml
+        plaintext: plaintextToParagraphHtml,
+        autoDetectHtml: true
       });
       const receipt = await client.call<unknown>(context, model, "message_post", {
         ids: [id],
