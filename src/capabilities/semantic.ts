@@ -273,7 +273,7 @@ export function registerSemanticCapabilities(registry: CapabilityRegistry, clien
           fields: [
             "display_name", "project_id", "stage_id", "state", "user_ids", "partner_id", "date_deadline",
             "description", "tag_ids", "parent_id", "child_ids", "company_id", "priority", "create_date", "write_date",
-            "allow_task_dependencies", "depend_on_ids"
+            "allow_task_dependencies", "depend_on_ids", "depend_on_count", "closed_depend_on_count"
           ],
           context: common
         }, { signal }),
@@ -292,15 +292,25 @@ export function registerSemanticCapabilities(registry: CapabilityRegistry, clien
         context: { ...common, active_test: false }
       }, { signal }) : [];
       const enabled = task.allow_task_dependencies === true;
-      const complete = dependencies.length === dependencyIds.length;
+      // Native relational reads can omit unreadable task IDs before we see
+      // them. The same sudo-computed aggregate used by Odoo's task UI keeps
+      // absence of visible relations from masquerading as absence of blockers.
+      const totalCount = typeof task.depend_on_count === "number" ? task.depend_on_count : null;
+      const closedCount = typeof task.closed_depend_on_count === "number" ? task.closed_depend_on_count : null;
+      const complete = totalCount !== null && dependencies.length === totalCount;
       const openBlockers = enabled ? dependencies.filter((dependency) => !["1_done", "1_canceled"].includes(String(dependency.state)))
         .map((dependency) => ({ ...dependency, _ref: ref(context, "project.task", Number(dependency.id), dependency.display_name) })) : [];
       const waitingReason = task.state !== "04_waiting_normal" ? "not_waiting"
         : !enabled ? "dependencies_disabled" : openBlockers.length ? "open_dependencies"
           : !complete ? "unavailable_dependencies" : "manual_or_stale";
+      const taskView = { ...task };
+      // Do not return opaque relation IDs whose records the second read could
+      // not access; links below identify only readable open blockers.
+      delete taskView.depend_on_ids;
       return {
-        data: { context: { task: { ...task, _ref: ref(context, "project.task", task_id, task.display_name) },
-          dependencies: { enabled, complete, waiting_reason: waitingReason, open_blockers: openBlockers },
+        data: { context: { task: { ...taskView, _ref: ref(context, "project.task", task_id, task.display_name) },
+          dependencies: { enabled, complete, total_count: totalCount, closed_count: closedCount,
+            waiting_reason: waitingReason, open_blockers: openBlockers },
           activities, messages, document_links: documentLinks.records } },
         ...(documentLinks.warning ? { warnings: [documentLinks.warning] } : {})
       };

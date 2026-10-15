@@ -5,6 +5,7 @@ import { OdooClient } from "../../src/odoo/client.js";
 import { requestContext } from "./fixtures.js";
 
 async function taskContext(task: Record<string, unknown>, dependencies: unknown[]) {
+  task = { depend_on_count: Array.isArray(task.depend_on_ids) ? task.depend_on_ids.length : 0, closed_depend_on_count: 0, ...task };
   const fetcher = vi.fn<typeof fetch>(async (input, init) => {
     const url = String(input);
     const body = JSON.parse(String(init?.body));
@@ -73,7 +74,8 @@ describe("task blocker explanations", () => {
       { id: 7, display_name: "[QA] Readable blocker", state: "02_changes_requested" },
     ]);
     expect(result.data.context.dependencies).toMatchObject({ complete: false, waiting_reason: "open_dependencies", open_blockers: [{ id: 7 }] });
-    expect(JSON.stringify(result.data.context.dependencies)).not.toContain('"id":8');
+    expect(JSON.stringify(result)).not.toContain('"id":8');
+    expect(JSON.stringify(result)).not.toContain('"depend_on_ids"');
   });
 
   it("marks a capped dependency listing incomplete", async () => {
@@ -81,5 +83,20 @@ describe("task blocker explanations", () => {
     const result = await taskContext({ state: "04_waiting_normal", allow_task_dependencies: true, depend_on_ids: ids },
       ids.slice(0, 100).map((id) => ({ id, display_name: `[QA] Task ${id}`, state: "1_canceled" })));
     expect(result.data.context.dependencies).toMatchObject({ complete: false, waiting_reason: "unavailable_dependencies", open_blockers: [] });
+  });
+
+  it("uses the native aggregate when the relational read already hides a blocker", async () => {
+    const result = await taskContext({ state: "04_waiting_normal", allow_task_dependencies: true,
+      depend_on_ids: [], depend_on_count: 1, closed_depend_on_count: 0 }, []);
+    expect(result.data.context.dependencies).toMatchObject({ complete: false, total_count: 1,
+      waiting_reason: "unavailable_dependencies", open_blockers: [] });
+    expect(JSON.stringify(result)).not.toContain('"depend_on_ids"');
+  });
+
+  it("does not claim completeness when the native count is unavailable", async () => {
+    const result = await taskContext({ state: "04_waiting_normal", allow_task_dependencies: true,
+      depend_on_ids: [], depend_on_count: undefined }, []);
+    expect(result.data.context.dependencies).toMatchObject({ complete: false, total_count: null,
+      waiting_reason: "unavailable_dependencies" });
   });
 });
