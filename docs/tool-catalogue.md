@@ -9,10 +9,10 @@ refer here instead of repeating them.
 
 | Measure | Value |
 | --- | ---: |
-| Tools on `/mcp` with every feature available | 29 |
-| Tools on `/mcp` without document materialization | 27 |
-| Estimated input/output schema tokens on `/mcp` | 15,530 |
-| Budget enforced by `/readyz` (`DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET`) | 16,000 |
+| Tools on `/mcp` with every feature available | 31 |
+| Tools on `/mcp` without document materialization | 29 |
+| Estimated input/output schema tokens on `/mcp` | 17,884 |
+| Budget enforced by `/readyz` (`DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET`) | 18,432 |
 
 Odoo module, method, and access availability can lower the counts further.
 Schema estimates are not measured model usage. Update this table, and only this
@@ -67,8 +67,39 @@ These workflows are complete on the default profile without a profile switch:
 | Create and maintain tasks | `projects_create_task`, `projects_get_task_context`, `odoo_update_records` |
 | Chatter and follow-ups | `odoo_post_message`, `activities_list_for_record`, `activities_schedule` |
 | Prepare expenses | `expenses_get_context`, `expenses_update_draft` |
+| Split a draft or correct all linked parts | `expenses_split_draft`, `expenses_correct_draft_family` |
 | Prepare vendor bills/credit notes | `accounting_get_invoice_context`, `expenses_configure_draft_vendor_bill` |
 | Report a connector issue | `odoo_submit_feedback` |
+
+`expenses_update_draft` uses one native transaction and returns the final expense.
+For a draft company correction, supply a matching employee and select both
+authorized companies in `context.allowed_company_ids`. Replace incompatible
+category/account links or clear them with `false`; clear taxes with `[]` and
+analytics with `{}`. A batch or supplier bill/vendor from the previous company
+also needs an explicit compatible replacement or clear. Odoo preserves receipt
+identity and document currency, recalculates the target company amount, and
+records the company correction in Chatter. Submitted or accounted expenses are
+refused. Split ownership requires a coordinated family correction; this shortcut
+does not silently move sibling expenses. The generic ORM tools remain available
+under their normal native access rules.
+
+For different accounting components, `expenses_split_draft` accepts explicit
+gross lines and delegates to the native split wizard. Their sum must match the
+source at its currency precision. Signed discounts and zero components retain
+native behavior; no percentage tax is invented for a direct import-VAT account.
+The source becomes the first part and stays the native origin. Every result
+includes a direct record URL and the before/after document totals, with copied
+source evidence and its checksum preserved.
+
+`expenses_get_context` exposes the split origin and count. Review the whole
+visible family before calling `expenses_correct_draft_family`: name every part,
+the common target company/employee, and one explicit mapping choice per part.
+Compatible defaults remain; incompatible financial or Batch links require named
+replacements or clears. A hidden or non-draft part, changed membership or invalid
+mapping leaves all parts unchanged. The reply reports document totals grouped by
+currency rather than summing different currencies together. Both shortcuts use
+one native transaction and never submit, post, pay or reconcile. Unknown
+completion always requires readback before another action.
 
 Activity rescheduling and editing use the generic update tool where Odoo
 permits it; completion uses the documented public method via `odoo_call_method`.
@@ -100,7 +131,7 @@ Actions do not bypass Odoo state or permissions. The agent should read the relev
 
 | URL | Intended visible surface |
 | --- | --- |
-| `/mcp` | Static everyday workflows plus generic substrate; maximum 29 tools/16k estimated schema tokens. |
+| `/mcp` | Static everyday workflows plus generic substrate; the measured schema budget is shown above. |
 | `/mcp/all` | Complete catalogue with deferred-loading metadata. |
 | `/mcp/read-only` | Every read capability currently available. |
 | `/mcp/accounting` | Universal core plus accounting, expenses, and related document actions. |

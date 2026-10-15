@@ -407,14 +407,15 @@ export function registerOperationalCapabilities(registry: CapabilityRegistry, cl
     name: "expenses_update_draft",
     title: "Update Draft Expense",
     description:
-      "Update curated preparatory fields on one draft expense after reading its current state. This does not submit, approve, post, pay, move companies, or change the employee; use generic update only when broader Odoo flexibility is intentional.",
+      "Atomically prepare one draft expense. Company/employee corrections need authorized companies and explicit compatible mappings or clears. This never submits, approves, posts or pays.",
     layer: "business_action",
     toolsets: ["expenses", "accounting"],
     profiles: ["accounting"],
     effect: "write",
     annotations: actionAnnotations,
     keywords: ["expense", "draft", "category", "account", "analytic", "tax", "paid by"],
-    requiredModules: ["hr_expense"],
+    requiredModules: ["hr_expense", "usl_expense_batch"],
+    requiredPublicMethods: [{ model: "hr.expense", method: "configure_draft_expense" }],
     requiredModelAccess: [{ model: "hr.expense", operation: "write" }],
     defaultVisible: true,
     alwaysLoad: false,
@@ -424,8 +425,14 @@ export function registerOperationalCapabilities(registry: CapabilityRegistry, cl
       name: z.string().trim().min(1).max(500).optional(),
       description: z.string().max(20_000).optional(),
       date: DateSchema.optional(),
-      product_id: PositiveIdSchema.optional(),
-      account_id: PositiveIdSchema.optional(),
+      company_id: PositiveIdSchema.optional(),
+      employee_id: PositiveIdSchema.optional(),
+      product_id: z.union([PositiveIdSchema, z.literal(false)]).optional(),
+      account_id: z.union([PositiveIdSchema, z.literal(false)]).optional(),
+      expense_batch_id: z.union([PositiveIdSchema, z.literal(false)]).optional(),
+      vendor_id: z.union([PositiveIdSchema, z.literal(false)]).optional(),
+      existing_bill_id: z.union([PositiveIdSchema, z.literal(false)]).optional(),
+      has_existing_bill: z.boolean().optional(),
       analytic_distribution: z.record(z.string(), z.number().finite()).optional(),
       quantity: z.number().positive().optional(),
       price_unit: z.number().finite().optional(),
@@ -434,16 +441,16 @@ export function registerOperationalCapabilities(registry: CapabilityRegistry, cl
       payment_mode: z.enum(["own_account", "company_account"]).optional(),
       context: OdooContextSchema
     }).strict(),
-    output: ActionOutputSchema,
+    output: ActionOutputSchema.extend({ expense: z.record(z.string(), z.unknown()) }),
     async handler(input, context, signal) {
       const common = rpcContext(input.context, context);
-      const before = await client.call<Record<string, unknown>[]>(context, "hr.expense", "read", {
-        ids: [input.expense_id], fields: ["id", "state", "display_name"], context: common
-      }, { signal });
-      if (!before[0]) throw new Error(`hr.expense,${input.expense_id} was not found or is not readable`);
-      if (before[0].state !== "draft") throw new Error(`hr.expense,${input.expense_id} must be draft before preparatory fields can be changed`);
-      const displayName = String(before[0].display_name ?? "");
       const values = {
+        ...(input.company_id !== undefined ? { company_id: input.company_id } : {}),
+        ...(input.employee_id !== undefined ? { employee_id: input.employee_id } : {}),
+        ...(input.expense_batch_id !== undefined ? { expense_batch_id: input.expense_batch_id } : {}),
+        ...(input.vendor_id !== undefined ? { vendor_id: input.vendor_id } : {}),
+        ...(input.existing_bill_id !== undefined ? { existing_bill_id: input.existing_bill_id } : {}),
+        ...(input.has_existing_bill !== undefined ? { has_existing_bill: input.has_existing_bill } : {}),
         ...(input.name !== undefined ? { name: input.name } : {}),
         ...(input.description !== undefined ? { description: input.description } : {}),
         ...(input.date !== undefined ? { date: input.date } : {}),
@@ -453,29 +460,30 @@ export function registerOperationalCapabilities(registry: CapabilityRegistry, cl
         ...(input.quantity !== undefined ? { quantity: input.quantity } : {}),
         ...(input.price_unit !== undefined ? { price_unit: input.price_unit } : {}),
         ...(input.total_amount !== undefined ? { total_amount: input.total_amount } : {}),
-        ...(input.tax_ids !== undefined ? { tax_ids: [[6, 0, input.tax_ids]] } : {}),
+        ...(input.tax_ids !== undefined ? { tax_ids: input.tax_ids } : {}),
         ...(input.payment_mode !== undefined ? { payment_mode: input.payment_mode } : {})
       };
       if (Object.keys(values).length === 0) throw new Error("Supply at least one draft expense field to update");
-      const receipt = await client.call<unknown>(context, "hr.expense", "write", {
-        ids: [input.expense_id], vals: values, context: common
+      const receipt = await client.call<{ result: boolean; expense: Record<string, unknown> }>(context, "hr.expense", "configure_draft_expense", {
+        ids: [input.expense_id], values, context: common
       }, {
         kind: "mutation",
         signal,
         reconciliation: {
           targetModel: "hr.expense",
           knownIds: [input.expense_id],
-          fields: Object.keys(values),
+          fields: [...new Set([...Object.keys(values), "company_id", "employee_id", "account_id", "expense_batch_id", "existing_bill_id", "has_existing_bill", "currency_id", "total_amount_currency", "total_amount"])],
           suggestedTool: "odoo_read_records",
-          instructions: "Read the changed expense fields and compare them with the original patch. Preserve matching values and patch only fields that remain different."
+          instructions: "Read the final expense context, including company, employee, account, batch, bill linkage and totals. Compare the intended values before another correction; native defaults may also change. Do not replay this action automatically."
         }
       });
       return receipt.finalize((result) => ({
         data: {
-          result,
+          result: result.result,
+          expense: result.expense,
           correlation_id: context.correlationId,
           outcome: "succeeded" as const,
-          record: recordRef(context, "hr.expense", input.expense_id, displayName)
+          record: recordRef(context, "hr.expense", input.expense_id, String(result.expense.display_name ?? ""))
         }
       }));
     }
