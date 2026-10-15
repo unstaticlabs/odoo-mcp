@@ -62,6 +62,7 @@
     "mail.message.search_read",
     "project.task.create",
     "project.task.read",
+    "project.task.search_read",
     "rebuild.account.management.summary.line.search_read",
     "rebuild.account.overview.search_read",
     "rebuild.account.tax.report.line.search_read",

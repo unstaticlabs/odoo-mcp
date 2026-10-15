@@ -243,7 +243,7 @@ export function registerSemanticCapabilities(registry: CapabilityRegistry, clien
     name: "projects_get_task_context",
     title: "Get Project Task Context",
     description:
-      "Read one project task with assignments, stage, tags, immediate hierarchy, recent chatter, activities, and archived-document links. Use for common task review; use generic traversal when different relations or fields matter.",
+      "Read one project task with assignments, stage, dependencies and readable open blockers, immediate hierarchy, recent chatter, activities, and document links. Waiting is normally dependency-derived; incomplete dependency details and manual Waiting are identified explicitly. Use generic traversal for other fields.",
     layer: "semantic",
     toolsets: ["projects", "activities", "documents"],
     profiles: ["projects"],
@@ -272,7 +272,8 @@ export function registerSemanticCapabilities(registry: CapabilityRegistry, clien
           ids: [task_id],
           fields: [
             "display_name", "project_id", "stage_id", "state", "user_ids", "partner_id", "date_deadline",
-            "description", "tag_ids", "parent_id", "child_ids", "company_id", "priority", "create_date", "write_date"
+            "description", "tag_ids", "parent_id", "child_ids", "company_id", "priority", "create_date", "write_date",
+            "allow_task_dependencies", "depend_on_ids"
           ],
           context: common
         }, { signal }),
@@ -282,8 +283,25 @@ export function registerSemanticCapabilities(registry: CapabilityRegistry, clien
       ]);
       const task = rows[0] as Record<string, unknown> | undefined;
       if (!task) throw new Error(`project.task,${task_id} was not found or is not readable`);
+      const dependencyIds = Array.isArray(task.depend_on_ids) ? task.depend_on_ids as number[] : [];
+      // Search under the caller's rights: a task relation is not permission to
+      // disclose another task. A bounded partial result is explicitly incomplete.
+      const dependencies = dependencyIds.length ? await client.call<Record<string, unknown>[]>(context, "project.task", "search_read", {
+        domain: [["id", "in", dependencyIds.slice(0, 100)]],
+        fields: ["display_name", "state"], limit: 100, order: "id asc",
+        context: { ...common, active_test: false }
+      }, { signal }) : [];
+      const enabled = task.allow_task_dependencies === true;
+      const complete = dependencies.length === dependencyIds.length;
+      const openBlockers = enabled ? dependencies.filter((dependency) => !["1_done", "1_canceled"].includes(String(dependency.state)))
+        .map((dependency) => ({ ...dependency, _ref: ref(context, "project.task", Number(dependency.id), dependency.display_name) })) : [];
+      const waitingReason = task.state !== "04_waiting_normal" ? "not_waiting"
+        : !enabled ? "dependencies_disabled" : openBlockers.length ? "open_dependencies"
+          : !complete ? "unavailable_dependencies" : "manual_or_stale";
       return {
-        data: { context: { task: { ...task, _ref: ref(context, "project.task", task_id, task.display_name) }, activities, messages, document_links: documentLinks.records } },
+        data: { context: { task: { ...task, _ref: ref(context, "project.task", task_id, task.display_name) },
+          dependencies: { enabled, complete, waiting_reason: waitingReason, open_blockers: openBlockers },
+          activities, messages, document_links: documentLinks.records } },
         ...(documentLinks.warning ? { warnings: [documentLinks.warning] } : {})
       };
     }

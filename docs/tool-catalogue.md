@@ -11,7 +11,7 @@ refer here instead of repeating them.
 | --- | ---: |
 | Tools on `/mcp` with every feature available | 31 |
 | Tools on `/mcp` without document materialization | 29 |
-| Estimated input/output schema tokens on `/mcp` | 17,884 |
+| Estimated input/output schema tokens on `/mcp` | 17,814 |
 | Budget enforced by `/readyz` (`DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET`) | 18,432 |
 
 Odoo module, method, and access availability can lower the counts further.
@@ -82,6 +82,13 @@ records the company correction in Chatter. Submitted or accounted expenses are
 refused. Split ownership requires a coordinated family correction; this shortcut
 does not silently move sibling expenses. The generic ORM tools remain available
 under their normal native access rules.
+
+Task context includes dependency enablement, readable open blockers with canonical
+links, and a reason for Waiting. Dependency details are capped at 100 and read
+under the caller's own rights; `complete: false` means missing details must not
+be treated as proof that no blocker exists. Manual or stale Waiting and disabled
+dependencies are distinguished from a proven dependency-derived wait. This
+read-only view does not change task state or repair historical tasks.
 
 For different accounting components, `expenses_split_draft` accepts explicit
 gross lines and delegates to the native split wizard. Their sum must match the
