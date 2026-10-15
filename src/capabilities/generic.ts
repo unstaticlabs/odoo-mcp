@@ -54,12 +54,12 @@ const readAnnotations = {
   readOnlyHint: true,
   destructiveHint: false,
   idempotentHint: true,
-  openWorldHint: true
+  openWorldHint: false
 } as const;
 
 const writeAnnotations = {
   readOnlyHint: false,
-  destructiveHint: false,
+  destructiveHint: true,
   idempotentHint: false,
   openWorldHint: true
 } as const;
@@ -1078,7 +1078,7 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
     name: "odoo_post_message",
     title: "Post Odoo Message",
     description:
-      "Post one note or message to one chatter-enabled record. Use a separate call for each record so failures and side effects remain clear. Recognized HTML is formatted automatically; plain text is escaped. Set body_is_html false to show literal tags.",
+      "Post one Chatter note or comment. Comments may notify followers or external recipients; odoo_add_internal_note skips native follower notifications. Recognized HTML is formatted automatically; plain text is escaped.",
     layer: "generic",
     toolsets: ["core", "activities"],
     profiles: [],
@@ -1132,6 +1132,73 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
     }
   }));
 
+
+  registry.add(defineCapability({
+    id: "core.messages.internal_note",
+    name: "odoo_add_internal_note",
+    title: "Append Odoo Internal Note",
+    description:
+      "Append an internal Chatter note, skipping native follower and direct-recipient notifications. Uses mail.mt_note; model hooks still run. Inspect recent Chatter before retrying: repeating an append duplicates it.",
+    layer: "business_action",
+    toolsets: ["core", "activities"],
+    profiles: [],
+    effect: "write",
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: false
+    },
+    keywords: ["private", "internal", "note", "chatter", "append", "no notification"],
+    requiredModules: ["mail"],
+    requiredAnyPublicMethods: ["message_post"],
+    defaultVisible: true,
+    alwaysLoad: false,
+    sortOrder: 111,
+    input: z.object({
+      model: ModelNameSchema,
+      id: PositiveIdSchema,
+      body: z.string().min(1).max(50_000).describe("Internal note text or HTML; use body_is_html to specify raw HTML."),
+      body_is_html: z.boolean().optional().describe("true: render supplied HTML; false: escape literal text; omit to detect recognized HTML."),
+      context: OdooContextSchema
+    }).strict(),
+    output: z.object({ result: z.unknown(), execution: ExecutionSchema }).strict(),
+    async handler({ model, id, body, body_is_html, context: requestedContext }, context, signal) {
+      const message = richTextHtml({
+        value: body, isHtml: body_is_html, field: "body",
+        flagField: "body_is_html", plaintext: plaintextToParagraphHtml,
+        autoDetectHtml: true
+      });
+      const receipt = await client.call<unknown>(context, model, "message_post", {
+        ids: [id],
+        body: message.html,
+        body_is_html: true,
+        subtype_xmlid: "mail.mt_note",
+        partner_ids: [],
+        notify_skip_followers: true,
+        context: attributedContext({
+          ...requestedContext,
+          mail_post_autofollow: false,
+          mail_post_autofollow_author_skip: true
+        }, context.correlationId)
+      }, {
+        kind: "mutation",
+        signal,
+        reconciliation: {
+          targetModel: model,
+          knownIds: [id],
+          fields: ["message_ids"],
+          suggestedTool: "odoo_read_records",
+          instructions: "Inspect recent Chatter for the exact note before retrying; repeating an append duplicates it."
+        }
+      });
+      return receipt.finalize((result) => ({
+        data: { result, execution: { correlation_id: context.correlationId, outcome: "succeeded" as const } },
+        ...(message.warnings.length ? { warnings: message.warnings } : {})
+      }));
+    }
+  }));
+
   registry.add(defineCapability({
     id: "core.following.self",
     name: "odoo_set_self_following",
@@ -1146,7 +1213,7 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
       readOnlyHint: false,
       destructiveHint: false,
       idempotentHint: true,
-      openWorldHint: true
+      openWorldHint: false
     },
     keywords: ["follow", "unfollow", "follower", "chatter", "subscribe"],
     requiredModules: ["mail"],
