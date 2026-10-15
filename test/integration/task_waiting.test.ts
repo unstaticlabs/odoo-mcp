@@ -23,6 +23,16 @@ describe.skipIf(!fixturePath).sequential("synthetic task Waiting through the liv
       throw new Error("Task Waiting integration requires its isolated localhost fixture");
     }
     fixture = JSON.parse(readFileSync(fixturePath!, "utf8"));
+    // Native creation can start In Progress even with dependencies. Exercise
+    // the normal human resume path to prepare actual Waiting records, rather
+    // than adding an Agent-specific initial-state policy to the fixture.
+    const prepared = await fetch(`${origin}/json/2/project.task/write`, {
+      method: "POST", headers: { "Content-Type": "application/json", "Authorization": `Bearer ${fixture.human_api_key}`,
+        "X-Odoo-Database": database! },
+      body: JSON.stringify({ ids: [fixture.blocked_id, fixture.hidden_wait_id], vals: { state: "01_in_progress" },
+        context: { allowed_company_ids: [fixture.company_id], lang: "fr_FR" } }),
+    });
+    expect(prepared.ok).toBe(true);
     const context: RequestContext = {
       requestId: crypto.randomUUID(), correlationId: crypto.randomUUID(), profile: "default",
       principal: { targetId: "task-waiting-qa", publicOrigin: origin, internalOrigin: origin,
@@ -51,11 +61,12 @@ describe.skipIf(!fixturePath).sequential("synthetic task Waiting through the liv
     return result.structuredContent as Record<string, any>;
   }
 
-  async function nativeHumanCreate() {
+  async function nativeHumanCreate(dependencyIds?: number[]) {
     const response = await fetch(`${origin}/json/2/project.task/web_save`, {
       method: "POST", headers: { "Content-Type": "application/json", "Authorization": `Bearer ${fixture.human_api_key}`,
         "X-Odoo-Database": database! },
-      body: JSON.stringify({ vals: { name: "[QA] Native human creation", project_id: fixture.project_id, state: "04_waiting_normal" },
+      body: JSON.stringify({ vals: { name: "[QA] Native human creation", project_id: fixture.project_id,
+        ...(dependencyIds ? { depend_on_ids: [[6, 0, dependencyIds]] } : { state: "04_waiting_normal" }) },
         specification: { state: {} }, context: { allowed_company_ids: [fixture.company_id], lang: "fr_FR" } }),
     });
     expect(response.ok).toBe(true);
@@ -135,11 +146,13 @@ describe.skipIf(!fixturePath).sequential("synthetic task Waiting through the liv
   }, 60_000);
 
   it("creates real dependencies through the existing semantic shortcut", async () => {
+    const native = await nativeHumanCreate([Number(fixture.blocker_id)]);
     const result = await call("projects_create_task", { name: "[QA] MCP semantic creation", project_id: fixture.project_id,
       dependency_ids: [fixture.blocker_id] });
     const taskId = result.data.record?.id ?? result.data.id;
     expect(taskId).toBeTypeOf("number");
     const context = await call("projects_get_task_context", { task_id: taskId });
-    expect(context.data.context.task.state).toBe("04_waiting_normal");
+    expect(context.data.context.task.state).toBe(native[0]!.state);
+    expect(context.data.context.dependencies.open_blockers).toMatchObject([{ id: fixture.blocker_id }]);
   }, 60_000);
 });
