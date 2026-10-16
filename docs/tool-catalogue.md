@@ -91,6 +91,16 @@ refused. Split ownership requires a coordinated family correction; this shortcut
 does not silently move sibling expenses. The generic ORM tools remain available
 under their normal native access rules.
 
+Task context includes dependency enablement, readable open blockers with canonical
+links, and a reason for Waiting. Dependency details are capped at 100 and read
+under the caller's own rights. Completeness uses the native task UI's aggregate
+dependency count, because relational reads can already hide inaccessible IDs.
+Only readable blocker records are linked; raw relation IDs are not returned.
+`complete: false` means missing details must not
+be treated as proof that no blocker exists. Manual or stale Waiting and disabled
+dependencies are distinguished from a proven dependency-derived wait. This
+read-only view does not change task state or repair historical tasks.
+
 For different accounting components, `expenses_split_draft` accepts explicit
 gross lines and delegates to the native split wizard. Their sum must match the
 source at its currency precision. Signed discounts and zero components retain
