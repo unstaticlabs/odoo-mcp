@@ -129,3 +129,26 @@ completion recovery and the measured default schema budget.
 Keep the last pre-migration service/image available until direct, stdio, and hosted connections are qualified. Runtime rollback is a reverse-proxy/image change. Restore the pre-migration SQLite backup only when rolling back an OAuth schema change, and use its matching secrets.
 
 Any additive Odoo public application-service methods landed for atomic actions can remain deployed during MCP rollback. Never roll back by deleting Odoo data or by replaying an operation with unknown completion.
+
+## Printable bill terms and internal notes
+
+Refresh the tool schema before using `expenses_configure_draft_vendor_bill`.
+Its former `narration` parameter is now `terms_and_conditions`: printable
+contract text stored in the same native Odoo field. The old specialized
+parameter is rejected before making an Odoo request. Omit the new parameter
+to retain existing terms, or pass an empty string to clear them.
+
+Generic `odoo_create_records`, `odoo_update_records` and native public methods
+keep their existing authority and field names, including `account.move.narration`.
+Create/update and the specialized tool return advice when nonempty terms are
+written; they preserve the supplied text and do not require another approval.
+Read the native field's help through `odoo_describe_model` when choosing a field.
+
+Use `ref` for the supplier document reference, an invoice line's `name` for its
+printed item label, and `payment_reference` for payment identification. Internal
+accounting analysis belongs in `odoo_add_internal_note` on the bill. That action
+appends one internal Chatter note without directly notifying partners or
+followers; it does not populate printable terms. Writing terms and appending a
+note are separate transactions. Each mutation receives one transport attempt;
+if its outcome is unknown, read the record or Chatter before deciding what to do
+next. Never replay an uncertain note append automatically.

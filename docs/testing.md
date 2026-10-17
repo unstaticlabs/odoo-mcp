@@ -97,3 +97,20 @@ Attach the following to a release/PR:
 - pinned Codex/Claude evaluation artifacts and acceptance-threshold summary;
 - OAuth migration/backup/revoke check when enabled;
 - migration and rollback confirmation.
+
+## Printable bill terms fixture
+
+`test/integration/bill_terms.test.ts` uses an explicitly supplied disposable
+fixture, rather than choosing write targets from ordinary business records.
+Set `ODOO_INTEGRATION_BILL_TERMS_FIXTURE` to a private JSON file containing:
+`disposable: true`, a database beginning `odoo_fb_`, a loopback `origin`, a
+fixture Agent `key`, two selected `company_ids`, and `bills` with `0_posted`
+and `1_draft` IDs. Keep the file and key outside version control. It exercises
+actual native Agent discovery, MCP field help, cross-company draft terms,
+omission, a posted generic terms write, one internal note append, unchanged
+ledger lines and explicit clearing. Re-running intentionally appends a new
+synthetic note; it must never target production.
+
+Run `ODOO_INTEGRATION_BILL_TERMS_FIXTURE=<private-path> npm run test:integration`.
+Other integration groups retain their own opt-in environment requirements;
+report their skips separately from this fixture’s result.
