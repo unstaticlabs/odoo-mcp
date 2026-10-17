@@ -51,6 +51,7 @@
     "b2c.order.read",
     "b2c.order.source.search_read",
     "b2c.payment.event.search_read",
+    "hr.expense.configure_draft_expense",
     "hr.expense.configure_draft_expense_family",
     "hr.expense.read",
     "hr.expense.split_draft_expense",

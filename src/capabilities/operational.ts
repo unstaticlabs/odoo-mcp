@@ -38,6 +38,16 @@ const ActionOutputSchema = z.object({
   }).strict().optional()
 }).strict();
 
+const ExpenseFinancialComparisonSchema = z.object({
+  before: RecordSchema,
+  after: RecordSchema
+}).strict();
+type DraftExpenseReply = {
+  result: boolean;
+  expense: Record<string, unknown>;
+  financial_comparison?: z.infer<typeof ExpenseFinancialComparisonSchema>;
+};
+
 const RelatedRecordSchema = z.object({
   id: PositiveIdSchema,
   name: z.string()
@@ -441,7 +451,9 @@ export function registerOperationalCapabilities(registry: CapabilityRegistry, cl
       payment_mode: z.enum(["own_account", "company_account"]).optional(),
       context: OdooContextSchema
     }).strict(),
-    output: ActionOutputSchema.extend({ expense: z.record(z.string(), z.unknown()) }),
+    output: ActionOutputSchema.extend({
+      expense: RecordSchema, financial_comparison: ExpenseFinancialComparisonSchema.optional()
+    }),
     async handler(input, context, signal) {
       const common = rpcContext(input.context, context);
       const values = {
@@ -464,7 +476,7 @@ export function registerOperationalCapabilities(registry: CapabilityRegistry, cl
         ...(input.payment_mode !== undefined ? { payment_mode: input.payment_mode } : {})
       };
       if (Object.keys(values).length === 0) throw new Error("Supply at least one draft expense field to update");
-      const receipt = await client.call<{ result: boolean; expense: Record<string, unknown> }>(context, "hr.expense", "configure_draft_expense", {
+      const receipt = await client.call<DraftExpenseReply>(context, "hr.expense", "configure_draft_expense", {
         ids: [input.expense_id], values, context: common
       }, {
         kind: "mutation",
@@ -481,6 +493,7 @@ export function registerOperationalCapabilities(registry: CapabilityRegistry, cl
         data: {
           result: result.result,
           expense: result.expense,
+          ...(result.financial_comparison !== undefined ? { financial_comparison: result.financial_comparison } : {}),
           correlation_id: context.correlationId,
           outcome: "succeeded" as const,
           record: recordRef(context, "hr.expense", input.expense_id, String(result.expense.display_name ?? ""))

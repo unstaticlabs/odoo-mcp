@@ -80,6 +80,12 @@ These workflows are complete on the default profile without a profile switch:
 | Report a connector issue | `odoo_submit_feedback` |
 
 `expenses_update_draft` uses one native transaction and returns the final expense.
+Servers supporting financial snapshots also return optional `financial_comparison`
+with native `before` and `after` read records from that transaction. The MCP passes
+these through without calculating taxes or deltas. Amounts ending in `_currency`
+use `currency_id` (document currency); `total_amount`, `untaxed_amount`, and
+`tax_amount` use `company_currency_id`, including `untaxed_amount` despite its
+upstream field metadata. Older servers can omit the comparison.
 For a draft company correction, supply a matching employee and select both
 authorized companies in `context.allowed_company_ids`. Replace incompatible
 category/account links or clear them with `false`; clear taxes with `[]` and
