@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { billTermsWarnings } from "./bill_terms.js";
 import type { RequestContext } from "../runtime/context.js";
 import { emitEvent } from "../runtime/logging.js";
 import { OdooClient } from "../odoo/client.js";
@@ -886,7 +887,7 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
     name: "odoo_create_records",
     title: "Create Odoo Records",
     description:
-      "Create one or more records on one model in a single Odoo call and transaction. Use only after describing the model and required fields. Relational (x2many) fields accept either raw Odoo command tuples or the named form {link|unlink|delete|set: [ids]}, {create: [values]}, {update: [{id, values}]}, {clear: true}, which is validated and lowered to those tuples. Pass specification to read the created records back in the same transaction and skip a follow-up read. Do not use this to emulate a multi-step business workflow that has a purpose-built action.",
+      "Create one or more records on one model in a single Odoo call and transaction. Use only after describing the model and required fields. Relational (x2many) fields accept either raw Odoo command tuples or the named form {link|unlink|delete|set: [ids]}, {create: [values]}, {update: [{id, values}]}, {clear: true}, which is validated and lowered to those tuples. Pass specification to read the created records back in the same transaction and skip a follow-up read. Do not use this to emulate a multi-step business workflow that has a purpose-built action. On account.move, narration is printable Terms and Conditions; use odoo_add_internal_note for internal accounting commentary.",
     layer: "generic",
     toolsets: ["core"],
     profiles: [],
@@ -915,6 +916,7 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
       const normalized = values.map((entry) => normalizeWriteValues(entry));
       assertBoundedJson(normalized);
       const { context: rpcContext, warnings } = resolveCallScope({ ...scope, context: requestedContext }, context.correlationId);
+      warnings.push(...billTermsWarnings(model, normalized));
       const mutation = {
         kind: "mutation" as const,
         signal,
@@ -970,7 +972,7 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
     name: "odoo_update_records",
     title: "Update Odoo Records",
     description:
-      "Apply one values object to 1-100 records on one model in a single Odoo call and transaction. Read the records first. Relational (x2many) fields accept either raw Odoo command tuples or the named form {link|unlink|delete|set: [ids]}, {create: [values]}, {update: [{id, values}]}, {clear: true}, which is validated and lowered to those tuples. Pass specification to read the updated records back in the same transaction and skip a follow-up read. Heterogeneous updates and multi-step workflow transitions are intentionally not bundled here.",
+      "Apply one values object to 1-100 records on one model in a single Odoo call and transaction. Read the records first. Relational (x2many) fields accept either raw Odoo command tuples or the named form {link|unlink|delete|set: [ids]}, {create: [values]}, {update: [{id, values}]}, {clear: true}, which is validated and lowered to those tuples. Pass specification to read the updated records back in the same transaction and skip a follow-up read. Heterogeneous updates and multi-step workflow transitions are intentionally not bundled here. On account.move, narration is printable Terms and Conditions; use odoo_add_internal_note for internal accounting commentary.",
     layer: "generic",
     toolsets: ["core"],
     profiles: [],
@@ -1001,6 +1003,7 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
       assertBoundedJson(normalized);
       const uniqueIds = [...new Set(ids)];
       const { context: rpcContext, warnings } = resolveCallScope({ ...scope, context: requestedContext }, context.correlationId);
+      warnings.push(...billTermsWarnings(model, [normalized]));
       const mutation = {
         kind: "mutation" as const,
         signal,

@@ -11,7 +11,7 @@ refer here instead of repeating them.
 | --- | ---: |
 | Tools on `/mcp` with every feature available | 32 |
 | Tools on `/mcp` without document materialization | 30 |
-| Estimated input/output schema tokens on `/mcp` | 18,222 |
+| Estimated input/output schema tokens on `/mcp` | 18,340 |
 | Budget enforced by `/readyz` (`DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET`) | 18,432 |
 
 Odoo module, method, and access availability can lower the counts further.
