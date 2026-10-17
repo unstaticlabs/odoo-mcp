@@ -1,6 +1,7 @@
 import { OdooClient } from "../odoo/client.js";
 import { registerAccountingCapabilities } from "./accounting.js";
 import { registerGenericCapabilities } from "./generic.js";
+import { registerSourceEvidenceCapability } from "./source_evidence.js";
 import { registerFeedbackCapability } from "./feedback.js";
 import { CapabilityRegistry } from "./registry.js";
 import { registerOperationalCapabilities } from "./operational.js";
@@ -34,5 +35,6 @@ export function createCapabilityRegistry(
   registerOperationalCapabilities(registry, client);
   registerExpenseFamilyCapabilities(registry, client);
   registerFeedbackCapability(registry, client, releaseIdentity);
+  registerSourceEvidenceCapability(registry, client);
   return registry;
 }

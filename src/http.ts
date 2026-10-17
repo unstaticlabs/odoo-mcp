@@ -202,7 +202,7 @@ export function createHttpApp(
         oauthStatus = "error";
       }
     }
-    const ready = budget.tools <= 32 && budget.schemaTokens <= DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET && oauthStatus !== "error";
+    const ready = budget.tools <= 33 && budget.schemaTokens <= DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET && oauthStatus !== "error";
     response.json({
       schema: "usl-odoo-mcp-readiness/v1",
       status: ready ? "ready" : "not_ready",
