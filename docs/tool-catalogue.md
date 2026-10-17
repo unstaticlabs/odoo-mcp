@@ -9,10 +9,10 @@ refer here instead of repeating them.
 
 | Measure | Value |
 | --- | ---: |
-| Tools on `/mcp` with every feature available | 32 |
-| Tools on `/mcp` without document materialization | 30 |
-| Estimated input/output schema tokens on `/mcp` | 18,222 |
-| Budget enforced by `/readyz` (`DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET`) | 18,432 |
+| Tools on `/mcp` with every feature available | 33 |
+| Tools on `/mcp` without document materialization | 31 |
+| Estimated input/output schema tokens on `/mcp` | 19,168 |
+| Budget enforced by `/readyz` (`DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET`) | 19,456 |
 
 Odoo module, method, and access availability can lower the counts further.
 Schema estimates are not measured model usage. Update this table, and only this
@@ -195,3 +195,14 @@ Module, public-method, model-access, and feature predicates remove specialized t
 - Markdown is rendered in neither mode, and plain text sent with the flag true loses its line breaks. Both return a `warnings` entry rather than a refusal.
 - A body that carries the flag true, holds no HTML tag, and holds escaped tags such as `&lt;p&gt;` is decoded before the write, and the decode is reported in `warnings`. Without that guard the record stores visible markup and the call still succeeds.
 - `odoo_call_method` reports `execution.mode`. Odoo's published `api` classification selects the contract: `read` for a method Odoo states is readonly, `mutation` otherwise, including when the classification is unknown.
+
+
+## Original evidence handoff
+
+`documents_attach_source_evidence` uploads a host-supplied file reference or
+copies an existing attachment/archived original to an expense or accounting
+entry. Provide exactly one `file`, `source_attachment_id` or `source_document_id`.
+The original remains unchanged; the destination receives native owned evidence
+and optional main selection. See [source evidence handoff](source-evidence-handoff.md)
+for file inputs, exact-byte/checksum guarantees, native workflow boundaries,
+provenance, duplicates and ambiguous-outcome recovery.
