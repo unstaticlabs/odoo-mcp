@@ -10,7 +10,7 @@ const readAnnotations = {
   readOnlyHint: true,
   destructiveHint: false,
   idempotentHint: true,
-  openWorldHint: true
+  openWorldHint: false
 } as const;
 
 function companyContext(requested: Record<string, unknown>, companyId: number, context: RequestContext) {

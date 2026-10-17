@@ -242,6 +242,36 @@ describe("the rich-text escaping contract", () => {
     expect(warningsOf(escapedHtml)[0]).toContain("description_is_html");
   });
 
+
+  it("appends a private internal note without follower or external notifications", async () => {
+    const fetcher = vi.fn<typeof fetch>(async () => Response.json({ id: 93 }));
+    const client = await connected(fetcher);
+    const result = await client.callTool({
+      name: "odoo_add_internal_note",
+      arguments: {
+        model: "project.task", id: 492, body: RAW_HTML, body_is_html: true,
+        context: { allowed_company_ids: [2, 3], lang: "fr_FR" }
+      }
+    });
+    expect(result.isError).not.toBe(true);
+    expect(jsonCalls(fetcher)).toHaveLength(1);
+    expect(requestBody(fetcher, "project.task/message_post")).toEqual({
+      ids: [492],
+      body: RAW_HTML,
+      body_is_html: true,
+      subtype_xmlid: "mail.mt_note",
+      partner_ids: [],
+      notify_skip_followers: true,
+      context: {
+        allowed_company_ids: [2, 3], lang: "fr_FR",
+        mail_post_autofollow: false,
+        mail_post_autofollow_author_skip: true,
+        usl_agent_origin: "odoo-mcp",
+        usl_correlation_id: "correlation-test"
+      }
+    });
+  });
+
   it("posts a Chatter body exactly as the flag promises", async () => {
     const fetcher = vi.fn<typeof fetch>(async () => Response.json({ id: 77 }));
     const client = await connected(fetcher);
