@@ -9,10 +9,10 @@ refer here instead of repeating them.
 
 | Measure | Value |
 | --- | ---: |
-| Tools on `/mcp` with every feature available | 32 |
-| Tools on `/mcp` without document materialization | 30 |
-| Estimated input/output schema tokens on `/mcp` | 18,222 |
-| Budget enforced by `/readyz` (`DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET`) | 18,432 |
+| Tools on `/mcp` with every feature available | 33 |
+| Tools on `/mcp` without document materialization | 31 |
+| Estimated input/output schema tokens on `/mcp` | 19,168 |
+| Budget enforced by `/readyz` (`DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET`) | 19,456 |
 
 Odoo module, method, and access availability can lower the counts further.
 Schema estimates are not measured model usage. Update this table, and only this
@@ -59,6 +59,8 @@ Use `odoo_call_method` when a legitimate public Distribution method has no MCP s
 ## Semantic catalogue
 
 Current context helpers cover partners, record activities, project tasks, invoices, individual expenses, expense batches, Home attention, B2C orders, the rebuilt Accounting overview/reports, and the USL document archive. They return bounded high-signal context and warnings when optional linked context cannot be read.
+
+The invoice helper optionally accepts `company_change: {target_company_id, offset, limit}` for one native read-only snapshot of company choices, all line types, actual financial links, origins and evidence. Each page is an independent snapshot with readable-scope counts and explicit truncation or unavailability. Default invoice context remains unchanged. This option adds no company-change action or approval; generic native writes remain available under existing authority.
 
 Document tools use the Distribution archive facade for search, context, bounded text, similarity, and catalogues. Link/unlink operations call one public archive method. `documents_create_download_url` is a consequential action that issues a 30–900 second HTTPS bearer URL for one exact authorized document version; `documents_revoke_download_url` ends that capability early. Both are static on `/mcp` when available and deferred only on `/mcp/all`. Search and read tools report binary availability but never create or return bearer URLs. Issuance does not prove the client downloaded bytes; see the [qualification runbook](document-materialization.md).
 
@@ -195,3 +197,14 @@ Module, public-method, model-access, and feature predicates remove specialized t
 - Markdown is rendered in neither mode, and plain text sent with the flag true loses its line breaks. Both return a `warnings` entry rather than a refusal.
 - A body that carries the flag true, holds no HTML tag, and holds escaped tags such as `&lt;p&gt;` is decoded before the write, and the decode is reported in `warnings`. Without that guard the record stores visible markup and the call still succeeds.
 - `odoo_call_method` reports `execution.mode`. Odoo's published `api` classification selects the contract: `read` for a method Odoo states is readonly, `mutation` otherwise, including when the classification is unknown.
+
+
+## Original evidence handoff
+
+`documents_attach_source_evidence` uploads a host-supplied file reference or
+copies an existing attachment/archived original to an expense or accounting
+entry. Provide exactly one `file`, `source_attachment_id` or `source_document_id`.
+The original remains unchanged; the destination receives native owned evidence
+and optional main selection. See [source evidence handoff](source-evidence-handoff.md)
+for file inputs, exact-byte/checksum guarantees, native workflow boundaries,
+provenance, duplicates and ambiguous-outcome recovery.

@@ -82,6 +82,9 @@ interface ReadCallOptions extends SharedCallOptions {
 interface MutationCallOptions extends SharedCallOptions {
   kind: "mutation";
   reconciliation: MutationReconciliation;
+  // Only server-materialized binary fields opt into this transport bound.
+  // Generic tool arguments retain assertBoundedJson's normal 256 KiB limit.
+  requestBinary?: { field: string; byteSize: number };
 }
 
 type CallOptions = ReadCallOptions | MutationCallOptions;
@@ -118,6 +121,27 @@ export interface ApiDocumentOptions {
 
 export interface SurfaceDiscoveryOptions extends ApiDocumentOptions {
   previous?: OdooSurface;
+}
+
+export const MAX_BINARY_REQUEST_BYTES = 20 * 1024 * 1024;
+
+function assertCallPayload(kwargs: Record<string, unknown>, options: CallOptions): void {
+  const binary = options.kind === "mutation" ? options.requestBinary : undefined;
+  if (!binary) return assertBoundedJson(kwargs);
+  // Keep every generic depth/key/metadata byte constraint. The binary is the
+  // only field excluded from that byte count, and has its own exact bound.
+  assertBoundedJson({ ...kwargs, [binary.field]: "" });
+  const encoded = kwargs[binary.field];
+  if (!Number.isInteger(binary.byteSize) || binary.byteSize < 1 || binary.byteSize > MAX_BINARY_REQUEST_BYTES) {
+    throw new Error("Materialized binary must contain between one byte and 20 MiB");
+  }
+  if (typeof encoded !== "string" || encoded.length !== 4 * Math.ceil(binary.byteSize / 3)) {
+    throw new Error("Materialized binary size does not match its declared bytes");
+  }
+  const decoded = Buffer.from(encoded, "base64");
+  if (decoded.length !== binary.byteSize || decoded.toString("base64") !== encoded) {
+    throw new Error("Materialized binary must be canonical base64 with the declared byte size");
+  }
 }
 
 const RETRYABLE_STATUS = new Set([429, 502, 503, 504]);
@@ -442,7 +466,7 @@ export class OdooClient {
   ): Promise<T | MutationReceipt<T>> {
     ModelNameSchema.parse(model);
     MethodNameSchema.parse(method);
-    assertBoundedJson(kwargs);
+    assertCallPayload(kwargs, options);
     const mutationOptions = options.kind === "mutation" ? options : undefined;
     const kind = mutationOptions ? "mutation" : "read";
     const maximumAttempts = kind === "read" ? options.maxAttempts ?? 3 : 1;

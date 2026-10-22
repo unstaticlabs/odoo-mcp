@@ -45,7 +45,7 @@ describe("canonical capability registry", () => {
     expect(names).not.toContain("odoo_delete_records");
     expect(names).not.toContain("odoo_search_capabilities");
     expect(names).not.toContain("odoo_expand_record");
-    expect(registry.profileBudget("default")).toMatchObject({ tools: 32 });
+    expect(registry.profileBudget("default")).toMatchObject({ tools: 33 });
     expect(registry.profileBudget("default").schemaTokens)
       .toBeLessThanOrEqual(DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET);
   });
