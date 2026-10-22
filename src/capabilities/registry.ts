@@ -30,9 +30,10 @@ import { SERVER_VERSION } from "../version.js";
  * the write paths that take a body now state in their field descriptions who
  * escapes it, which is what an LLM client reads before it guesses. Consolidating
  * the catalogue onto the ORM substrate is expected to take this well below
- * 15,000 again.
+ * 15,000 again. Source-file handoff adds one explicitly measured tool without
+ * hiding existing tools or fields; its current budget is recorded in the catalogue.
  */
-export const DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET = 18_432;
+export const DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET = 19_456;
 
 export type CapabilityLayer = "generic" | "semantic" | "business_action";
 export type CapabilityEffect = "read" | "write" | "consequential" | "irreversible";
@@ -117,6 +118,7 @@ export interface CapabilitySpec<I extends ObjectSchema, O extends ObjectSchema>
   requiredAnyPublicMethods?: readonly string[];
   requiredModelAccess?: readonly ModelAccessRequirement[];
   requiredFeatures?: readonly string[];
+  fileParams?: readonly string[];
   input: I;
   output: O;
   handler(
@@ -188,6 +190,7 @@ export function defineCapability<I extends ObjectSchema, O extends ObjectSchema>
         "odoo/alwaysLoad": spec.alwaysLoad
       };
       if (options.deferLoading !== undefined) toolMeta.defer_loading = options.deferLoading;
+      if (spec.fileParams?.length) toolMeta["openai/fileParams"] = [...spec.fileParams];
       return server.registerTool(
         spec.name,
         {
