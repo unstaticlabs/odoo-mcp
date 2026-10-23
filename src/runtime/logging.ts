@@ -1,6 +1,7 @@
 export type EventName =
   | "analytics.configuration"
   | "auth.resolved"
+  | "auth.token.failed"
   | "auth.enrollment.completed"
   | "auth.enrollment.revoked"
   | "agent.snapshot.refresh"
