@@ -83,6 +83,33 @@ Direct HTTP performs the same two-request setup only on a credential's first use
 
 Default access-token life is one hour. Rotating refresh tokens last 180 days. An enrollment has a hard one-year ceiling and must then reconnect. `/oauth/revoke` removes the enrollment and associated access, refresh, and consent grants. Tokens fail immediately after the enrollment is removed or its configured target disappears.
 
+### When every hosted tool fails
+
+Check the token endpoint as well as `/readyz`. Readiness proves that the service
+and vault started; it does not prove that a hosted client can refresh its token.
+On 2026-10-24, issue [#189](https://github.com/unstaticlabs/odoo-mcp/issues/189)
+was reproduced as OpenAI refresh requests returning HTTP 400 while direct MCP
+calls and a still-valid OAuth access token worked. A private vault snapshot
+reproduced `invalid_client` because the client's metadata endpoint returned
+HTTP 404. The advertised signing-key endpoint also returned HTTP 404.
+
+The token boundary now classifies failed metadata/key fetches for an existing,
+enabled client as HTTP 503 `temporarily_unavailable`, with `Retry-After`, a safe
+`correlation_id`, `stage`, and `outcome: not_applied`. A token exchange cannot
+dispatch an Odoo business mutation. Other token failures retain their OAuth
+status/code and receive safe diagnostics; an unexpected server failure has
+`outcome: unknown`. Content-free `auth.token.failed` events distinguish client
+discovery, signing-key retrieval, and token validation. They never include
+tokens, assertions, client URLs, arguments, or record contents.
+
+A missing document for an unknown client remains `invalid_client`. No stale
+metadata, invented signing keys, authentication downgrade, grant extension, or
+automatic business-call replay is permitted. A client dependency outage still
+requires the provider to restore its documents; the diagnostic hotfix alone
+does not establish recovery. After restoration, verify an actual hosted tool
+call before claiming the connector works. Reconcile unknown-outcome writes
+against current records before replaying them.
+
 Run schema initialization/migrations and prewarm active enrollments before rollout:
 
 ```bash
