@@ -1,4 +1,4 @@
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createMcpExpressApp } from "@modelcontextprotocol/express";
 import { toNodeHandler } from "@modelcontextprotocol/node";
 import { createMcpHandler, type AuthInfo } from "@modelcontextprotocol/server";
@@ -25,6 +25,9 @@ import {
 } from "./runtime/server.js";
 
 type AuthenticatedRequest = Request & { auth?: AuthInfo };
+
+/** Static assets ship beside the compiled output; `dist/` and `src/` are both one level deep. */
+const ASSET_ROOT = fileURLToPath(new URL("../assets/", import.meta.url));
 
 function requestHeaders(request: Request): Headers {
   const headers = new Headers();
@@ -191,6 +194,15 @@ export function createHttpApp(
   app.get("/healthz", (_request, response) => {
     response.json({ status: "ok" });
   });
+  // The icon advertised in the MCP `Implementation` block must resolve without
+  // credentials; a client fetches it before it holds any.
+  for (const [route, file] of [["/icon.png", "icon.png"], ["/favicon.ico", "favicon.ico"]] as const) {
+    app.get(route, (_request, response, next) => {
+      response.sendFile(file, { root: ASSET_ROOT, maxAge: "1d" }, (error) => {
+        if (error) next(error);
+      });
+    });
+  }
   app.get("/readyz", async (_request, response) => {
     const budget = services.registry.profileBudget("default");
     let oauthStatus: "disabled" | "ready" | "error" = "disabled";
