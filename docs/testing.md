@@ -133,7 +133,10 @@ file bytes or fingerprints are read by the connector.
 
 The first native page uses `offset: 0, limit: 50`. When `truncated` is true,
 call `account.move.get_purchase_attachment_context` through `odoo_call_method`
-with the same bill `ids`, its `next_offset`, and a `limit` from 1 to 100.
+with the same bill `ids` and `kwargs: {offset: next_offset, limit: 50}`
+(`limit` may range from 1 to 100). Review action metadata uses native `ids`,
+not positional arguments; following wizard actions use the returned wizard
+`res_id` as their `ids`.
 Each page and the ordinary invoice context are separate read snapshots. Re-read
 before acting; native wizard checks remain authoritative if documents change.
 The response includes native-readable metadata and native action guidance,
@@ -150,3 +153,10 @@ surface and allows 90 seconds for a cold fixture API document. The test makes
 native reads only, checks automatic
 relevance and exact before/after record equality, and verifies no mutation or
 file-content route was used. Report unrelated opt-in skips separately.
+
+Seed PDF fixtures through native `ir.attachment.raw`; Odoo 19.3 ignores the
+removed `datas` input. Set the attachment company explicitly to its bill's
+company (or create it with that company selected). An administrator seeing a
+file does not prove that the delegated Agent can read it. Verify nonempty
+native document metadata through the intended Agent before qualifying the
+journey; retain native company rules rather than broadening fixture access.

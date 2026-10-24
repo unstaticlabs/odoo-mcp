@@ -322,7 +322,7 @@ export function registerSemanticCapabilities(registry: CapabilityRegistry, clien
     name: "accounting_get_invoice_context",
     title: "Get Invoice Context",
     description:
-      "Read one invoice or vendor bill with lines, payment state, activities, recent chatter, and archived-document links. Relevant bills include purchase_attachments and native review/separate-draft actions. Page truncated results via odoo_call_method: get_purchase_attachment_context, next_offset, limit 1–100. Opt into company_change with an explicit target for one native paged snapshot of financial relations, origins, evidence and native-compatible choices. Each page is a separate snapshot; no mappings or changes are applied.",
+      "Read one invoice or vendor bill with lines, payment state, activities, recent chatter, and archived-document links. Relevant bills include purchase_attachments and native review/separate-draft actions. Page truncated results via odoo_call_method: model account.move, method get_purchase_attachment_context, bill ids, kwargs {offset:next_offset,limit:50} (limit 1–100). Opt into company_change with an explicit target for one native paged snapshot of financial relations, origins, evidence and native-compatible choices. Each page is a separate snapshot; no mappings or changes are applied.",
     layer: "semantic",
     toolsets: ["accounting", "activities", "documents"],
     profiles: ["accounting"],

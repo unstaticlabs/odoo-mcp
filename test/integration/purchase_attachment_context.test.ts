@@ -52,6 +52,12 @@ describe.skipIf(!fixturePath)("disposable native purchase attachment context thr
           fields: ["write_date", "state", "company_id", "line_ids", "message_ids", "message_main_attachment_id"] })).records;
       }
       const before = await state();
+      const lineIds = [...new Set(before.flatMap((bill: { line_ids: number[] }) => bill.line_ids))];
+      async function ledger() {
+        return (await call("odoo_read_records", { model: "account.move.line", ids: lineIds,
+          fields: ["balance", "amount_currency", "amount_residual", "account_id", "company_id", "tax_ids"] })).records;
+      }
+      const ledgerBefore = await ledger();
       paths.length = 0;
       for (const [kind, id] of Object.entries(fixture.cases)) {
         const data = await call("accounting_get_invoice_context", { move_id: id });
@@ -61,13 +67,15 @@ describe.skipIf(!fixturePath)("disposable native purchase attachment context thr
           expect(snapshot).toMatchObject({ version: 1, bill_id: id, offset: 0, limit: 50 });
           expect(snapshot.documents.length).toBeGreaterThan(0);
           expect(snapshot.documents.length).toBeLessThanOrEqual(50);
-          expect(snapshot.actions.review).toMatchObject({ model: "account.move", method: "action_review_mail_grouping" });
+          expect(snapshot.actions.review).toMatchObject({ model: "account.move", method: "action_review_mail_grouping", ids: [id] });
+          expect(snapshot.actions.review).not.toHaveProperty("args");
           expect(snapshot.review_lines.choices).toEqual(["supporting", "main", "separate"]);
         } else expect(data.context).not.toHaveProperty("purchase_attachments");
       }
       expect(paths.filter((path) => path.endsWith("/get_purchase_attachment_context"))).toHaveLength(3);
       expect(paths.some((path) => /\/(write|create|action_\w+)$|\/web\/content/.test(path))).toBe(false);
       expect(await state()).toEqual(before);
+      expect(await ledger()).toEqual(ledgerBefore);
     } finally { await client.close(); await server.close(); await cache.close(); }
   }, 120_000);
 });

@@ -32,7 +32,7 @@ const snapshot = {
   version: 1, bill_id: 42, needs_review: true,
   documents: [{ id: 91, name: "[QA] invoice.pdf", role: "invoice", is_main: true, separated_bill_ids: [] }],
   offset: 0, limit: 50, count: 55, complete: false, truncated: true, next_offset: 50,
-  actions: { review: { model: "account.move", method: "action_review_mail_grouping", args: [[42]] } }
+  actions: { review: { model: "account.move", method: "action_review_mail_grouping", ids: [42] } }
 };
 async function read(client: Client) {
   return client.callTool({ name: "accounting_get_invoice_context", arguments: { move_id: 42, context: { allowed_company_ids: [2] } } });
