@@ -322,7 +322,7 @@ export function registerSemanticCapabilities(registry: CapabilityRegistry, clien
     name: "accounting_get_invoice_context",
     title: "Get Invoice Context",
     description:
-      "Read one invoice or vendor bill with lines, payment state, activities, recent chatter, and archived-document links. Opt into company_change with an explicit target for one native paged snapshot of financial relations, origins, evidence and native-compatible choices. Each page is a separate snapshot; no mappings or changes are applied.",
+      "Read one invoice or vendor bill with lines, payment state, activities, recent chatter, and archived-document links. Relevant bills include purchase_attachments and native review/separate-draft actions. Page truncated results via odoo_call_method: get_purchase_attachment_context, next_offset, limit 1–100. Opt into company_change with an explicit target for one native paged snapshot of financial relations, origins, evidence and native-compatible choices. Each page is a separate snapshot; no mappings or changes are applied.",
     layer: "semantic",
     toolsets: ["accounting", "activities", "documents"],
     profiles: ["accounting"],
@@ -385,9 +385,24 @@ export function registerSemanticCapabilities(registry: CapabilityRegistry, clien
       ]);
       const move = moves[0] as Record<string, unknown> | undefined;
       if (!move) throw new Error(`account.move,${move_id} was not found or is not readable`);
+      let purchaseAttachments: Record<string, unknown> | undefined;
+      const warnings = documentLinks.warning ? [documentLinks.warning] : [];
+      if (["in_invoice", "in_refund"].includes(String(move.move_type)) &&
+          context.availablePublicMethods?.get("account.move")?.has("get_purchase_attachment_context")) {
+        try {
+          const snapshot = await client.call<Record<string, unknown>>(context, "account.move", "get_purchase_attachment_context", {
+            ids: [move_id], offset: 0, limit: 50, context: common
+          }, { signal });
+          if (Object.keys(snapshot).length) purchaseAttachments = snapshot;
+        } catch (error) {
+          if (signal.aborted) throw error;
+          warnings.push("Purchase attachment context was unavailable. Read the native bill before reviewing or separating its files.");
+        }
+      }
       return {
-        data: { context: { invoice: { ...move, _ref: ref(context, "account.move", move_id, move.display_name) }, lines, activities, messages, document_links: documentLinks.records } },
-        ...(documentLinks.warning ? { warnings: [documentLinks.warning] } : {})
+        data: { context: { invoice: { ...move, _ref: ref(context, "account.move", move_id, move.display_name) }, lines, activities, messages, document_links: documentLinks.records,
+          ...(purchaseAttachments ? { purchase_attachments: purchaseAttachments } : {}) } },
+        ...(warnings.length ? { warnings } : {})
       };
     }
   }));
