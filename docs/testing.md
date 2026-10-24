@@ -98,6 +98,34 @@ Attach the following to a release/PR:
 - OAuth migration/backup/revoke check when enabled;
 - migration and rollback confirmation.
 
+## Printable bill terms fixture
+
+`test/integration/bill_terms.test.ts` uses an explicitly supplied disposable
+fixture, rather than choosing write targets from ordinary business records.
+Set `ODOO_INTEGRATION_BILL_TERMS_FIXTURE` to a private JSON file containing:
+`disposable: true`, a database beginning `odoo_fb_`, a loopback `origin`, a
+fixture Agent `key`, two selected `company_ids`, and `bills` with `0_posted`
+and `1_draft` IDs. Keep the file and key outside version control. It exercises
+actual native Agent discovery, MCP field help, cross-company draft terms,
+omission, a posted generic terms write, one internal note append, unchanged
+ledger lines and explicit clearing. Re-running intentionally appends a new
+synthetic note; it must never target production.
+
+Run `ODOO_INTEGRATION_BILL_TERMS_FIXTURE=<private-path> npm run test:integration`.
+Other integration groups retain their own opt-in environment requirements;
+report their skips separately from this fixture’s result.
+
+The bill-terms SDK fixture requires a complete advertised native surface before
+calling the shortcut. Fresh fixture registries can take more than the ordinary
+30-second request budget to build their API document. Its initial read-only
+discovery allows 90 seconds and fails explicitly if the surface is unavailable,
+rather than treating a partial generic-tool surface as a missing bill tool.
+Mutation attempts and production runtime timeouts are unchanged.
+Model discovery uses the native user's language and has no `context` input.
+The fixture checks meaningful English/French guidance there, then explicitly
+requests English `fields_get` through existing `odoo_call_method` for stable
+wording assertions. Do not expand the discovery tool schema for a fixture.
+
 ## Optional invoice company context
 
 `accounting_get_invoice_context` accepts an optional strict `company_change`
@@ -120,3 +148,43 @@ The native snapshot caps compact JSON at 262144 UTF-8 bytes, pages and relation
 references at 100 records, text at 1024 characters and reference labels at 512.
 The transport envelope is additional. See the Distribution's
 `docs/product/invoice-company-context.md` for field, evidence and scope semantics.
+
+## Relevant purchase attachment context
+
+Ordinary `accounting_get_invoice_context` reads automatically add
+`purchase_attachments` for a vendor bill or credit note whose native
+`get_purchase_attachment_context` result is nonempty. The authenticated Agent
+surface must advertise that method. Older backends, unknown discovery surfaces,
+customer invoices and ordinary ungrouped vendor bills retain the ordinary
+invoice context without a purchase-attachment section. No raw grouping JSON,
+file bytes or fingerprints are read by the connector.
+
+The first native page uses `offset: 0, limit: 50`. When `truncated` is true,
+call `account.move.get_purchase_attachment_context` through `odoo_call_method`
+with the same bill `ids` and `kwargs: {offset: next_offset, limit: 50}`
+(`limit` may range from 1 to 100). Review action metadata uses native `ids`,
+not positional arguments; following wizard actions use the returned wizard
+`res_id` as their `ids`.
+Each page and the ordinary invoice context are separate read snapshots. Re-read
+before acting; native wizard checks remain authoritative if documents change.
+The response includes native-readable metadata and native action guidance,
+not a new connector mutation or approval workflow. A failed optional read
+produces a bounded warning and retains the ordinary invoice context.
+
+The live SDK regression is opt-in with
+`ODOO_INTEGRATION_PURCHASE_ATTACHMENTS_FIXTURE=<private-path> npm run test:integration`.
+Its private JSON declares `disposable: true`, loopback `origin`, an `odoo_fb_`
+`database`, fixture Agent `key`, selected `company_ids`, and `cases` containing
+`grouped`, `grouped_refund`, `ordinary` and `customer` invoice IDs readable by that Agent. Keep
+credentials outside Git. Initial read-only discovery requires the complete native
+surface and allows 90 seconds for a cold fixture API document. The test makes
+native reads only, checks automatic
+relevance and exact before/after record equality, and verifies no mutation or
+file-content route was used. Report unrelated opt-in skips separately.
+
+Seed PDF fixtures through native `ir.attachment.raw`; Odoo 19.3 ignores the
+removed `datas` input. Set the attachment company explicitly to its bill's
+company (or create it with that company selected). An administrator seeing a
+file does not prove that the delegated Agent can read it. Verify nonempty
+native document metadata through the intended Agent before qualifying the
+journey; retain native company rules rather than broadening fixture access.
