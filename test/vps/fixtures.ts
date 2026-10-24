@@ -92,11 +92,12 @@ export function requestContext(accessMode: "read_only" | "read_write" | "mixed" 
       ["mail.activity", new Set(["activity_schedule"])],
       ["mail.thread", new Set(["action_archive", "message_post", "message_subscribe", "message_unsubscribe"])],
       ["account.move", writeAccess
-        ? new Set(["configure_draft_vendor_bill"])
+        ? new Set(["configure_draft_vendor_bill", "attach_source_evidence"])
         : new Set<string>()],
       ["hr.expense", writeAccess
         ? new Set([
             "configure_draft_expense",
+            "attach_source_evidence",
             "split_draft_expense",
             "configure_draft_expense_family",
             "action_reset",

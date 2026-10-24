@@ -40,6 +40,8 @@
   },
   "required_actions": [
     "account.account.search_read",
+    "account.move.attach_source_evidence",
+    "account.move.get_company_change_context",
     "account.move.line.formatted_read_group",
     "account.move.line.search_count",
     "account.move.line.search_read",
@@ -51,6 +53,7 @@
     "b2c.order.read",
     "b2c.order.source.search_read",
     "b2c.payment.event.search_read",
+    "hr.expense.attach_source_evidence",
     "hr.expense.configure_draft_expense_family",
     "hr.expense.read",
     "hr.expense.split_draft_expense",

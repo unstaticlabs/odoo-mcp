@@ -114,3 +114,26 @@ synthetic note; it must never target production.
 Run `ODOO_INTEGRATION_BILL_TERMS_FIXTURE=<private-path> npm run test:integration`.
 Other integration groups retain their own opt-in environment requirements;
 report their skips separately from this fixture’s result.
+
+## Optional invoice company context
+
+`accounting_get_invoice_context` accepts an optional strict `company_change`
+object with an explicit `target_company_id`, `offset` (0–1000000, default 0) and
+`limit` (1–100, default 50). This mode forwards exactly one
+`account.move.get_company_change_context` call and returns the native result as
+`context.company_change`, plus a canonical `invoice_ref`. It omits the ordinary
+parallel activity/chatter reads so that the optional financial snapshot has one
+native transaction boundary. Without the option the existing handler is unchanged.
+
+Every page is a separate snapshot; compare native write dates and reread after
+ordinary native changes. Counts and `complete`/`truncated` statuses apply to the
+readable scope only. Inspect unavailable fields, optional sections and uncovered
+company relations. Paid labels do not prove reconciliation; missing evidence is
+information. Candidate IDs use native company domains and never match accounts
+or taxes by code/name. Generic writes and native public methods retain their
+existing authority. No company-change action or approval is introduced.
+
+The native snapshot caps compact JSON at 262144 UTF-8 bytes, pages and relation
+references at 100 records, text at 1024 characters and reference labels at 512.
+The transport envelope is additional. See the Distribution's
+`docs/product/invoice-company-context.md` for field, evidence and scope semantics.

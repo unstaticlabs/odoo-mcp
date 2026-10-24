@@ -11,6 +11,49 @@ afterEach(async () => {
 });
 
 describe("Distribution semantic and business capabilities", () => {
+  it("reads company-change context with exactly one native snapshot call", async () => {
+    const snapshot = { schema_version: 1, invoice: { model: "account.move", id: 42, fields: { state: "draft" } },
+      lines: { visible_count: 103, status: "truncated", records: [] },
+      snapshot: { boundary: "single_native_rpc", pages_are_independent_snapshots: true } };
+    const fetcher = vi.fn<typeof fetch>(async () => Response.json(snapshot));
+    const server = createCapabilityRegistry(new OdooClient(8, 1024 * 1024, fetcher))
+      .createServer({ ...requestContext(), profile: "accounting" });
+    const client = new Client({ name: "company-context-test", version: "1" });
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    await server.connect(st); await client.connect(ct);
+    closeCallbacks.push(async () => { await client.close(); await server.close(); });
+    const result = await client.callTool({ name: "accounting_get_invoice_context", arguments: {
+      move_id: 42, company_change: { target_company_id: 3, offset: 100, limit: 25 },
+      context: { allowed_company_ids: [3] },
+    } });
+    expect(result.isError).not.toBe(true);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    const [url, init] = fetcher.mock.calls[0]!;
+    expect(String(url).endsWith("/json/2/account.move/get_company_change_context")).toBe(true);
+    expect(JSON.parse(String(init?.body))).toMatchObject({ ids: [42], target_company_id: 3, offset: 100, limit: 25 });
+    expect(result.structuredContent).toMatchObject({ data: { context: { company_change: snapshot } } });
+  });
+
+  it("keeps the ordinary invoice context contract when company_change is absent", async () => {
+    const fetcher = vi.fn<typeof fetch>(async (url) => Response.json(
+      String(url).endsWith("/account.move/read") ? [{ id: 42, display_name: "[QA] Bill" }] : []));
+    const server = createCapabilityRegistry(new OdooClient(8, 1024 * 1024, fetcher))
+      .createServer({ ...requestContext(), profile: "accounting" });
+    const client = new Client({ name: "legacy-invoice-context-test", version: "1" });
+    const [ct, st] = InMemoryTransport.createLinkedPair();
+    await server.connect(st); await client.connect(ct);
+    closeCallbacks.push(async () => { await client.close(); await server.close(); });
+    const result = await client.callTool({ name: "accounting_get_invoice_context", arguments: { move_id: 42 } });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({ data: { context: {
+      invoice: { id: 42, _ref: { model: "account.move", id: 42 } }, lines: [], activities: [], messages: [], document_links: []
+    } } });
+    expect(fetcher.mock.calls.some(([url]) => String(url).includes("get_company_change_context"))).toBe(false);
+    const lineCall = fetcher.mock.calls.find(([url]) => String(url).endsWith("/account.move.line/search_read"));
+    expect(JSON.parse(String(lineCall?.[1]?.body))).toMatchObject({ limit: 100,
+      domain: [["move_id", "=", 42], ["display_type", "in", ["product", "tax", "payment_term"]]] });
+  });
+
   it("executes a document link as exactly one Odoo-side mutation", async () => {
     const fetcher = vi.fn<typeof fetch>(async () => Response.json({ id: 91 }));
     const odoo = new OdooClient(8, 1024 * 1024, fetcher);

@@ -14,6 +14,8 @@ import { resolveDirectConnection, type RuntimeConfig } from "../runtime/config.j
 import { emitEvent } from "../runtime/logging.js";
 import type { RuntimeServices } from "../runtime/server.js";
 import { CredentialVault, type ValidatedEnrollment } from "./vault.js";
+import { oauthDependencyBoundary } from "./dependencies.js";
+import type { ClientMetadataResourceFetch } from "@better-auth/oauth-provider";
 
 // Node enables socket family autoselection (RFC 8305) by default since v20.
 // An autoselecting socket calls its custom DNS `lookup` with `all: true` and
@@ -146,10 +148,15 @@ function bearerAuthInfo(claims: JWTPayload, principal: ReturnType<CredentialVaul
   };
 }
 
-export function createOAuthService(config: RuntimeConfig, services: RuntimeServices): OAuthService | null {
+export function createOAuthService(
+  config: RuntimeConfig,
+  services: RuntimeServices,
+  dependencies: { fetchClientMetadataResource?: ClientMetadataResourceFetch } = {}
+): OAuthService | null {
   const oauth = config.oauth;
   if (!oauth) return null;
   const vault = new CredentialVault(oauth, config);
+  const dependencyBoundary = oauthDependencyBoundary(vault, dependencies.fetchClientMetadataResource ?? fetchClientMetadataResource);
   services.accessCache.setPersistentStore(vault);
   const resource = `${config.publicOrigin}/mcp`;
 
@@ -179,7 +186,7 @@ export function createOAuthService(config: RuntimeConfig, services: RuntimeServi
         }
       }),
       cimd({
-        fetchClientMetadataResource,
+        fetchClientMetadataResource: dependencyBoundary.fetchResource,
         metadataProfile: "mcp-2026-07-28"
       })
     ]
@@ -448,7 +455,7 @@ button.addEventListener('click', async () => { button.disabled = true; const res
   return {
     vault,
     ready,
-    authFetch: async (request) => { await ready; return await auth.handler(request); },
+    authFetch: async (request) => { await ready; return await dependencyBoundary.run(request, auth.handler); },
     enrollmentFetch,
     consentFetch,
     revokeFetch,
