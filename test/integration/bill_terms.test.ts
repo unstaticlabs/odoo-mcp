@@ -49,8 +49,14 @@ describe.skipIf(!fixturePath)("disposable bill terms through the native Agent AP
       const metadata = await call("odoo_describe_model", {
         model: "account.move", field_names: ["narration"], include_methods: false, detail: "full"
       });
-      expect(metadata.data.fields.narration.help).toContain("printed");
-      expect(metadata.data.fields.narration.help).toContain("Chatter");
+      expect(metadata.data.fields.narration.help).toMatch(/print|imprim|condition/i);
+      expect(metadata.data.fields.narration.help).toMatch(/chatter/i);
+      const english = await call("odoo_call_method", {
+        model: "account.move", method: "fields_get", kwargs: { allfields: ["narration"], attributes: ["help"] },
+        context: rpcContext
+      });
+      expect(english.data.result.narration.help).toContain("printed");
+      expect(english.data.result.narration.help).toContain("Chatter");
       const draft = fixture.bills["1_draft"]!;
       const posted = fixture.bills["0_posted"]!;
       const [before] = await read("account.move", [posted], ["narration", "line_ids", "message_ids", "company_id"]);

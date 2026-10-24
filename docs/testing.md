@@ -144,3 +144,7 @@ calling the shortcut. Fresh fixture registries can take more than the ordinary
 discovery allows 90 seconds and fails explicitly if the surface is unavailable,
 rather than treating a partial generic-tool surface as a missing bill tool.
 Mutation attempts and production runtime timeouts are unchanged.
+Model discovery uses the native user's language and has no `context` input.
+The fixture checks meaningful English/French guidance there, then explicitly
+requests English `fields_get` through existing `odoo_call_method` for stable
+wording assertions. Do not expand the discovery tool schema for a fixture.
