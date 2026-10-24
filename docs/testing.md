@@ -120,3 +120,31 @@ The native snapshot caps compact JSON at 262144 UTF-8 bytes, pages and relation
 references at 100 records, text at 1024 characters and reference labels at 512.
 The transport envelope is additional. See the Distribution's
 `docs/product/invoice-company-context.md` for field, evidence and scope semantics.
+
+## Relevant purchase attachment context
+
+Ordinary `accounting_get_invoice_context` reads automatically add
+`purchase_attachments` for a vendor bill or credit note whose native
+`get_purchase_attachment_context` result is nonempty. The authenticated Agent
+surface must advertise that method. Older backends, unknown discovery surfaces,
+customer invoices and ordinary ungrouped vendor bills retain the ordinary
+invoice context without a purchase-attachment section. No raw grouping JSON,
+file bytes or fingerprints are read by the connector.
+
+The first native page uses `offset: 0, limit: 50`. When `truncated` is true,
+call `account.move.get_purchase_attachment_context` through `odoo_call_method`
+with the same bill `ids`, its `next_offset`, and a `limit` from 1 to 100.
+Each page and the ordinary invoice context are separate read snapshots. Re-read
+before acting; native wizard checks remain authoritative if documents change.
+The response includes native-readable metadata and native action guidance,
+not a new connector mutation or approval workflow. A failed optional read
+produces a bounded warning and retains the ordinary invoice context.
+
+The live SDK regression is opt-in with
+`ODOO_INTEGRATION_PURCHASE_ATTACHMENTS_FIXTURE=<private-path> npm run test:integration`.
+Its private JSON declares `disposable: true`, loopback `origin`, an `odoo_fb_`
+`database`, fixture Agent `key`, selected `company_ids`, and `cases` containing
+`grouped`, `ordinary` and `customer` invoice IDs readable by that Agent. Keep
+credentials outside Git. The test makes native reads only, checks automatic
+relevance and exact before/after record equality, and verifies no mutation or
+file-content route was used. Report unrelated opt-in skips separately.
