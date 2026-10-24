@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { billTermsWarnings } from "./bill_terms.js";
 import { OdooClient } from "../odoo/client.js";
 import {
   attributedContext,
@@ -494,7 +495,7 @@ export function registerOperationalCapabilities(registry: CapabilityRegistry, cl
     name: "expenses_configure_draft_vendor_bill",
     title: "Configure Draft Vendor Bill",
     description:
-      "Atomically update curated header fields on one draft vendor bill or credit note, patch its existing product lines, and add product lines the import left out, including taxes and analytics. Odoo validates company, ownership, locks, access, type, and state, then returns recomputed totals, tax lines, and payable lines. Use line_creates for a bill whose document exists but whose lines are missing. This never posts, pays, reconciles, deletes user-entered lines, or accepts generated lines as input.",
+      "Atomically update curated header fields on one draft vendor bill or credit note, patch its existing product lines, and add product lines the import left out, including taxes and analytics. Odoo validates company, ownership, locks, access, type, and state, then returns recomputed totals, tax lines, and payable lines. Use line_creates for a bill whose document exists but whose lines are missing. terms_and_conditions is printable contract text, not internal commentary; use odoo_add_internal_note for internal Chatter notes in a separate action. This never posts, pays, reconciles, deletes user-entered lines, or accepts generated lines as input.",
     layer: "business_action",
     toolsets: ["expenses", "accounting"],
     profiles: ["accounting"],
@@ -513,15 +514,15 @@ export function registerOperationalCapabilities(registry: CapabilityRegistry, cl
       invoice_date: DateSchema.optional(),
       accounting_date: DateSchema.optional(),
       invoice_date_due: DateSchema.optional(),
-      reference: z.string().max(500).optional(),
+      reference: z.string().max(500).describe("Supplier document reference (native ref), not internal commentary.").optional(),
       fiscal_position_id: PositiveIdSchema.optional(),
       currency_id: PositiveIdSchema.optional(),
-      narration: z.string().max(50_000).optional(),
-      payment_reference: z.string().max(500).optional(),
+      terms_and_conditions: z.string().max(50_000).describe("Printable contract Terms and Conditions (native narration). Use odoo_add_internal_note for internal commentary; omit to retain existing terms.").optional(),
+      payment_reference: z.string().max(500).describe("Reference used to identify payment, not an accounting note.").optional(),
       review_state: z.enum(["no_review", "todo", "reviewed", "supervised", "anomaly"]).optional(),
       line_patches: z.array(z.object({
         line_id: PositiveIdSchema,
-        name: z.string().trim().min(1).max(2_000).optional(),
+        name: z.string().trim().min(1).max(2_000).describe("Product or service line label printed on the document.").optional(),
         account_id: PositiveIdSchema.optional(),
         quantity: z.number().finite().optional(),
         price_unit: z.number().finite().optional(),
@@ -532,7 +533,7 @@ export function registerOperationalCapabilities(registry: CapabilityRegistry, cl
           .optional()
       }).strict()).max(100).optional(),
       line_creates: z.array(z.object({
-        name: z.string().trim().min(1).max(2_000),
+        name: z.string().trim().min(1).max(2_000).describe("Product or service line label printed on the document."),
         price_unit: z.number().finite(),
         product_id: PositiveIdSchema.optional(),
         account_id: PositiveIdSchema.optional(),
@@ -556,7 +557,7 @@ export function registerOperationalCapabilities(registry: CapabilityRegistry, cl
         ...(input.reference !== undefined ? { ref: input.reference } : {}),
         ...(input.fiscal_position_id !== undefined ? { fiscal_position_id: input.fiscal_position_id } : {}),
         ...(input.currency_id !== undefined ? { currency_id: input.currency_id } : {}),
-        ...(input.narration !== undefined ? { narration: input.narration } : {}),
+        ...(input.terms_and_conditions !== undefined ? { narration: input.terms_and_conditions } : {}),
         ...(input.payment_reference !== undefined ? { payment_reference: input.payment_reference } : {}),
         ...(input.review_state !== undefined ? { review_state: input.review_state } : {})
       };
@@ -594,7 +595,8 @@ export function registerOperationalCapabilities(registry: CapabilityRegistry, cl
           correlation_id: context.correlationId,
           outcome: "succeeded" as const,
           record: recordRef(context, "account.move", input.bill_id, result.bill.display_name)
-        }
+        },
+        warnings: billTermsWarnings("account.move", [headerValues])
       }));
     }
   }));

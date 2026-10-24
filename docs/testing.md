@@ -98,6 +98,23 @@ Attach the following to a release/PR:
 - OAuth migration/backup/revoke check when enabled;
 - migration and rollback confirmation.
 
+## Printable bill terms fixture
+
+`test/integration/bill_terms.test.ts` uses an explicitly supplied disposable
+fixture, rather than choosing write targets from ordinary business records.
+Set `ODOO_INTEGRATION_BILL_TERMS_FIXTURE` to a private JSON file containing:
+`disposable: true`, a database beginning `odoo_fb_`, a loopback `origin`, a
+fixture Agent `key`, two selected `company_ids`, and `bills` with `0_posted`
+and `1_draft` IDs. Keep the file and key outside version control. It exercises
+actual native Agent discovery, MCP field help, cross-company draft terms,
+omission, a posted generic terms write, one internal note append, unchanged
+ledger lines and explicit clearing. Re-running intentionally appends a new
+synthetic note; it must never target production.
+
+Run `ODOO_INTEGRATION_BILL_TERMS_FIXTURE=<private-path> npm run test:integration`.
+Other integration groups retain their own opt-in environment requirements;
+report their skips separately from this fixture’s result.
+
 ## Optional invoice company context
 
 `accounting_get_invoice_context` accepts an optional strict `company_change`
@@ -120,3 +137,10 @@ The native snapshot caps compact JSON at 262144 UTF-8 bytes, pages and relation
 references at 100 records, text at 1024 characters and reference labels at 512.
 The transport envelope is additional. See the Distribution's
 `docs/product/invoice-company-context.md` for field, evidence and scope semantics.
+
+The bill-terms SDK fixture requires a complete advertised native surface before
+calling the shortcut. Fresh fixture registries can take more than the ordinary
+30-second request budget to build their API document. Its initial read-only
+discovery allows 90 seconds and fails explicitly if the surface is unavailable,
+rather than treating a partial generic-tool surface as a missing bill tool.
+Mutation attempts and production runtime timeouts are unchanged.
