@@ -11,7 +11,7 @@ describe.skipIf(!fixturePath)("disposable native purchase attachment context thr
   it("discovers affected bills automatically without adding context to ordinary/customer invoices or changing records", async () => {
     const fixture = JSON.parse(readFileSync(fixturePath!, "utf8")) as {
       disposable: boolean; database: string; origin: string; key: string;
-      company_ids: number[]; cases: { grouped: number; ordinary: number; customer: number };
+      company_ids: number[]; cases: { grouped: number; grouped_refund: number; ordinary: number; customer: number };
     };
     expect(fixture.disposable).toBe(true);
     expect(fixture.database).toMatch(/^odoo_fb_/);
@@ -56,7 +56,7 @@ describe.skipIf(!fixturePath)("disposable native purchase attachment context thr
       for (const [kind, id] of Object.entries(fixture.cases)) {
         const data = await call("accounting_get_invoice_context", { move_id: id });
         expect(data.context.invoice.id).toBe(id);
-        if (kind === "grouped") {
+        if (kind.startsWith("grouped")) {
           const snapshot = data.context.purchase_attachments;
           expect(snapshot).toMatchObject({ version: 1, bill_id: id, offset: 0, limit: 50 });
           expect(snapshot.documents.length).toBeGreaterThan(0);
@@ -65,7 +65,7 @@ describe.skipIf(!fixturePath)("disposable native purchase attachment context thr
           expect(snapshot.review_lines.choices).toEqual(["supporting", "main", "separate"]);
         } else expect(data.context).not.toHaveProperty("purchase_attachments");
       }
-      expect(paths.filter((path) => path.endsWith("/get_purchase_attachment_context"))).toHaveLength(2);
+      expect(paths.filter((path) => path.endsWith("/get_purchase_attachment_context"))).toHaveLength(3);
       expect(paths.some((path) => /\/(write|create|action_\w+)$|\/web\/content/.test(path))).toBe(false);
       expect(await state()).toEqual(before);
     } finally { await client.close(); await server.close(); await cache.close(); }

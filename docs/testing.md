@@ -144,7 +144,7 @@ The live SDK regression is opt-in with
 `ODOO_INTEGRATION_PURCHASE_ATTACHMENTS_FIXTURE=<private-path> npm run test:integration`.
 Its private JSON declares `disposable: true`, loopback `origin`, an `odoo_fb_`
 `database`, fixture Agent `key`, selected `company_ids`, and `cases` containing
-`grouped`, `ordinary` and `customer` invoice IDs readable by that Agent. Keep
+`grouped`, `grouped_refund`, `ordinary` and `customer` invoice IDs readable by that Agent. Keep
 credentials outside Git. Initial read-only discovery requires the complete native
 surface and allows 90 seconds for a cold fixture API document. The test makes
 native reads only, checks automatic
