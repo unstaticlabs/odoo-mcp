@@ -28,7 +28,7 @@ describe.skipIf(!fixturePath)("disposable native purchase attachment context thr
     };
     const odoo = new OdooClient(8, 1024 * 1024, fetcher);
     const cache = new AgentAccessSnapshotCache(odoo);
-    const access = await cache.initialize(context);
+    const access = await cache.initialize(context, undefined, { requireSurface: true, timeoutMs: 90_000 });
     context.agentIdentity = access.identity;
     context.availableModules = access.surface?.modules ?? null;
     context.availablePublicMethods = access.surface?.publicMethods ?? null;

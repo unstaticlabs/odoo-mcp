@@ -145,6 +145,8 @@ The live SDK regression is opt-in with
 Its private JSON declares `disposable: true`, loopback `origin`, an `odoo_fb_`
 `database`, fixture Agent `key`, selected `company_ids`, and `cases` containing
 `grouped`, `ordinary` and `customer` invoice IDs readable by that Agent. Keep
-credentials outside Git. The test makes native reads only, checks automatic
+credentials outside Git. Initial read-only discovery requires the complete native
+surface and allows 90 seconds for a cold fixture API document. The test makes
+native reads only, checks automatic
 relevance and exact before/after record equality, and verifies no mutation or
 file-content route was used. Report unrelated opt-in skips separately.
