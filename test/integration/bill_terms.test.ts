@@ -25,7 +25,7 @@ describe.skipIf(!fixturePath)("disposable bill terms through the native Agent AP
     };
     const odoo = new OdooClient();
     const cache = new AgentAccessSnapshotCache(odoo);
-    const snapshot = await cache.initialize(context);
+    const snapshot = await cache.initialize(context, undefined, { requireSurface: true, timeoutMs: 90_000 });
     context.agentIdentity = snapshot.identity;
     context.availableModules = snapshot.surface?.modules ?? null;
     context.availablePublicMethods = snapshot.surface?.publicMethods ?? null;

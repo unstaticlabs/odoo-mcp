@@ -137,3 +137,10 @@ The native snapshot caps compact JSON at 262144 UTF-8 bytes, pages and relation
 references at 100 records, text at 1024 characters and reference labels at 512.
 The transport envelope is additional. See the Distribution's
 `docs/product/invoice-company-context.md` for field, evidence and scope semantics.
+
+The bill-terms SDK fixture requires a complete advertised native surface before
+calling the shortcut. Fresh fixture registries can take more than the ordinary
+30-second request budget to build their API document. Its initial read-only
+discovery allows 90 seconds and fails explicitly if the surface is unavailable,
+rather than treating a partial generic-tool surface as a missing bill tool.
+Mutation attempts and production runtime timeouts are unchanged.
