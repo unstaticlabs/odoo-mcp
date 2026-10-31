@@ -32,14 +32,22 @@ export function loadCompatibility(root = process.cwd()) {
   if (identity.method !== "usl.agent.current_identity" || identity.principal_kind !== "agent" || !Number.isInteger(identity.schema_version) || identity.schema_version < 1) fail("required_agent_identity is invalid");
   if (!sortedUnique(identity.fields) || !identity.fields.includes("owner") || !identity.fields.includes("effective_applications")) fail("required_agent_identity fields are invalid");
   const sourceActions = new Set();
+  const sourceModules = new Set();
+  // Literal calls may span lines and generic result types may contain
+  // semicolons; neither changes the RPC dependency.
   for (const name of readdirSync(resolve(root, "src/capabilities"))) {
     if (!name.endsWith(".ts")) continue;
     const source = readFileSync(resolve(root, "src/capabilities", name), "utf8");
-    const pattern = /client\.call(?:<[^;]*?>)?\(context,\s*"([^"]+)",\s*"([^"]+)"/gs;
-    for (const match of source.matchAll(pattern)) sourceActions.add(`${match[1]}.${match[2]}`);
+    const calls = /client\.call(?:<[\s\S]*?>)?\(\s*context\s*,\s*"([^"]+)"\s*,\s*"([^"]+)"/g;
+    for (const match of source.matchAll(calls)) sourceActions.add(`${match[1]}.${match[2]}`);
+    for (const match of source.matchAll(/requiredModules:\s*\[([^\]]*)\]/g)) {
+      for (const module of match[1].matchAll(/"([^"]+)"/g)) sourceModules.add(module[1]);
+    }
   }
   const missingActions = [...sourceActions].filter((action) => !value.required_actions.includes(action)).sort();
   if (missingActions.length) fail(`literal capability actions are missing: ${missingActions.join(", ")}`);
+  const missingModules = [...sourceModules].filter((module) => !value.required_modules.includes(module)).sort();
+  if (missingModules.length) fail(`capability modules are missing: ${missingModules.join(", ")}`);
   if (value.oauth_vault?.schema_version !== 1 || value.oauth_vault?.migration !== "npm run oauth:migrate") fail("OAuth vault migration contract is invalid");
   return { value, raw, digest: sha256(raw) };
 }
