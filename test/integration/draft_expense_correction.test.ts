@@ -11,7 +11,9 @@ const enabled = process.env.ODOO_INTEGRATION_MUTATION_QA === "1" && Boolean(fixt
 describe.skipIf(!enabled).sequential("synthetic managed Agent draft expense correction", () => {
   let client: Client;
   let cleanup: () => Promise<void>;
-  let input: { source_company_id: number; target_company_id: number; target_employee_id: number; target_account_id: number; expense_ids: number[]; posted_expense_id: number };
+  let input: { source_company_id: number; target_company_id: number; target_employee_id: number; target_account_id: number; expense_ids: number[]; posted_expense_id: number;
+    financial_fixture?: { expense_id: number; values: Record<string, unknown>; before: Record<string, unknown>; after: Record<string, unknown> };
+  };
 
   beforeAll(async () => {
     input = JSON.parse(fixture!);
@@ -50,8 +52,25 @@ describe.skipIf(!enabled).sequential("synthetic managed Agent draft expense corr
     }});
   }
 
+  const financialFields = [
+    "id", "state", "company_id", "employee_id", "date", "currency_id", "company_currency_id",
+    "product_id", "account_id", "tax_ids", "analytic_distribution", "quantity", "price_unit", "payment_mode",
+    "expense_batch_id", "vendor_id", "existing_bill_id", "has_existing_bill", "total_amount_currency",
+    "untaxed_amount_currency", "tax_amount_currency", "total_amount", "untaxed_amount", "tax_amount"
+  ];
+  async function readFinancialSnapshot(expenseId: number) {
+    const result = await client.callTool({ name: "odoo_read_records", arguments: {
+      model: "hr.expense", ids: [expenseId], fields: financialFields,
+      context: { allowed_company_ids: [input.source_company_id, input.target_company_id] }
+    }});
+    expect(result.isError, JSON.stringify(result)).not.toBe(true);
+    const record = (result.structuredContent as { data: { records: Record<string, unknown>[] } }).data.records[0]!;
+    return Object.fromEntries(financialFields.map((field) => [field, record[field]]));
+  }
+
   it("corrects owned evidence and batch membership, and reads the persisted target pair", async () => {
     const id = input.expense_ids[0]!;
+    const before = await readFinancialSnapshot(id);
     const result = await client.callTool({ name: "expenses_update_draft", arguments: {
       expense_id: id, company_id: input.target_company_id, employee_id: input.target_employee_id,
       product_id: false, account_id: input.target_account_id, tax_ids: [], analytic_distribution: {}, expense_batch_id: false,
@@ -65,10 +84,39 @@ describe.skipIf(!enabled).sequential("synthetic managed Agent draft expense corr
         total_amount_currency: 42, message_main_attachment_id: expect.any(Array)
       }
     }});
+    const after = await readFinancialSnapshot(id);
+    const comparison = (result.structuredContent as {
+      data: { financial_comparison: { before: Record<string, unknown>; after: Record<string, unknown> } }
+    }).data.financial_comparison;
+    expect(comparison).toEqual({ before, after });
+    expect(comparison.after).toMatchObject({
+      account_id: [input.target_account_id, expect.any(String)], tax_ids: [],
+      total_amount_currency: 42, untaxed_amount_currency: 42, tax_amount_currency: 0, tax_amount: 0
+    });
     expect((await read(id)).structuredContent).toMatchObject({ data: { records: [{
       id, state: "draft", company_id: [input.target_company_id, expect.any(String)],
       employee_id: [input.target_employee_id, expect.any(String)], expense_batch_id: false, total_amount_currency: 42
     }] } });
+  }, 60_000);
+
+  it("reports independently expected tax arithmetic from the native transaction", async ({ skip }) => {
+    if (!input.financial_fixture) skip();
+    const financial = input.financial_fixture!;
+    const before = await readFinancialSnapshot(financial.expense_id);
+    expect(before).toMatchObject(financial.before);
+    const result = await client.callTool({ name: "expenses_update_draft", arguments: {
+      expense_id: financial.expense_id, ...financial.values,
+      context: { allowed_company_ids: [input.source_company_id, input.target_company_id] }
+    }});
+    expect(result.isError, JSON.stringify(result)).not.toBe(true);
+    const after = await readFinancialSnapshot(financial.expense_id);
+    expect(after).toMatchObject(financial.after);
+    const comparison = (result.structuredContent as {
+      data: { financial_comparison: { before: Record<string, unknown>; after: Record<string, unknown> } }
+    }).data.financial_comparison;
+    expect(comparison).toEqual({ before, after });
+    expect(comparison.before).toMatchObject(financial.before);
+    expect(comparison.after).toMatchObject(financial.after);
   }, 60_000);
 
   it("leaves an incompatible existing account and company unchanged after denial", async () => {

@@ -460,6 +460,40 @@ describe("atomic draft expense correction", () => {
       tax_ids: [], analytic_distribution: {}, expense_batch_id: false
     }, context: { allowed_company_ids: [1, 2] } });
     expect(result.structuredContent).toMatchObject({ data: { result: true, expense, outcome: "succeeded", record: { model: "hr.expense", id: 91 } } });
+    expect((result.structuredContent as { data: object }).data).not.toHaveProperty("financial_comparison");
+  });
+
+  it("forwards native financial snapshots unchanged through the same mutation", async () => {
+    const before = {
+      id: 91, state: "draft", company_id: [1, "[QA] Source"], employee_id: [11, "[QA] Employee"],
+      date: "2026-10-15", currency_id: [3, "[QA] Document currency"], company_currency_id: [4, "[QA] Company currency"],
+      product_id: false, account_id: [21, "[QA] Expense account"], tax_ids: [31], analytic_distribution: false,
+      quantity: 2, price_unit: 60, payment_mode: "own_account", expense_batch_id: false,
+      vendor_id: false, existing_bill_id: false, has_existing_bill: false,
+      total_amount_currency: 120, untaxed_amount_currency: 100, tax_amount_currency: 20,
+      total_amount: 90, untaxed_amount: 75, tax_amount: 15
+    };
+    const after = {
+      ...before, company_id: [2, "[QA] Target"], employee_id: [12, "[QA] Employee"],
+      company_currency_id: [5, "[QA] Target currency"], tax_ids: [], analytic_distribution: {},
+      total_amount_currency: 120, untaxed_amount_currency: 120, tax_amount_currency: 0,
+      total_amount: 60, untaxed_amount: 60, tax_amount: 0
+    };
+    const financial_comparison = { before, after };
+    const expense = { id: 91, display_name: "[QA] Corrected draft" };
+    const fetcher = vi.fn<typeof fetch>(async () => Response.json({ result: true, expense, financial_comparison }));
+    const client = await connected(fetcher);
+    const { tools } = await client.listTools();
+    const schema = tools.find((tool) => tool.name === "expenses_update_draft")!.outputSchema!;
+    expect(JSON.stringify(schema)).toContain('"financial_comparison"');
+    const result = await client.callTool({ name: "expenses_update_draft", arguments: {
+      expense_id: 91, company_id: 2, employee_id: 12, tax_ids: [], context: { allowed_company_ids: [1, 2] }
+    }});
+    expect(result.isError).not.toBe(true);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(result.structuredContent).toMatchObject({ data: { result: true, expense, financial_comparison } });
+    const data = (result.structuredContent as { data: { financial_comparison: unknown } }).data;
+    expect(data.financial_comparison).toEqual(financial_comparison);
   });
 
   it("does not replay a correction when the connection loses the response", async () => {

@@ -53,6 +53,16 @@ Before production, instantiate a disposable database from `evals/fixtures/usl-ev
 
 Use separate identities for broad read, normal agent write, accounting approval, and irreversible-action denial. Never point mutating fixtures at production data.
 
+### Managed Agent draft expense correction fixture
+
+The native draft expense correction fixture requires an owner-approved Internal
+User (`base.group_user`) delegation with `read_only` access, as well as the
+expense roles needed by the scenario. Initialize `usl.agent.current_identity`
+and the MCP Agent access snapshot before attempting a mutation. Without that
+delegation, identity bootstrap can fail before the expense action is reached;
+report this as a fixture authorization failure, not a skipped or passing product
+test. Keep these grants within the disposable QA identity.
+
 ### Project attachment bytes
 
 `test/integration/project_attachment.test.ts` uploads through `projects_attach_file`
