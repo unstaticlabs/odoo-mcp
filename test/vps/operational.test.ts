@@ -332,6 +332,66 @@ describe("fixed-intent operational capabilities", () => {
     expect(fetcher).not.toHaveBeenCalled();
   });
 
+  it("uploads project attachment bytes through the native raw field", async () => {
+    const bytes = Buffer.from("Synthetic MCP evidence — café\n", "utf8");
+    const canonical = bytes.toString("base64");
+    const fetcher = vi.fn<typeof fetch>(async (url) => String(url).endsWith("/project.task/read")
+      ? Response.json([{ id: 42, display_name: "Synthetic task" }])
+      : Response.json([91]));
+    const client = await connected(fetcher);
+    const result = await client.callTool({
+      name: "projects_attach_file",
+      arguments: {
+        task_id: 42, name: "evidence.txt", data_base64: ` ${canonical}\n`,
+        mimetype: "text/plain", context: {}
+      }
+    });
+    expect(result.isError).not.toBe(true);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(String(fetcher.mock.calls[1]![0])).toContain("/ir.attachment/create");
+    const body = JSON.parse(String(fetcher.mock.calls[1]![1]?.body));
+    expect(body.vals_list).toEqual([{
+      name: "evidence.txt", type: "binary", raw: canonical, mimetype: "text/plain",
+      res_model: "project.task", res_id: 42
+    }]);
+    expect(body.vals_list[0]).not.toHaveProperty("datas");
+    expect(Buffer.from(body.vals_list[0].raw, "base64")).toEqual(bytes);
+    expect(result.structuredContent).toMatchObject({
+      data: { result: { attachment_id: 91, task_id: 42, file_size: bytes.byteLength }, outcome: "succeeded" }
+    });
+  });
+
+  it("accepts the 512 KiB project attachment boundary without re-encoding its bytes", async () => {
+    const bytes = Buffer.alloc(512 * 1024, 0xa5);
+    const fetcher = vi.fn<typeof fetch>(async (url) => String(url).endsWith("/project.task/read")
+      ? Response.json([{ id: 42, display_name: "Synthetic task" }])
+      : Response.json([91]));
+    const client = await connected(fetcher);
+    const result = await client.callTool({
+      name: "projects_attach_file",
+      arguments: { task_id: 42, name: "boundary.bin", data_base64: bytes.toString("base64"), context: {} }
+    });
+    expect(result.isError).not.toBe(true);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    const body = JSON.parse(String(fetcher.mock.calls[1]![1]?.body));
+    expect(typeof body.vals_list[0].raw).toBe("string");
+    expect(Buffer.from(body.vals_list[0].raw, "base64").equals(bytes)).toBe(true);
+    expect(body.vals_list[0]).not.toHaveProperty("datas");
+  });
+
+  it("rejects project attachment bytes above 512 KiB before any Odoo call", async () => {
+    const fetcher = vi.fn<typeof fetch>();
+    const client = await connected(fetcher);
+    const result = await client.callTool({
+      name: "projects_attach_file",
+      arguments: {
+        task_id: 42, name: "too-large.bin", data_base64: Buffer.alloc(512 * 1024 + 1).toString("base64"), context: {}
+      }
+    });
+    expect(result.isError).toBe(true);
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
   it("omits line_creates when there is nothing to create", async () => {
     const fetcher = vi.fn<typeof fetch>(async () => Response.json({
       bill: {

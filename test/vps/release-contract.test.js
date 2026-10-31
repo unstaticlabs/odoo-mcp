@@ -1,4 +1,7 @@
 import { describe, expect, it } from "vitest";
+import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createRelease, loadCompatibility } from "../../scripts/release-contract.mjs";
 import { IMAGE_SOURCE, validateImageLabels } from "../../scripts/image-identity.mjs";
 
@@ -34,6 +37,27 @@ describe("MCP release contract", () => {
       principal_kind: "agent",
       schema_version: 3,
     });
+  });
+
+  it.each([
+    ["required_modules", "usl_accounting"],
+    ["required_actions", "account.move.configure_draft_vendor_bill"],
+    ["required_actions", "hr.expense.configure_draft_expense"],
+    ["required_actions", "usl.agent.submit_mcp_feedback"],
+  ])("rejects an omitted %s dependency: %s", (field, dependency) => {
+    const root = mkdtempSync(join(tmpdir(), "mcp-release-contract-"));
+    try {
+      for (const path of ["package.json", "release", "src"]) {
+        cpSync(path, join(root, path), { recursive: true });
+      }
+      const path = join(root, "release/compatibility.json");
+      const contract = JSON.parse(readFileSync(path, "utf8"));
+      contract[field] = contract[field].filter((value) => value !== dependency);
+      writeFileSync(path, JSON.stringify(contract));
+      expect(() => loadCompatibility(root)).toThrow(dependency);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("rejects mutable image tags", () => {

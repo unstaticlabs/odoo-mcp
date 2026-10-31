@@ -322,7 +322,7 @@ export function registerSemanticCapabilities(registry: CapabilityRegistry, clien
     name: "accounting_get_invoice_context",
     title: "Get Invoice Context",
     description:
-      "Read one invoice or vendor bill with lines, payment state, activities, recent chatter, and archived-document links. Use for common invoice review; this is read-only and does not post, pay, or reconcile the move.",
+      "Read one invoice or vendor bill with lines, payment state, activities, recent chatter, and archived-document links. Relevant bills include purchase_attachments and native review/separate-draft actions. Page truncated results via odoo_call_method: model account.move, method get_purchase_attachment_context, bill ids, kwargs {offset:next_offset,limit:50} (limit 1–100). Opt into company_change with an explicit target for one native paged snapshot of financial relations, origins, evidence and native-compatible choices. Each page is a separate snapshot; no mappings or changes are applied.",
     layer: "semantic",
     toolsets: ["accounting", "activities", "documents"],
     profiles: ["accounting"],
@@ -342,11 +342,23 @@ export function registerSemanticCapabilities(registry: CapabilityRegistry, clien
     input: z.object({
       move_id: PositiveIdSchema,
       chatter_limit: z.number().int().min(1).max(50).default(10),
+      company_change: z.object({
+        target_company_id: PositiveIdSchema,
+        offset: z.number().int().min(0).max(1_000_000).default(0),
+        limit: z.number().int().min(1).max(100).default(50)
+      }).strict().optional(),
       context: OdooContextSchema
     }).strict(),
     output: ContextOutputSchema,
-    async handler({ move_id, chatter_limit, context: requestedContext }, context, signal) {
+    async handler({ move_id, chatter_limit, company_change, context: requestedContext }, context, signal) {
       const common = rpcContext(requestedContext, context);
+      if (company_change) {
+        const snapshot = await client.call<Record<string, unknown>>(context, "account.move", "get_company_change_context", {
+          ids: [move_id], ...company_change, context: common
+        }, { signal });
+        return { data: { context: { company_change: snapshot,
+          invoice_ref: ref(context, "account.move", move_id) } } };
+      }
       const [moves, lines, activities, messages, documentLinks] = await Promise.all([
         client.call<unknown[]>(context, "account.move", "read", {
           ids: [move_id],
@@ -373,9 +385,24 @@ export function registerSemanticCapabilities(registry: CapabilityRegistry, clien
       ]);
       const move = moves[0] as Record<string, unknown> | undefined;
       if (!move) throw new Error(`account.move,${move_id} was not found or is not readable`);
+      let purchaseAttachments: Record<string, unknown> | undefined;
+      const warnings = documentLinks.warning ? [documentLinks.warning] : [];
+      if (["in_invoice", "in_refund"].includes(String(move.move_type)) &&
+          context.availablePublicMethods?.get("account.move")?.has("get_purchase_attachment_context")) {
+        try {
+          const snapshot = await client.call<Record<string, unknown>>(context, "account.move", "get_purchase_attachment_context", {
+            ids: [move_id], offset: 0, limit: 50, context: common
+          }, { signal });
+          if (Object.keys(snapshot).length) purchaseAttachments = snapshot;
+        } catch (error) {
+          if (signal.aborted) throw error;
+          warnings.push("Purchase attachment context was unavailable. Read the native bill before reviewing or separating its files.");
+        }
+      }
       return {
-        data: { context: { invoice: { ...move, _ref: ref(context, "account.move", move_id, move.display_name) }, lines, activities, messages, document_links: documentLinks.records } },
-        ...(documentLinks.warning ? { warnings: [documentLinks.warning] } : {})
+        data: { context: { invoice: { ...move, _ref: ref(context, "account.move", move_id, move.display_name) }, lines, activities, messages, document_links: documentLinks.records,
+          ...(purchaseAttachments ? { purchase_attachments: purchaseAttachments } : {}) } },
+        ...(warnings.length ? { warnings } : {})
       };
     }
   }));
