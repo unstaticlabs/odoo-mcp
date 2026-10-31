@@ -80,7 +80,12 @@ describe("OAuth client discovery outages", () => {
       expect(unknown.status).toBe(400);
       expect(await unknown.json()).toMatchObject({ error: "invalid_client", outcome: "not_applied",
         correlation_id: "unknown-client-test", stage: "oauth_token" });
-      const invalid = await request("https://client.example/client.json", "invalid-grant-test");
+      // Use a local public client for this independent protocol error. A CIMD
+      // client whose metadata just failed is subject to the native fetch cooldown.
+      oauth.vault.database.prepare(`INSERT INTO oauthClient
+        (id, clientId, name, tokenEndpointAuthMethod, redirectUris, grantTypes)
+        VALUES ('local-fixture', 'local-fixture', 'Synthetic local client', 'none', '[]', '["refresh_token"]')`).run();
+      const invalid = await request("local-fixture", "invalid-grant-test");
       expect(invalid.status).toBe(400);
       expect(await invalid.json()).toMatchObject({ error: "invalid_grant", stage: "oauth_token", outcome: "not_applied" });
       if (scenario === "missing") {

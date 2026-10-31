@@ -1,10 +1,11 @@
 FROM node:26-bookworm-slim AS build
 
 WORKDIR /app
+# Native SQLite builds need this fallback toolchain; it stays out of runtime.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 make g++ \
+    && rm -rf /var/lib/apt/lists/*
 COPY package.json package-lock.json ./
-# scripts/ must exist before npm ci: the postinstall hook patches
-# @better-auth/oauth-provider (see scripts/patch-better-auth-loopback.mjs).
-COPY scripts ./scripts
 RUN npm ci
 COPY tsconfig.json ./
 COPY src ./src

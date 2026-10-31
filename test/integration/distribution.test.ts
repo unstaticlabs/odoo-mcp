@@ -56,7 +56,7 @@ async function connected(profile: "default" | "advanced") {
   return client;
 }
 
-describe.skipIf(!live).sequential("live USL Odoo Distribution", () => {
+describe.skipIf(!live)("live USL Odoo Distribution", () => {
   it("authenticates to doc-bearer and exposes installed module metadata", async () => {
     const request = context();
     const document = await new OdooClient().fetchApiDocument<Record<string, unknown>>(request);

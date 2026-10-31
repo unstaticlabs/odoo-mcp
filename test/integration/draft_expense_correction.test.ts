@@ -8,7 +8,7 @@ import type { RequestContext } from "../../src/runtime/context.js";
 const fixture = process.env.ODOO_INTEGRATION_EXPENSE_FIXTURE;
 const enabled = process.env.ODOO_INTEGRATION_MUTATION_QA === "1" && Boolean(fixture);
 
-describe.skipIf(!enabled).sequential("synthetic managed Agent draft expense correction", () => {
+describe.skipIf(!enabled)("synthetic managed Agent draft expense correction", () => {
   let client: Client;
   let cleanup: () => Promise<void>;
   let input: { source_company_id: number; target_company_id: number; target_employee_id: number; target_account_id: number; expense_ids: number[]; posted_expense_id: number;

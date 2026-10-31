@@ -11,7 +11,7 @@ type Part = { id: number; state: string; company_id: [number, string]; total_amo
 type Fixture = { source_company_id: number; target_company_id: number; target_employee_id: number;
   target_account_id: number; expense_ids: number[]; family_ids: number[]; family_origin_id: number; split_lines: unknown[] };
 
-describe.skipIf(!enabled).sequential("synthetic managed Agent native expense families", () => {
+describe.skipIf(!enabled)("synthetic managed Agent native expense families", () => {
   let client: Client; let cleanup: () => Promise<void>; let input: Fixture;
   beforeAll(async () => {
     input = JSON.parse(fixture!);

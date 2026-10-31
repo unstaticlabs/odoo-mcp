@@ -15,6 +15,7 @@ import { emitEvent } from "../runtime/logging.js";
 import type { RuntimeServices } from "../runtime/server.js";
 import { CredentialVault, type ValidatedEnrollment } from "./vault.js";
 import { oauthDependencyBoundary } from "./dependencies.js";
+import { migrateLegacyAccountIssuer } from "./migrations.js";
 import type { ClientMetadataResourceFetch } from "@better-auth/oauth-provider";
 
 // Node enables socket family autoselection (RFC 8305) by default since v20.
@@ -156,6 +157,12 @@ export function createOAuthService(
   const oauth = config.oauth;
   if (!oauth) return null;
   const vault = new CredentialVault(oauth, config);
+  try {
+    migrateLegacyAccountIssuer(vault.database);
+  } catch (error) {
+    vault.close();
+    throw error;
+  }
   const dependencyBoundary = oauthDependencyBoundary(vault, dependencies.fetchClientMetadataResource ?? fetchClientMetadataResource);
   services.accessCache.setPersistentStore(vault);
   const resource = `${config.publicOrigin}/mcp`;
@@ -191,12 +198,20 @@ export function createOAuthService(
       })
     ]
   } satisfies BetterAuthOptions;
-  const auth = betterAuth(authOptions);
-  const ready = getMigrations(authOptions)
+  const initializedAuth = getMigrations(authOptions)
     .then((migrations) => migrations.runMigrations())
-    .then(async () => { await auth.$context; });
+    .then(async () => {
+      // Native validation starts during construction, so initialize only after
+      // the schema exists. Keep validation enabled for the resulting runtime.
+      const auth = betterAuth(authOptions);
+      await auth.$context;
+      return auth;
+    });
+  const ready = initializedAuth.then(() => undefined);
 
   async function callCredentialEndpoint(path: "/sign-up/email" | "/sign-in/email", body: object, source: Request): Promise<Response> {
+    await ready;
+    const auth = await initializedAuth;
     return await auth.handler(new Request(`${config.publicOrigin}/api/auth${path}`, {
       method: "POST",
       headers: credentialEndpointHeaders(config.publicOrigin, source),
@@ -380,6 +395,7 @@ button.addEventListener('click', async () => { button.disabled = true; const res
     }
     if (request.method !== "POST") return json({ error: "method_not_allowed" }, 405, { Allow: "GET, POST" });
     await ready;
+    const auth = await initializedAuth;
     const cookie = request.headers.get("Cookie");
     if (!cookie) return json({ error: "authentication_required" }, 401);
     const sessionResponse = await auth.handler(new Request(`${config.publicOrigin}/api/auth/get-session`, {
@@ -404,7 +420,8 @@ button.addEventListener('click', async () => { button.disabled = true; const res
     profile: ProfileName,
     handler: { fetch(request: Request, options?: { authInfo?: AuthInfo }): Promise<Response> }
   ) {
-    const protectedHandler = requireMcpAuth(auth, async (request, claims) => {
+    let protectedHandler: ReturnType<typeof requireMcpAuth> | undefined;
+    const handleAuthorizedRequest = async (request: Request, claims: JWTPayload) => {
       const enrollmentId = typeof claims.odoo_enrollment_id === "string" ? claims.odoo_enrollment_id : null;
       if (!enrollmentId) return json({ error: "invalid_token", message: "The token has no Odoo enrollment" }, 401);
       const started = Date.now();
@@ -448,14 +465,23 @@ button.addEventListener('click', async () => { button.disabled = true; const res
         }
         return json({ error: "invalid_token", message: error instanceof Error ? error.message : "Invalid Odoo enrollment" }, 401);
       }
-    }, { resource, requiredScopes: ["odoo"] });
-    return { fetch: async (request: Request) => { await ready; return await protectedHandler(request); } };
+    };
+    return { fetch: async (request: Request) => {
+      await ready;
+      const auth = await initializedAuth;
+      protectedHandler ??= requireMcpAuth(auth, handleAuthorizedRequest, { resource, requiredScopes: ["odoo"] });
+      return await protectedHandler(request);
+    } };
   }
 
   return {
     vault,
     ready,
-    authFetch: async (request) => { await ready; return await dependencyBoundary.run(request, auth.handler); },
+    authFetch: async (request) => {
+      await ready;
+      const auth = await initializedAuth;
+      return await dependencyBoundary.run(request, auth.handler);
+    },
     enrollmentFetch,
     consentFetch,
     revokeFetch,
