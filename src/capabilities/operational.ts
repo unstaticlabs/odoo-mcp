@@ -257,10 +257,11 @@ export function registerOperationalCapabilities(registry: CapabilityRegistry, cl
       }, { signal });
       if (!tasks[0]) throw new Error(`project.task,${task_id} was not found or is not readable`);
       const receipt = await client.call<unknown>(context, "ir.attachment", "create", {
-        vals_list: [{ name, type: "binary", datas: payload.normalized, mimetype, res_model: "project.task", res_id: task_id }],
+        vals_list: [{ name, type: "binary", raw: payload.normalized, mimetype, res_model: "project.task", res_id: task_id }],
         context: common
       }, {
         kind: "mutation",
+        requestBudget: "project_attachment",
         signal,
         reconciliation: {
           targetModel: "ir.attachment",

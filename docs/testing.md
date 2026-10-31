@@ -53,6 +53,24 @@ Before production, instantiate a disposable database from `evals/fixtures/usl-ev
 
 Use separate identities for broad read, normal agent write, accounting approval, and irreversible-action denial. Never point mutating fixtures at production data.
 
+### Project attachment bytes
+
+`test/integration/project_attachment.test.ts` uploads through `projects_attach_file`
+and reads the stored bytes, checksum, size and task ownership back from Odoo.
+It requires a localhost Distribution, `ODOO_INTEGRATION_MUTATION_QA=1`, the standard
+integration origin/database/API-key variables, and `ODOO_PROJECT_ATTACHMENT_FIXTURE`
+pointing to a private JSON file with `synthetic: true`, `database`, `task_id` and
+`company_id`. Use an existing disposable task that the fixture identity may read
+and attach files to. The test leaves its synthetic attachment in that disposable
+database; remove it with the fixture database after qualification.
+
+The adapter sends canonical base64 text in Odoo's `raw` binary field. JSON-2
+decodes that text to the original bytes. The validated 512 KiB upload uses a
+fixed internal 768 KiB request allowance for `ir.attachment.create`; generic
+calls keep their existing 256 KiB JSON limit. The removed `ir.attachment.datas` field
+must not be sent, and a locally calculated size alone does not prove that Odoo
+stored the file.
+
 ## Protocol/client qualification
 
 Qualify the built image with MCP Inspector or an equivalent protocol client:
