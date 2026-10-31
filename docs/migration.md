@@ -1,8 +1,41 @@
-# Breaking migration guide
+# Migration guide
 
-This release is a clean break from the previous hosted runtime and Odoo Online-shaped interfaces. Existing clients must reconnect and refresh tool schemas.
+## Existing self-hosted vaults: October 2026 dependency update
 
-## Deployment changes
+The Better Auth 1.7.2 → 1.7.14 and SQLite 12 → 13 update preserves existing
+enrollments, password hashes, sessions, signing keys and OAuth grants. Run the
+normal protected rollout with its original-vault backup and isolated migration
+rehearsal. `oauth:prepare` and `oauth:migrate` use the same startup migration.
+
+Better Auth 1.7.0–1.7.2 created a required `account.issuer` column. Newer native
+versions do not write it. Before native initialization, the connector follows the
+[official SQLite migration](https://www.better-auth.com/docs/guides/1-7-upgrade-guide):
+remove the obsolete issuer/account index and required issuer column in one
+transaction. All remaining account fields and identities stay intact. Existing
+nullable issuer fields need no rewrite. Duplicate provider/account identities
+must be resolved before upgrading; they cannot be merged automatically.
+Unexpected dependent schema causes a transaction rollback, retaining the old
+column and index. Native Better Auth migrations and schema validation still run. Auth construction
+waits for those migrations, so fresh startup initializes its configured MCP
+resource without a premature missing-table validation error.
+
+For an old-image rollback, restore the **pre-upgrade vault backup together with
+the previous image**. An image-only downgrade does not restore the old native
+schema. Keep the original backup unchanged; qualify restore on a separate copy.
+The declared vault schema version remains 1 for the unchanged encrypted
+credential/enrollment format; it is not a fingerprint of Better Auth tables.
+
+The temporary localhost redirect patch and postinstall hook are removed because
+the new native provider supports variable loopback ports. Functional tests cover
+localhost, IPv4, IPv6, exact host/path/query matching and the native PKCE,
+refresh and revocation flow.
+
+## Historical migration from the hosted runtime
+
+
+The original move from the hosted runtime and Odoo Online-shaped interfaces was a clean break. The reconnect instructions below apply to that historical migration, not to the current self-hosted dependency update.
+
+### Deployment changes
 
 - Deploy the Node 26 container beside the self-hosted Distribution.
 - Replace the previous hosted endpoint with `/mcp` or `/mcp/:profile` on the VPS reverse-proxy origin.
@@ -12,7 +45,7 @@ This release is a clean break from the previous hosted runtime and Odoo Online-s
 - Local clients use the stdio entrypoint and environment credentials.
 - Replace every human Odoo key with a governed Agent credential created in **My Agents**. Hosted OAuth authorization remains human, but Odoo execution and attribution belong to the Agent.
 
-## Tool migration
+### Tool migration
 
 The most common mappings are:
 
@@ -36,7 +69,7 @@ The most common mappings are:
 Duplicated server-specific tool names, UI button scraping as the method
 catalogue, and multi-call claims of atomicity are not supported.
 
-## Contract changes in the ORM-substrate work
+### Contract changes in the ORM-substrate work
 
 These change existing tool contracts. Clients must refresh tool schemas.
 
@@ -88,7 +121,7 @@ These change existing tool contracts. Clients must refresh tool schemas.
   rich-text escaping contract, which each write path now states in its own field
   descriptions. Operators gating on the literal 15,000 must update that check.
 
-## Behavior changes
+### Behavior changes
 
 - Draft expense preparation now corrects company and employee in one native
   transaction, with explicit replacements or clears for incompatible financial
@@ -108,7 +141,7 @@ These change existing tool contracts. Clients must refresh tool schemas.
 - The document archive contract is the Distribution facade rather than an Enterprise application model.
 - `odoo_describe_environment` now reports the Agent, accountable owner, credential expiry and effective companies. Human keys, suspended Agents and expired Agent credentials fail before tools are exposed.
 
-## Client profile choice
+### Client profile choice
 
 - General static agents, including hosted ChatGPT: `/mcp` (no deferred-loading hints).
 - Native tool-search/deferred clients: `/mcp/all`.
@@ -124,13 +157,13 @@ hidden until those methods are available; generic access rules remain unchanged.
 See the [tool catalogue](tool-catalogue.md) for mappings, result links, unknown
 completion recovery and the measured default schema budget.
 
-## Rollback
+### Rollback
 
 Keep the last pre-migration service/image available until direct, stdio, and hosted connections are qualified. Runtime rollback is a reverse-proxy/image change. Restore the pre-migration SQLite backup only when rolling back an OAuth schema change, and use its matching secrets.
 
 Any additive Odoo public application-service methods landed for atomic actions can remain deployed during MCP rollback. Never roll back by deleting Odoo data or by replaying an operation with unknown completion.
 
-## Printable bill terms and internal notes
+### Printable bill terms and internal notes
 
 Refresh the tool schema before using `expenses_configure_draft_vendor_bill`.
 Its former `narration` parameter is now `terms_and_conditions`: printable

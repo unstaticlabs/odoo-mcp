@@ -13,7 +13,7 @@ const fixture = process.env.ODOO_INTEGRATION_EVIDENCE_FIXTURE;
 const enabled = process.env.ODOO_INTEGRATION_MUTATION_QA === "1" && Boolean(fixture);
 type Fixture = { source_company_id: number; target_company_id: number; expense_ids: number[]; concurrent_expense_id?: number; move_id: number; restricted_expense_id: number; source_document_id?: number };
 
-describe.skipIf(!enabled).sequential("synthetic native source evidence handoff", () => {
+describe.skipIf(!enabled)("synthetic native source evidence handoff", () => {
   let client: Client; let cleanup: () => Promise<void>; let input: Fixture; let bytes: Buffer;
   let firstAttachment: number;
   let nativeOdoo: OdooClient; let nativeContext: RequestContext;

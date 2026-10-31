@@ -216,3 +216,22 @@ company (or create it with that company selected). An administrator seeing a
 file does not prove that the delegated Agent can read it. Verify nonempty
 native document metadata through the intended Agent before qualifying the
 journey; retain native company rules rather than broadening fixture access.
+
+## Native OAuth dependency upgrades
+
+`test/vps/loopback-redirect.test.ts` exercises the actual provider handler:
+synthetic signup/session, consent, exact callback matching, PKCE code exchange,
+refresh and revocation. It replaces the old generated-source string assertion.
+`test/vps/auth-migrations.test.ts` checks account preservation, generated native
+keys, repeat upgrades and SQLite transaction rollback when a dependency prevents
+column removal. Keep native schema validation enabled.
+
+For an existing-vault update, create the baseline with the old released package
+versions, close it and keep its backup unchanged. Upgrade a copy and verify old
+password signin, session cookies, signed access tokens, refresh grants,
+encrypted enrollments and backup restoration with the new versions. A fresh
+vault alone does not establish upgrade safety. See [migration guidance](migration.md).
+
+Vitest 5 suites use the default sequential execution rather than the removed
+`.sequential` collector chain. The live integration suite remains opt-in;
+collection with no credentials reports skips, never a live pass.

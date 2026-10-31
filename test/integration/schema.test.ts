@@ -46,7 +46,7 @@ async function deployedFieldNames(client: OdooClient, model: string): Promise<Se
   return names;
 }
 
-describe.skipIf(!live).sequential("curated field contracts against the deployed schema", () => {
+describe.skipIf(!live)("curated field contracts against the deployed schema", () => {
   for (const contract of CURATED_FIELD_CONTRACTS) {
     it(`${contract.capability} reads only fields that exist on ${contract.model}`, async () => {
       const deployed = await deployedFieldNames(new OdooClient(), contract.model);

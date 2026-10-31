@@ -10,7 +10,7 @@ const fixturePath = process.env.ODOO_TASK_WAITING_FIXTURE;
 const origin = process.env.ODOO_INTEGRATION_ORIGIN;
 const database = process.env.ODOO_INTEGRATION_DATABASE;
 
-describe.skipIf(!fixturePath).sequential("synthetic task Waiting through the live MCP protocol", () => {
+describe.skipIf(!fixturePath)("synthetic task Waiting through the live MCP protocol", () => {
   let client: Client;
   let server: ReturnType<ReturnType<typeof createCapabilityRegistry>["createServer"]>;
   let cache: AgentAccessSnapshotCache;

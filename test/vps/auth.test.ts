@@ -338,7 +338,8 @@ describe("OAuth enrollment credentials", () => {
 });
 
 describe("Better Auth MCP provider", () => {
-  it("migrates its SQLite schema and publishes authorization metadata", async () => {
+  it("migrates before native validation and publishes authorization metadata", async () => {
+    const initializationErrors = vi.spyOn(console, "error");
     const config = oauthConfiguration();
     const services = createRuntimeServices(config);
     const service = createOAuthService(config, services);
@@ -358,6 +359,8 @@ describe("Better Auth MCP provider", () => {
     );
     expect(resource.status).toBe(200);
     expect(await resource.json()).toMatchObject({ resource: "http://127.0.0.1:3000/mcp" });
+    expect(initializationErrors.mock.calls.flat().map(String).join(" ")).not.toContain("Database schema mismatch");
+    initializationErrors.mockRestore();
     await services.accessCache.close();
     service!.close();
     await services.observability.close();

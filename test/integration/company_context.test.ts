@@ -10,7 +10,7 @@ const fixturePath = process.env.ODOO_COMPANY_CONTEXT_FIXTURE;
 const origin = process.env.ODOO_INTEGRATION_ORIGIN;
 const database = process.env.ODOO_INTEGRATION_DATABASE;
 
-describe.skipIf(!fixturePath).sequential("native optional company context through MCP SDK", () => {
+describe.skipIf(!fixturePath)("native optional company context through MCP SDK", () => {
   const fixture = fixturePath ? JSON.parse(readFileSync(fixturePath, "utf8")) : {};
   function scopedContext(key: string): RequestContext {
     if (!["odoo_fb_bill_company_context", "odoo_fb_bill_company_context_combined"].includes(database ?? "") || !origin || !/^http:\/\/(127\.0\.0\.1|localhost):\d+$/.test(origin)) {

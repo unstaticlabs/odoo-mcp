@@ -10,7 +10,7 @@ import type { RequestContext } from "../../src/runtime/context.js";
 const fixturePath = process.env.ODOO_PROJECT_ATTACHMENT_FIXTURE;
 const enabled = process.env.ODOO_INTEGRATION_MUTATION_QA === "1" && Boolean(fixturePath);
 
-describe.skipIf(!enabled).sequential("project attachment bytes in a disposable Distribution", () => {
+describe.skipIf(!enabled)("project attachment bytes in a disposable Distribution", () => {
   let client: Client;
   let server: ReturnType<ReturnType<typeof createCapabilityRegistry>["createServer"]>;
   let cache: AgentAccessSnapshotCache;
