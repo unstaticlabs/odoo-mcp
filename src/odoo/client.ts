@@ -156,6 +156,7 @@ function assertCallPayload(model: string, method: string, kwargs: Record<string,
 const RETRYABLE_STATUS = new Set([429, 502, 503, 504]);
 const API_DOCUMENT_CACHE_TTL_MS = 5 * 60_000;
 const API_DOCUMENT_CACHE_MAX_ENTRIES = 50;
+const API_DOCUMENT_REQUEST_TIMEOUT_MS = 5 * 60_000;
 
 // The authenticated API documentation states a model's methods either as a flat
 // list of names or as a map of name to descriptor. Only the descriptor form
@@ -401,6 +402,22 @@ async function boundedText(
   return new TextDecoder().decode(joined);
 }
 
+function waitForApiDocument<T>(
+  request: Promise<T>,
+  signal: AbortSignal | undefined,
+  timeoutMs: number
+): Promise<T> {
+  const timeout = AbortSignal.timeout(timeoutMs);
+  const wait = signal ? AbortSignal.any([signal, timeout]) : timeout;
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => reject(wait.reason);
+    wait.addEventListener("abort", abort, { once: true });
+    void request
+      .then(resolve, reject)
+      .finally(() => wait.removeEventListener("abort", abort));
+  });
+}
+
 function delay(milliseconds: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(resolve, milliseconds);
@@ -415,6 +432,7 @@ export class OdooClient {
   private readonly semaphores = new Map<string, Semaphore>();
   private readonly backgroundSemaphores = new Map<string, Semaphore>();
   private readonly apiDocumentCache = new Map<string, ApiDocumentCacheEntry>();
+  private readonly apiDocumentRequests = new Map<string, Promise<unknown>>();
 
   constructor(
     private readonly concurrency = 8,
@@ -701,25 +719,60 @@ export class OdooClient {
       this.apiDocumentCache.set(cacheKey, cached);
       return cached.value as T;
     }
+    signal?.throwIfAborted();
+    const conditionalEtag = cached?.etag ?? options.ifNoneMatch;
+    const requestKey = `${cacheKey}\0${conditionalEtag ?? ""}`;
+    let request = this.apiDocumentRequests.get(requestKey) as Promise<T> | undefined;
+    if (!request) {
+      request = this.requestApiDocument<T>(
+        context,
+        path,
+        cacheKey,
+        cached,
+        conditionalEtag,
+        options.priority ?? "foreground"
+      ).finally(() => this.apiDocumentRequests.delete(requestKey));
+      this.apiDocumentRequests.set(requestKey, request);
+    }
+    return await waitForApiDocument(request, signal, options.timeoutMs ?? 30_000);
+  }
+
+  /**
+   * Odoo finishes building a document even after its client disconnects, so a
+   * caller's deadline only ends that caller's wait. The request itself runs to
+   * completion and fills the cache, which keeps a slow build from being repeated.
+   */
+  private async requestApiDocument<T>(
+    context: RequestContext,
+    path: string,
+    cacheKey: string,
+    cached: ApiDocumentCacheEntry | undefined,
+    conditionalEtag: string | undefined,
+    priority: OdooRequestPriority
+  ): Promise<T> {
     const headers: Record<string, string> = {
       Authorization: `Bearer ${context.principal.apiKey}`,
       "X-Odoo-Database": context.principal.database,
       Accept: "application/json",
       ...injectTraceHeaders(context.trace?.context)
     };
-    const conditionalEtag = cached?.etag ?? options.ifNoneMatch;
-    if (conditionalEtag) headers["If-None-Match"] = conditionalEtag;
+    if (conditionalEtag) {
+      headers["If-None-Match"] = conditionalEtag;
+      // Fetch turns a conditional request into cache mode "no-store" and then
+      // adds `Cache-Control: no-cache` unless the header is already present.
+      // Odoo's api_doc reads that directive as an order to rebuild the whole
+      // index, which takes minutes. State the intent instead: revalidate the
+      // stored document.
+      headers["Cache-Control"] = "max-age=0";
+    }
     const response = await this.runForTarget(
       context,
-      options.priority ?? "foreground",
+      priority,
       async () => await this.fetcher(`${context.principal.internalOrigin}${path}`, {
         headers,
         redirect: "manual",
-        signal: signal
-          ? AbortSignal.any([signal, AbortSignal.timeout(options.timeoutMs ?? 30_000)])
-          : AbortSignal.timeout(options.timeoutMs ?? 30_000)
-      }),
-      signal
+        signal: AbortSignal.timeout(API_DOCUMENT_REQUEST_TIMEOUT_MS)
+      })
     );
     if (response.status === 304 && cached) {
       cached.expiresAt = Date.now() + API_DOCUMENT_CACHE_TTL_MS;

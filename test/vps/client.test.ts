@@ -154,6 +154,77 @@ describe("JSON-2 adapter", () => {
     expect(new Headers(requests[1]?.headers).get("If-None-Match")).toBe('\"surface-v1\"');
   });
 
+  it("asks Odoo to revalidate, not rebuild, on a conditional API document request", async () => {
+    // Fetch sets cache mode "no-store" on any request carrying If-None-Match and
+    // then adds `Cache-Control: no-cache` unless one is present. Odoo's api_doc
+    // rebuilds the whole index on that directive, so the request must carry an
+    // explicit revalidation directive instead.
+    const requests: RequestInit[] = [];
+    const fetcher = vi.fn<typeof fetch>(async (_input, init) => {
+      requests.push(init ?? {});
+      if (new Headers(init?.headers).get("If-None-Match") === '\"surface-v1\"') {
+        return new Response(null, { status: 304 });
+      }
+      return Response.json({ modules: ["base"], models: [] }, { headers: { ETag: '\"surface-v1\"' } });
+    });
+    const client = new OdooClient(8, 1024, fetcher);
+    const context = requestContext();
+    await client.fetchApiDocument(context);
+    await client.fetchApiDocument(context, undefined, undefined, { forceRevalidate: true });
+    expect(new Headers(requests[0]?.headers).has("Cache-Control")).toBe(false);
+    expect(new Headers(requests[1]?.headers).get("If-None-Match")).toBe('\"surface-v1\"');
+    expect(new Headers(requests[1]?.headers).get("Cache-Control")).toBe("max-age=0");
+  });
+
+  it("shares one in-flight API document request between concurrent callers", async () => {
+    let release = (_response: Response) => {};
+    const fetcher = vi.fn<typeof fetch>(() => new Promise<Response>((resolve) => { release = resolve; }));
+    const client = new OdooClient(8, 1024, fetcher);
+    const context = requestContext();
+    const callers = [client.fetchApiDocument(context), client.fetchApiDocument(context)];
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(1));
+    release(Response.json({ modules: ["base"] }));
+    const [first, second] = await Promise.all(callers);
+    expect(first).toEqual({ modules: ["base"] });
+    expect(second).toBe(first);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a slow API document build for the next caller after a caller times out", async () => {
+    let release = (_response: Response) => {};
+    let requestSignal: AbortSignal | null | undefined;
+    const fetcher = vi.fn<typeof fetch>((_input, init) => {
+      requestSignal = init?.signal;
+      return new Promise<Response>((resolve) => { release = resolve; });
+    });
+    const client = new OdooClient(8, 1024, fetcher);
+    const context = requestContext();
+    await expect(
+      client.fetchApiDocument(context, undefined, undefined, { timeoutMs: 5 })
+    ).rejects.toMatchObject({ name: "TimeoutError" });
+    expect(requestSignal?.aborted).toBe(false);
+    release(Response.json({ modules: ["base"] }));
+    await vi.waitFor(async () => {
+      await expect(client.fetchApiDocument(context)).resolves.toEqual({ modules: ["base"] });
+    });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it("releases only the aborted caller from a shared API document request", async () => {
+    let release = (_response: Response) => {};
+    const fetcher = vi.fn<typeof fetch>(() => new Promise<Response>((resolve) => { release = resolve; }));
+    const client = new OdooClient(8, 1024, fetcher);
+    const context = requestContext();
+    const controller = new AbortController();
+    const aborted = client.fetchApiDocument(context, undefined, controller.signal);
+    const waiting = client.fetchApiDocument(context);
+    await vi.waitFor(() => expect(fetcher).toHaveBeenCalledTimes(1));
+    controller.abort();
+    await expect(aborted).rejects.toMatchObject({ name: "AbortError" });
+    release(Response.json({ modules: ["base"] }));
+    await expect(waiting).resolves.toEqual({ modules: ["base"] });
+  });
+
   it("reuses a persisted surface when conditional discovery returns 304 after restart", async () => {
     const requests: RequestInit[] = [];
     const client = new OdooClient(8, 1024, vi.fn<typeof fetch>(async (_input, init) => {
