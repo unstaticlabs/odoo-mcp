@@ -756,7 +756,15 @@ export class OdooClient {
       Accept: "application/json",
       ...injectTraceHeaders(context.trace?.context)
     };
-    if (conditionalEtag) headers["If-None-Match"] = conditionalEtag;
+    if (conditionalEtag) {
+      headers["If-None-Match"] = conditionalEtag;
+      // Fetch turns a conditional request into cache mode "no-store" and then
+      // adds `Cache-Control: no-cache` unless the header is already present.
+      // Odoo's api_doc reads that directive as an order to rebuild the whole
+      // index, which takes minutes. State the intent instead: revalidate the
+      // stored document.
+      headers["Cache-Control"] = "max-age=0";
+    }
     const response = await this.runForTarget(
       context,
       priority,

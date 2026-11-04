@@ -154,6 +154,28 @@ describe("JSON-2 adapter", () => {
     expect(new Headers(requests[1]?.headers).get("If-None-Match")).toBe('\"surface-v1\"');
   });
 
+  it("asks Odoo to revalidate, not rebuild, on a conditional API document request", async () => {
+    // Fetch sets cache mode "no-store" on any request carrying If-None-Match and
+    // then adds `Cache-Control: no-cache` unless one is present. Odoo's api_doc
+    // rebuilds the whole index on that directive, so the request must carry an
+    // explicit revalidation directive instead.
+    const requests: RequestInit[] = [];
+    const fetcher = vi.fn<typeof fetch>(async (_input, init) => {
+      requests.push(init ?? {});
+      if (new Headers(init?.headers).get("If-None-Match") === '\"surface-v1\"') {
+        return new Response(null, { status: 304 });
+      }
+      return Response.json({ modules: ["base"], models: [] }, { headers: { ETag: '\"surface-v1\"' } });
+    });
+    const client = new OdooClient(8, 1024, fetcher);
+    const context = requestContext();
+    await client.fetchApiDocument(context);
+    await client.fetchApiDocument(context, undefined, undefined, { forceRevalidate: true });
+    expect(new Headers(requests[0]?.headers).has("Cache-Control")).toBe(false);
+    expect(new Headers(requests[1]?.headers).get("If-None-Match")).toBe('\"surface-v1\"');
+    expect(new Headers(requests[1]?.headers).get("Cache-Control")).toBe("max-age=0");
+  });
+
   it("shares one in-flight API document request between concurrent callers", async () => {
     let release = (_response: Response) => {};
     const fetcher = vi.fn<typeof fetch>(() => new Promise<Response>((resolve) => { release = resolve; }));
