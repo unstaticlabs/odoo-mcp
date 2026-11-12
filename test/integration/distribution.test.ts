@@ -80,6 +80,27 @@ describe.skipIf(!live)("live USL Odoo Distribution", () => {
     expect(result.structuredContent).toMatchObject({ data: { records: expect.any(Array) } });
   }, 60_000);
 
+  it("searches the native guide and classifies its full-page read correctly", async () => {
+    const client = await connected("default");
+    const tools = (await client.listTools()).tools;
+    expect(tools.find(tool => tool.name === "docs_search")?.annotations?.readOnlyHint).toBe(true);
+    const search = await client.callTool({ name: "docs_search", arguments: { query: "expense", lang: "en", limit: 3 } });
+    expect(search.isError).not.toBe(true);
+    const pages = (search.structuredContent as { data: { pages: Array<{ path: string; url: string }> } }).data.pages;
+    expect(pages.length).toBeGreaterThan(0);
+    expect(pages.length).toBeLessThanOrEqual(3);
+    expect(new URL(pages[0]!.url).origin).toBe(new URL(origin!).origin);
+    expect(new URL(pages[0]!.url).pathname).toMatch(/^\/usl\/user-docs\//);
+    const page = await client.callTool({ name: "odoo_call_method", arguments: {
+      model: "usl.docs.guide", method: "read_page", kwargs: { path: pages[0]!.path }, context: {}
+    } });
+    expect(page.isError).not.toBe(true);
+    expect(page.structuredContent).toMatchObject({ data: {
+      execution: { mode: "read", outcome: "succeeded" },
+      result: { schema: "usl-docs-page/v1", markdown: expect.any(String) }
+    } });
+  }, 60_000);
+
   it("keeps the public-method substrate functional as a one-shot advanced tool", async () => {
     const client = await connected("advanced");
     const result = await client.callTool({
