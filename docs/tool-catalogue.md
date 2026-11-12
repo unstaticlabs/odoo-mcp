@@ -9,10 +9,10 @@ refer here instead of repeating them.
 
 | Measure | Value |
 | --- | ---: |
-| Tools on `/mcp` with every feature available | 33 |
-| Tools on `/mcp` without document materialization | 31 |
-| Estimated input/output schema tokens on `/mcp` | 19,374 |
-| Budget enforced by `/readyz` (`DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET`) | 19,456 |
+| Tools on `/mcp` with every feature available | 34 |
+| Tools on `/mcp` without document materialization | 32 |
+| Estimated input/output schema tokens on `/mcp` | 19,848 |
+| Budget enforced by `/readyz` (`DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET`) | 20,000 |
 
 Odoo module, method, and access availability can lower the counts further.
 Schema estimates are not measured model usage. Update this table, and only this
@@ -33,6 +33,7 @@ The preferred discovery and read tools are:
 | Tool | Selection rule |
 | --- | --- |
 | `odoo_search_capabilities` | Find semantic helpers or actions by intent across several toolsets. Not on `/mcp`; see below. |
+| `docs_search` | Find ranked user-guide pages, descriptions, matching text and canonical links. Native internal-user guide access applies. |
 | `odoo_search_models` | Find accessible technical models from authenticated API metadata. |
 | `odoo_describe_model` | Inspect fields and public method signatures before guessing. |
 | `odoo_search_records` | Perform bounded cross-domain or long-tail search; a `specification` reads relations to any depth in one call. |
@@ -57,6 +58,8 @@ The only advanced-only generic tool is `odoo_delete_records`.
 Use `odoo_call_method` when a legitimate public Distribution method has no MCP shortcut or when preserving a model's versatile public API is more useful than adding a thin wrapper. Prefer a fixed-intent action when it reduces ambiguity, returns better context, or guarantees a multi-step invariant. A method Odoo publishes as `readonly` runs under the read contract and is retried like any other read; every other method receives one attempt and may report unknown completion. The returned `execution.mode` states which contract applied.
 
 ## Semantic catalogue
+
+Use `docs_search` for guidance before inventing a workflow. It reads the running release’s guide through `usl.docs.guide.search_pages`; generic `odoo_call_method` access remains available for full page steps and screenshot references via `read_page`. Abstract guide access is authorized by Odoo, without requiring CRUD metadata.
 
 Current context helpers cover partners, record activities, project tasks, invoices, individual expenses, expense batches, Home attention, B2C orders, the rebuilt Accounting overview/reports, and the USL document archive. They return bounded high-signal context and warnings when optional linked context cannot be read.
 

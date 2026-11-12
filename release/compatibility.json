@@ -15,13 +15,15 @@
     "usl_access_control",
     "usl_accounting",
     "usl_b2c",
+    "usl_docs",
     "usl_documents",
     "usl_expense_batch",
     "usl_home"
   ],
   "required_public_methods": [
     "usl.agent.current_identity",
-    "usl.agent.submit_mcp_feedback"
+    "usl.agent.submit_mcp_feedback",
+    "usl.docs.guide.search_pages"
   ],
   "required_agent_identity": {
     "method": "usl.agent.current_identity",
@@ -81,6 +83,7 @@
     "stock.picking.read",
     "usl.agent.current_identity",
     "usl.agent.submit_mcp_feedback",
+    "usl.docs.guide.search_pages",
     "usl.document.link.search_read",
     "usl.document.link_to_record",
     "usl.document.mcp_create_download_grant",
