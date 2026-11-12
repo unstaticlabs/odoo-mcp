@@ -23,7 +23,7 @@
   },
   "dependencies": {
     "@better-auth/cimd": "1.7.21",
-    "@better-auth/mcp": "1.7.20",
+    "@better-auth/mcp": "1.7.21",
     "@modelcontextprotocol/express": "2.0.2",
     "@modelcontextprotocol/node": "2.1.2",
     "@modelcontextprotocol/server": "2.4.0",
