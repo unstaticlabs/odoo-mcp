@@ -10,6 +10,8 @@ The interface deliberately combines:
 - Odoo-authoritative permissions, record rules, company scope, and transactions;
 - a governed autonomous Agent identity for every connection.
 
+Use `docs_search` to find instructions in the running Odoo release’s user guide. Results include ranked pages, descriptions, snippets and canonical links; full page steps and screenshot references remain available through `usl.docs.guide.read_page`.
+
 Tool visibility is context optimization, not authorization. `odoo_call_method` is a statically advertised, one-shot escape hatch on writable named profiles, deferred only on `/mcp/all`; Odoo remains the authority for public-method dispatch and access.
 
 Documents remain metadata/text-only until an agent explicitly invokes

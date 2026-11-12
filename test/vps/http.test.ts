@@ -75,7 +75,7 @@ function testServices(
       modules: [
         "base", "api_doc", "usl_access_control", "mail", "contacts", "project", "account",
         "rebuild_account_migration", "usl_home", "usl_documents", "usl_accounting",
-        "hr_expense", "usl_expense_batch"
+        "hr_expense", "usl_expense_batch", "usl_docs"
       ],
       models: [...models].map((model) => ({
         model,
@@ -176,7 +176,7 @@ describe("VPS HTTP MCP transport", () => {
     closeCallbacks.push(async () => client.close());
     const tools = await client.listTools();
     // Materialization is disabled in this configuration; both grants are absent.
-    expect(tools.tools).toHaveLength(31);
+    expect(tools.tools).toHaveLength(32);
     expect(tools.tools.map((tool) => tool.name)).toContain("odoo_search_records");
     expect(tools.tools.map((tool) => tool.name)).toContain("odoo_call_method");
     expect(tools.tools.map((tool) => tool.name)).toContain("odoo_submit_feedback");
@@ -195,7 +195,7 @@ describe("VPS HTTP MCP transport", () => {
       await client.connect(transport);
       closeCallbacks.push(async () => client.close());
       const { tools } = await client.listTools();
-      if (profile === "default") expect(tools).toHaveLength(33);
+      if (profile === "default") expect(tools).toHaveLength(34);
       for (const name of ["documents_search", "documents_get_content", "documents_create_download_url",
         "documents_revoke_download_url", "projects_create_task", "expenses_get_context",
         "expenses_update_draft", "expenses_configure_draft_vendor_bill", "activities_schedule", "odoo_post_message", "odoo_add_internal_note", "odoo_submit_feedback"]) {

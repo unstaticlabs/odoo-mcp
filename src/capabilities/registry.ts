@@ -31,9 +31,11 @@ import { SERVER_VERSION } from "../version.js";
  * escapes it, which is what an LLM client reads before it guesses. Consolidating
  * the catalogue onto the ORM substrate is expected to take this well below
  * 15,000 again. Source-file handoff adds one explicitly measured tool without
- * hiding existing tools or fields; its current budget is recorded in the catalogue.
+ * hiding existing tools or fields. User-guide search adds 474 measured tokens; its
+ * current budget is recorded in the catalogue.
  */
-export const DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET = 19_456;
+export const DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET = 20_000;
+export const DEFAULT_PROFILE_TOOL_BUDGET = 34;
 
 export type CapabilityLayer = "generic" | "semantic" | "business_action";
 export type CapabilityEffect = "read" | "write" | "consequential" | "irreversible";

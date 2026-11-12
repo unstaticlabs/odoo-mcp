@@ -197,3 +197,5 @@ cannot reliably determine task correctness, a wrong or unnecessary successful
 tool choice, failure to discover an existing tool, total model tokens, or
 competence on requests the MCP developer did not anticipate. Those questions
 remain owned by the versioned agent-evaluation corpus in `docs/evaluation.md`.
+
+Structured tool failures use their known error code for the canonical `$mcp_tool_call` category. The privacy filter reads only an enumerated code from a bounded failure envelope; it discards the error message, arguments and response. Malformed or unrecognized failures remain `unknown`. Concurrent calls are classified from their own result, without a shared last-error cache or a second completion event.
