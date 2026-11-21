@@ -74,7 +74,7 @@ function testServices(
     if (url.endsWith("/doc-bearer/index.json")) return Response.json({
       modules: [
         "base", "api_doc", "usl_access_control", "mail", "contacts", "project", "account",
-        "rebuild_account_migration", "usl_home", "usl_documents", "usl_accounting",
+        "rebuild_account_migration", "usl_project", "usl_home", "usl_documents", "usl_accounting",
         "hr_expense", "usl_expense_batch"
       ],
       models: [...models].map((model) => ({

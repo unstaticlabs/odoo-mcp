@@ -52,7 +52,7 @@ export function propertySummaries(raw: unknown): PropertySummary[] {
   });
 }
 
-/** References of the "Sources" property: space-separated, one space at each end. */
+/** References of the "Sources" property: whitespace-separated, deduplicated for reporting only. */
 export function parseSources(value: unknown): string[] {
   if (typeof value !== "string") return [];
   return [...new Set(value.split(/\s+/).filter(Boolean))];
@@ -60,6 +60,40 @@ export function parseSources(value: unknown): string[] {
 
 export function formatSources(references: readonly string[]): string {
   return references.length ? ` ${references.join(" ")} ` : "";
+}
+
+/**
+ * Edit a Sources value without rewriting it: the existing text stays exactly as
+ * written except that exact whole-token matches of `remove` are cut out (with
+ * the whitespace before it) and missing `add` references are appended
+ * after a single space. An empty value becomes " a b " (one space at each end).
+ */
+export function editSourcesValue(value: unknown, add: readonly string[], remove: readonly string[]): string {
+  let text = typeof value === "string" ? value : "";
+  const removed = new Set(remove);
+  if (removed.size) {
+    const cut = new Array<boolean>(text.length).fill(false);
+    for (const match of text.matchAll(/\S+/g)) {
+      if (!removed.has(match[0])) continue;
+      const start = match.index!;
+      const end = start + match[0].length;
+      for (let i = start; i < end; i += 1) cut[i] = true;
+      // Take the whitespace run before the token with it; at the start, the run after it.
+      let from = start;
+      while (from > 0 && /\s/.test(text[from - 1]!)) from -= 1;
+      for (let i = from; i < start; i += 1) cut[i] = true;
+      if (start === 0) for (let i = end; i < text.length && /\s/.test(text[i]!); i += 1) cut[i] = true;
+    }
+    text = [...text].filter((_char, index) => !cut[index]).join("");
+  }
+  if (!text.trim()) text = "";
+  const present = new Set(text.split(/\s+/).filter(Boolean));
+  const missing = [...new Set(add)].filter((reference) => !present.has(reference));
+  if (!missing.length) return text;
+  if (!text) return formatSources(missing);
+  const joined = missing.join(" ");
+  if (text.endsWith(" ")) return `${text}${joined} `;
+  return /\s$/.test(text) ? `${text}${joined}` : `${text} ${joined}`;
 }
 
 export function sourcesReferences(properties: readonly PropertySummary[]): string[] {
@@ -97,12 +131,10 @@ export function mergeSources(
       "Use odoo_update_records for a differently typed property."
     );
   }
-  const removed = new Set(remove);
-  const sources = parseSources(target.value).filter((reference) => !removed.has(reference));
-  for (const reference of add) if (!sources.includes(reference)) sources.push(reference);
+  const value = editSourcesValue(target.value, add, remove);
   return {
-    properties: list.map((item) => item === target ? { ...item, value: formatSources(sources) } : item),
-    sources
+    properties: list.map((item) => item === target ? { ...item, value } : item),
+    sources: parseSources(value)
   };
 }
 
@@ -140,6 +172,7 @@ const CardOutputSchema = z.object({
 const CompletionOutputSchema = z.object({
   result: z.unknown(),
   completed: z.array(RecordSchema),
+  already_done: z.array(RecordSchema),
   correlation_id: z.string(),
   outcome: z.enum(["succeeded", "unknown"])
 }).strict();
@@ -157,7 +190,7 @@ export function registerProjectCardCapabilities(registry: CapabilityRegistry, cl
     effect: "write",
     annotations: actionAnnotations,
     keywords: ["project", "task", "card", "stage", "state", "description", "brief", "link", "sources", "close"],
-    requiredModules: ["project"],
+    requiredModules: ["project", "usl_project"],
     requiredModelAccess: [{ model: "project.task", operation: "write" }],
     defaultVisible: true,
     alwaysLoad: false,
@@ -309,7 +342,7 @@ export function registerProjectCardCapabilities(registry: CapabilityRegistry, cl
     name: "activities_complete",
     title: "Complete Activities",
     description:
-      "Mark 1-50 activities done in one call (action_feedback), posting the plain-text feedback in Chatter. A done activity leaves the list; close only what is really done.",
+      "Mark 1-50 activities done in one call (action_feedback), posting the plain-text feedback in Chatter. Already-done activities are reported in already_done and left unchanged; close only what is really done.",
     layer: "business_action",
     toolsets: ["activities", "projects"],
     profiles: ["projects"],
@@ -338,36 +371,51 @@ export function registerProjectCardCapabilities(registry: CapabilityRegistry, cl
       if (missing.length) {
         throw new CapabilityInputError(
           "activity_not_found",
-          `Activities ${missing.join(", ")} were not found or are not readable (a done activity no longer exists), so nothing was written.`,
-          "List the record's activities with activities_list_for_record and resend only the open ones."
+          `Activities ${missing.join(", ")} were not found or are not readable, so nothing was written.`,
+          "List the record's activities with activities_list_for_record and resend only ids it returns."
         );
       }
+      // Odoo archives a done activity but `read` by id still returns it; writing
+      // action_feedback again would overwrite the feedback it already carries.
+      const isDone = (activity: Record<string, unknown>) => Boolean(activity.date_done) || activity.active === false;
+      const open = activities.filter((activity) => !isDone(activity));
+      const summarize = (activity: Record<string, unknown>) => ({
+        activity_id: Number(activity.id),
+        summary: typeof activity.summary === "string" ? activity.summary : null,
+        record: typeof activity.res_model === "string" && Number.isInteger(activity.res_id)
+          ? recordRef(context, activity.res_model, activity.res_id as number)
+          : null
+      });
+      const alreadyDone = activities.filter(isDone).map(summarize);
+      if (!open.length) {
+        return {
+          data: { result: null, completed: [], already_done: alreadyDone, correlation_id: context.correlationId, outcome: "succeeded" as const },
+          warnings: ["Every activity was already done, so nothing was written and no feedback was changed."]
+        };
+      }
+      const openIds = open.map((activity) => Number(activity.id));
       const receipt = await client.call<unknown>(context, "mail.activity", "action_feedback", {
-        ids, feedback, context: common
+        ids: openIds, feedback, context: common
       }, {
         kind: "mutation",
         signal,
         reconciliation: {
           targetModel: "mail.activity",
-          knownIds: ids,
+          knownIds: openIds,
           fields: ["res_model", "res_id"],
-          suggestedTool: "activities_list_for_record",
-          instructions: "List the activities of the records concerned. An activity that is gone was completed; do not send its feedback again."
+          suggestedTool: "odoo_read_records",
+          instructions: "Read these mail.activity ids with active_test false. An activity with date_done set was completed; do not send its feedback again."
         }
       });
       return receipt.finalize((result) => ({
         data: {
           result,
-          completed: activities.map((activity) => ({
-            activity_id: Number(activity.id),
-            summary: typeof activity.summary === "string" ? activity.summary : null,
-            record: typeof activity.res_model === "string" && Number.isInteger(activity.res_id)
-              ? recordRef(context, activity.res_model, activity.res_id as number)
-              : null
-          })),
+          completed: open.map(summarize),
+          already_done: alreadyDone,
           correlation_id: context.correlationId,
           outcome: "succeeded" as const
-        }
+        },
+        ...(alreadyDone.length ? { warnings: [`${alreadyDone.length} activit${alreadyDone.length === 1 ? "y was" : "ies were"} already done and left unchanged.`] } : {})
       }));
     }
   }));

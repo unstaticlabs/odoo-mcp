@@ -18,7 +18,7 @@ async function taskContext(task: Record<string, unknown>, dependencies: unknown[
     return Response.json([]);
   });
   const server = createCapabilityRegistry(new OdooClient(8, 1024 * 1024, fetcher)).createServer({
-    ...requestContext(), profile: "projects", availableModules: new Set(["base", "api_doc", "mail", "project"]),
+    ...requestContext(), profile: "projects", availableModules: new Set(["base", "api_doc", "mail", "project", "usl_project"]),
   });
   const client = new Client({ name: "task-blocker-test", version: "1" });
   const [ct, st] = InMemoryTransport.createLinkedPair();

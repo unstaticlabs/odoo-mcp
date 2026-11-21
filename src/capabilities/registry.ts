@@ -32,6 +32,8 @@ import { SERVER_VERSION } from "../version.js";
  * the catalogue onto the ORM substrate is expected to take this well below
  * 15,000 again. Source-file handoff adds one explicitly measured tool without
  * hiding existing tools or fields; its current budget is recorded in the catalogue.
+ * Raised again to 20,512 for projects_update_task and activities_complete, which
+ * are static on the default profile and add their input and output schemas.
  */
 export const DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET = 20_512;
 

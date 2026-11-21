@@ -1,7 +1,7 @@
 import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createCapabilityRegistry } from "../../src/capabilities/index.js";
-import { formatSources, mergeSources, parseSources } from "../../src/capabilities/project_cards.js";
+import { editSourcesValue, formatSources, mergeSources, parseSources } from "../../src/capabilities/project_cards.js";
 import { OdooClient } from "../../src/odoo/client.js";
 import { requestContext } from "./fixtures.js";
 
@@ -21,7 +21,7 @@ async function connected(handler: Handler) {
     return Response.json(handler(model!, method!, JSON.parse(String(init?.body))));
   });
   const server = createCapabilityRegistry(new OdooClient(8, 1024 * 1024, fetcher)).createServer({
-    ...requestContext(), profile: "projects", availableModules: new Set(["base", "api_doc", "mail", "project"])
+    ...requestContext(), profile: "projects", availableModules: new Set(["base", "api_doc", "mail", "project", "usl_project"])
   });
   const client = new Client({ name: "project-card-test", version: "1.0.0" });
   const [ct, st] = InMemoryTransport.createLinkedPair();
@@ -61,6 +61,27 @@ describe("Sources helpers", () => {
     const merged = mergeSources(PROPERTIES, ["github:org/repo#12", "github:org/repo#13"], ["mattermost:host/abc"]);
     expect(merged.properties[0]).toMatchObject({ name: "a1b2c3", value: " github:org/repo#12 github:org/repo#13 " });
     expect(merged.properties[1]).toBe(PROPERTIES[1]);
+  });
+
+  it("keeps free text and multi-line values untouched apart from the requested change", () => {
+    const prose = "See notes:  the PR\n  github:org/repo#12 (merged)\nand more.";
+    expect(editSourcesValue(prose, [], [])).toBe(prose);
+    expect(editSourcesValue(prose, ["github:org/repo#13"], [])).toBe(`${prose} github:org/repo#13`);
+    expect(editSourcesValue(prose, ["github:org/repo#12"], [])).toBe(prose);
+    expect(editSourcesValue(prose, [], ["github:org/repo#12"])).toBe("See notes:  the PR (merged)\nand more.");
+    expect(editSourcesValue(prose, [], ["github:org/repo"])).toBe(prose);
+
+    const lines = " a\n b\n c\n";
+    expect(editSourcesValue(lines, ["d"], [])).toBe(" a\n b\n c\nd");
+    expect(editSourcesValue(lines, [], ["b"])).toBe(" a\n c\n");
+  });
+
+  it("removes only (sources_remove alone) and keeps the space convention", () => {
+    expect(editSourcesValue(" a b c ", [], ["b"])).toBe(" a c ");
+    expect(editSourcesValue("a b", [], ["a"])).toBe("b");
+    expect(editSourcesValue(" a ", [], ["a"])).toBe("");
+    expect(editSourcesValue("", ["a", "a", "b"], [])).toBe(" a b ");
+    expect(editSourcesValue("a", ["b"], [])).toBe("a b");
   });
 
   it("refuses a project without exactly one Sources property", () => {
@@ -116,6 +137,18 @@ describe("projects_update_task", () => {
     expect(bodyOf(fetcher, "web_save")).toBeUndefined();
   });
 
+  it("scopes stage_id to the task's project", async () => {
+    const { client, fetcher } = await connected(taskHandler());
+    await client.callTool({ name: "projects_update_task", arguments: { task_id: 42, stage_id: 5, state: "1_done" } });
+    expect(bodyOf(fetcher, "search_read")!.domain).toEqual([["id", "=", 5], ["project_ids", "in", [3]]]);
+  });
+
+  it("writes sources_remove alone", async () => {
+    const { client, fetcher } = await connected(taskHandler());
+    await client.callTool({ name: "projects_update_task", arguments: { task_id: 42, sources_remove: ["mattermost:host/abc"] } });
+    expect(bodyOf(fetcher, "web_save")!.vals).toEqual({ task_properties: [{ ...PROPERTIES[0], value: " github:org/repo#12 " }, PROPERTIES[1]] });
+  });
+
   it("refuses an unknown stage and clears a link with an empty string", async () => {
     const missing = await connected(taskHandler([]));
     const refused = await missing.client.callTool({ name: "projects_update_task", arguments: { task_id: 42, stage: "Nope", state: "1_done" } });
@@ -158,6 +191,29 @@ describe("activities_complete", () => {
     });
   });
 
+  it("reports already-done activities apart and does not write their feedback again", async () => {
+    const { client, fetcher } = await connected((model, method) => {
+      if (method === "read") return [
+        { id: 1, res_model: "project.task", res_id: 42, summary: "Call", date_done: "2026-11-01", active: false },
+        { id: 2, res_model: "project.task", res_id: 42, summary: "Review", date_done: false, active: true }
+      ];
+      return model === "mail.activity" ? [12] : [];
+    });
+    const result = await client.callTool({ name: "activities_complete", arguments: { activity_ids: [1, 2], feedback: "ok" } });
+    expect(result.isError).not.toBe(true);
+    expect(bodyOf(fetcher, "action_feedback")!.ids).toEqual([2]);
+    expect(result.structuredContent).toMatchObject({
+      data: { completed: [{ activity_id: 2 }], already_done: [{ activity_id: 1 }] }
+    });
+    expect(bodyOf(fetcher, "read")!.fields).toEqual(expect.arrayContaining(["date_done", "active"]));
+
+    const allDone = await connected(() => [{ id: 1, res_model: "project.task", res_id: 42, summary: "Call", date_done: "2026-11-01", active: false }]);
+    const none = await allDone.client.callTool({ name: "activities_complete", arguments: { activity_ids: [1], feedback: "ok" } });
+    expect(none.isError).not.toBe(true);
+    expect(bodyOf(allDone.fetcher, "action_feedback")).toBeUndefined();
+    expect(none.structuredContent).toMatchObject({ data: { completed: [], already_done: [{ activity_id: 1 }] } });
+  });
+
   it("refuses missing activities without writing", async () => {
     const { client, fetcher } = await connected(() => [{ id: 1, res_model: "project.task", res_id: 42, summary: "Call" }]);
     const result = await client.callTool({ name: "activities_complete", arguments: { activity_ids: [1, 2], feedback: "ok" } });
@@ -167,20 +223,21 @@ describe("activities_complete", () => {
 });
 
 describe("projects_get_task_context card fields", () => {
-  it("returns link, deprecated PR url when set, and labelled properties with parsed Sources", async () => {
-    const { client } = await connected((model, method) => {
+  it("returns link and labelled properties with parsed Sources", async () => {
+    const { client, fetcher } = await connected((model, method) => {
       if (model === "project.task" && method === "read") {
-        return [{ id: 42, display_name: "Card", state: "01_in_progress", github_url: "https://x.test/1", usl_feedback_pr_url: "https://x.test/old", task_properties: PROPERTIES }];
+        return [{ id: 42, display_name: "Card", state: "01_in_progress", github_url: "https://x.test/1", task_properties: PROPERTIES }];
       }
       return [];
     });
     const result = await client.callTool({ name: "projects_get_task_context", arguments: { task_id: 42 } });
     const task = (result.structuredContent as any).data.context.task;
     expect(task).toMatchObject({
-      link: "https://x.test/1", usl_feedback_pr_url: "https://x.test/old",
+      link: "https://x.test/1",
       sources: ["github:org/repo#12", "mattermost:host/abc"],
       properties: [{ name: "a1b2c3", label: "Sources", type: "char" }, { label: "Owner" }]
     });
     expect(task.task_properties).toBeUndefined();
+    expect(bodyOf(fetcher, "read")!.fields).not.toContain("usl_feedback_pr_url");
   });
 });

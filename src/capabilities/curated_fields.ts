@@ -40,7 +40,7 @@ export const PROJECT_TASK_CONTEXT_FIELDS = [
   "display_name", "project_id", "stage_id", "state", "user_ids", "partner_id", "date_deadline",
   "description", "tag_ids", "parent_id", "child_ids", "company_id", "priority", "create_date", "write_date",
   "allow_task_dependencies", "depend_on_ids", "depend_on_count", "closed_depend_on_count",
-  "github_url", "usl_feedback_pr_url", "task_properties"
+  "github_url", "task_properties"
 ] as const;
 
 /** Project task fields `projects_update_task` reads before and after its single write. */
@@ -55,7 +55,7 @@ export const PROJECT_TASK_CARD_WRITABLE_FIELDS = [
 
 export const PROJECT_STAGE_FIELDS = ["name", "project_ids"] as const;
 
-export const ACTIVITY_COMPLETION_FIELDS = ["res_model", "res_id", "summary"] as const;
+export const ACTIVITY_COMPLETION_FIELDS = ["res_model", "res_id", "summary", "date_done", "active"] as const;
 
 export const CURATED_FIELD_CONTRACTS: readonly CuratedFieldContract[] = [
   { capability: "expenses_get_context", model: "hr.expense", fields: EXPENSE_CONTEXT_FIELDS },

@@ -177,7 +177,7 @@ describe("canonical capability registry", () => {
 
   it("omits capabilities whose Distribution modules are known to be unavailable", () => {
     const registry = createCapabilityRegistry(new OdooClient());
-    const modules = new Set(["base", "api_doc", "mail", "project"]);
+    const modules = new Set(["base", "api_doc", "mail", "project", "usl_project"]);
     const names = registry.list("all", { modules }).map((item) => item.name);
     expect(names).toContain("odoo_search_models");
     expect(names).toContain("projects_get_task_context");

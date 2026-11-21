@@ -245,14 +245,14 @@ export function registerSemanticCapabilities(registry: CapabilityRegistry, clien
     name: "projects_get_task_context",
     title: "Get Project Task Context",
     description:
-      "Read one project task with assignments, stage, state, link (github_url, plus deprecated usl_feedback_pr_url when set), task properties with labels (Sources parsed into sources), dependencies and readable open blockers, immediate hierarchy, recent chatter, activities, and document links. Waiting is normally dependency-derived; incomplete dependency details and manual Waiting are identified explicitly. Use generic traversal for other fields.",
+      "Read one project task with assignments, stage, state, link (github_url), task properties with labels (Sources parsed into sources), dependencies and readable open blockers, immediate hierarchy, recent chatter, activities, and document links. Waiting is normally dependency-derived; incomplete dependency details and manual Waiting are identified explicitly. Use generic traversal for other fields.",
     layer: "semantic",
     toolsets: ["projects", "activities", "documents"],
     profiles: ["projects"],
     effect: "read",
     annotations: readAnnotations,
     keywords: ["task", "project", "chatter", "activity", "documents", "context"],
-    requiredModules: ["project", "mail"],
+    requiredModules: ["project", "mail", "usl_project"],
     requiredModelAccess: [
       { model: "project.task", operation: "read" },
       { model: "mail.activity", operation: "read" },
@@ -308,7 +308,6 @@ export function registerSemanticCapabilities(registry: CapabilityRegistry, clien
       // Property definitions carry UI noise; return label, type and value only.
       const properties = propertySummaries(taskView.task_properties);
       delete taskView.task_properties;
-      if (!taskView.usl_feedback_pr_url) delete taskView.usl_feedback_pr_url;
       return {
         data: { context: { task: { ...taskView, link: taskView.github_url || null, properties, sources: sourcesReferences(properties),
             _ref: ref(context, "project.task", task_id, task.display_name) },

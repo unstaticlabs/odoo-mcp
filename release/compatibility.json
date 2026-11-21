@@ -17,7 +17,8 @@
     "usl_b2c",
     "usl_documents",
     "usl_expense_batch",
-    "usl_home"
+    "usl_home",
+    "usl_project"
   ],
   "required_public_methods": [
     "usl.agent.current_identity",
