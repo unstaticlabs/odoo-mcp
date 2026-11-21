@@ -299,7 +299,7 @@ export function registerOperationalCapabilities(registry: CapabilityRegistry, cl
     name: "activities_schedule",
     title: "Schedule Activity",
     description:
-      "Schedule one activity on one chatter-enabled Odoo record through that model's public activity_schedule method. Use for assigned follow-up work; use odoo_post_message for an unassigned note.",
+      "Schedule one activity on one chatter-enabled Odoo record through that model's public activity_schedule method. Use for assigned follow-up work; use odoo_add_internal_note for an unassigned note, and activities_complete when the work is done.",
     layer: "business_action",
     toolsets: ["activities"],
     profiles: [],

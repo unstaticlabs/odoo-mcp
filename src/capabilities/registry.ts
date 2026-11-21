@@ -33,7 +33,7 @@ import { SERVER_VERSION } from "../version.js";
  * 15,000 again. Source-file handoff adds one explicitly measured tool without
  * hiding existing tools or fields; its current budget is recorded in the catalogue.
  */
-export const DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET = 19_456;
+export const DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET = 20_512;
 
 export type CapabilityLayer = "generic" | "semantic" | "business_action";
 export type CapabilityEffect = "read" | "write" | "consequential" | "irreversible";

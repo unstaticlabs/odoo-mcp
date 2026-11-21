@@ -35,8 +35,35 @@ export const EXPENSE_DRAFT_WRITABLE_FIELDS = [
   "expense_batch_id", "vendor_id", "existing_bill_id", "has_existing_bill"
 ] as const;
 
+/** Project task fields `projects_get_task_context` reads. `github_url` is the generic Link field. */
+export const PROJECT_TASK_CONTEXT_FIELDS = [
+  "display_name", "project_id", "stage_id", "state", "user_ids", "partner_id", "date_deadline",
+  "description", "tag_ids", "parent_id", "child_ids", "company_id", "priority", "create_date", "write_date",
+  "allow_task_dependencies", "depend_on_ids", "depend_on_count", "closed_depend_on_count",
+  "github_url", "usl_feedback_pr_url", "task_properties"
+] as const;
+
+/** Project task fields `projects_update_task` reads before and after its single write. */
+export const PROJECT_TASK_CARD_FIELDS = [
+  "display_name", "project_id", "stage_id", "state", "github_url", "task_properties"
+] as const;
+
+/** Project task fields `projects_update_task` may write. */
+export const PROJECT_TASK_CARD_WRITABLE_FIELDS = [
+  "stage_id", "state", "description", "github_url", "task_properties"
+] as const;
+
+export const PROJECT_STAGE_FIELDS = ["name", "project_ids"] as const;
+
+export const ACTIVITY_COMPLETION_FIELDS = ["res_model", "res_id", "summary"] as const;
+
 export const CURATED_FIELD_CONTRACTS: readonly CuratedFieldContract[] = [
   { capability: "expenses_get_context", model: "hr.expense", fields: EXPENSE_CONTEXT_FIELDS },
   { capability: "expenses_get_context", model: "ir.attachment", fields: EXPENSE_ATTACHMENT_FIELDS },
-  { capability: "expenses_update_draft", model: "hr.expense", fields: EXPENSE_DRAFT_WRITABLE_FIELDS }
+  { capability: "expenses_update_draft", model: "hr.expense", fields: EXPENSE_DRAFT_WRITABLE_FIELDS },
+  { capability: "projects_get_task_context", model: "project.task", fields: PROJECT_TASK_CONTEXT_FIELDS },
+  { capability: "projects_update_task", model: "project.task", fields: PROJECT_TASK_CARD_FIELDS },
+  { capability: "projects_update_task", model: "project.task", fields: PROJECT_TASK_CARD_WRITABLE_FIELDS },
+  { capability: "projects_update_task", model: "project.task.type", fields: PROJECT_STAGE_FIELDS },
+  { capability: "activities_complete", model: "mail.activity", fields: ACTIVITY_COMPLETION_FIELDS }
 ];

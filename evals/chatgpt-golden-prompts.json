@@ -36,11 +36,25 @@
       "backend_metadata": "available",
       "prompt": "Create a disposable QA task in the test project, post an internal note, and schedule a Call activity for the test assignee tomorrow.",
       "expected": {
-        "visible_tools": ["projects_create_task", "projects_get_task_context", "odoo_post_message", "activities_list_for_record", "activities_schedule"],
+        "visible_tools": ["projects_create_task", "projects_get_task_context", "odoo_add_internal_note", "activities_list_for_record", "activities_schedule"],
         "hidden_tools": ["odoo_delete_records"],
-        "preferred_tools": ["projects_create_task", "odoo_post_message", "activities_schedule"],
-        "forbidden_tools": ["odoo_call_method", "odoo_create_records"],
-        "assertions": ["Resolve project, activity type, assignee and date from live QA context, not guessed IDs.", "Each requested action is one separate transaction; do not claim multi-tool atomicity.", "After an unknown outcome, reconcile instead of blindly repeating a mutation."]
+        "preferred_tools": ["projects_create_task", "odoo_add_internal_note", "activities_schedule"],
+        "forbidden_tools": ["odoo_call_method", "odoo_create_records", "odoo_post_message"],
+        "assertions": ["The internal note is an unassigned note: use odoo_add_internal_note, not odoo_post_message.", "Resolve project, activity type, assignee and date from live QA context, not guessed IDs.", "Each requested action is one separate transaction; do not claim multi-tool atomicity.", "After an unknown outcome, reconcile instead of blindly repeating a mutation."]
+      }
+    },
+    {
+      "id": "chatgpt_close_card_and_activity",
+      "scenario": "everyday_workflow",
+      "profile": "default",
+      "backend_metadata": "available",
+      "prompt": "The disposable QA task is finished: move it to its Done stage, replace its description with a short HTML brief of the outcome, link the pull request, add the pull request to Sources, and mark its open follow-up activity done.",
+      "expected": {
+        "visible_tools": ["projects_get_task_context", "projects_update_task", "activities_list_for_record", "activities_complete"],
+        "hidden_tools": ["odoo_delete_records"],
+        "preferred_tools": ["projects_get_task_context", "projects_update_task", "activities_complete"],
+        "forbidden_tools": ["odoo_call_method", "odoo_update_records"],
+        "assertions": ["Stage and state are sent together in one projects_update_task call; the read-back confirms both.", "The description is HTML with description_is_html true and replaces the brief; no log or temporary status goes in it.", "Sources is edited with sources_add, never by overwriting task_properties.", "Only activities that are really done are completed, with a feedback text."]
       }
     },
     {
