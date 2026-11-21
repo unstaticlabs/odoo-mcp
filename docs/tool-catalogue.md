@@ -9,10 +9,10 @@ refer here instead of repeating them.
 
 | Measure | Value |
 | --- | ---: |
-| Tools on `/mcp` with every feature available | 33 |
-| Tools on `/mcp` without document materialization | 31 |
-| Estimated input/output schema tokens on `/mcp` | 19,374 |
-| Budget enforced by `/readyz` (`DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET`) | 19,456 |
+| Tools on `/mcp` with every feature available | 35 |
+| Tools on `/mcp` without document materialization | 33 |
+| Estimated input/output schema tokens on `/mcp` | 20,429 |
+| Budget enforced by `/readyz` (`DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET`) | 20,512 |
 
 Odoo module, method, and access availability can lower the counts further.
 Schema estimates are not measured model usage. Update this table, and only this
@@ -66,6 +66,10 @@ Document tools use the Distribution archive facade for search, context, bounded 
 
 Thin domain list/get wrappers are intentionally absent where generic search/read already communicates the task cleanly.
 
+## Card maintenance
+
+`projects_update_task` writes stage, state, description, link (`github_url`) and Sources references of one task in a single `web_save`; state is required with a stage because Odoo resets it otherwise. `activities_complete` marks activities done through `action_feedback`. Both are static on `/mcp`; see [keeping a project card](projects-cards.md) for what belongs where.
+
 ## Everyday workflows on `/mcp`
 
 These workflows are complete on the default profile without a profile switch:
@@ -74,8 +78,8 @@ These workflows are complete on the default profile without a profile switch:
 | --- | --- |
 | Find and read documents | `documents_search`, `documents_get_context`, `documents_get_content` |
 | Obtain original bytes and clean up | `documents_create_download_url`, `documents_revoke_download_url` |
-| Create and maintain tasks | `projects_create_task`, `projects_get_task_context`, `odoo_update_records` |
-| Chatter and follow-ups | `odoo_add_internal_note` (no notifications), `odoo_post_message` (may notify), `activities_list_for_record`, `activities_schedule` |
+| Create and maintain tasks | `projects_create_task`, `projects_get_task_context`, `projects_update_task`, `odoo_update_records` |
+| Chatter and follow-ups | `odoo_add_internal_note` (no notifications), `odoo_post_message` (may notify), `activities_list_for_record`, `activities_schedule`, `activities_complete` |
 | Prepare expenses | `expenses_get_context`, `expenses_update_draft` |
 | Split a draft or correct all linked parts | `expenses_split_draft`, `expenses_correct_draft_family` |
 | Prepare vendor bills/credit notes | `accounting_get_invoice_context`, `expenses_configure_draft_vendor_bill` |

@@ -17,7 +17,8 @@
     "usl_b2c",
     "usl_documents",
     "usl_expense_batch",
-    "usl_home"
+    "usl_home",
+    "usl_project"
   ],
   "required_public_methods": [
     "usl.agent.current_identity",
@@ -65,11 +66,15 @@
     "ir.attachment.create",
     "ir.attachment.search_read",
     "ir.model.search_read",
+    "mail.activity.action_feedback",
+    "mail.activity.read",
     "mail.activity.search_read",
     "mail.message.search_read",
     "project.task.create",
     "project.task.read",
     "project.task.search_read",
+    "project.task.type.search_read",
+    "project.task.web_save",
     "rebuild.account.management.summary.line.search_read",
     "rebuild.account.overview.search_read",
     "rebuild.account.tax.report.line.search_read",
