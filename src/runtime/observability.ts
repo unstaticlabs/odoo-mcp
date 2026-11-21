@@ -272,6 +272,23 @@ function copyIdentifier(
   if (value) target[name] = value;
 }
 
+/** Read only the bounded, enumerated failure code before discarding the SDK response. */
+function structuredFailureClass(response: unknown): string | undefined {
+  if (typeof response !== "object" || response === null || !("isError" in response) || response.isError !== true) return undefined;
+  const result = response as { structuredContent?: unknown; content?: unknown };
+  let envelope = result.structuredContent;
+  if (!envelope && Array.isArray(result.content)) {
+    const first = result.content[0];
+    if (first?.type !== "text" || typeof first.text !== "string" || first.text.length > 16_384) return undefined;
+    try { envelope = JSON.parse(first.text); } catch { return undefined; }
+  }
+  if (typeof envelope !== "object" || envelope === null || !("error" in envelope)) return undefined;
+  const error = envelope.error;
+  if (typeof error !== "object" || error === null || !("code" in error) || typeof error.code !== "string") return undefined;
+  const code = error.code.replace(/^ODOO_/, "").toLowerCase();
+  return SAFE_ERROR_CLASSES.has(code) ? code : undefined;
+}
+
 function filterPostHogEvent(event: PostHogCaptureEvent): PostHogCaptureEvent | null {
   if (!SAFE_MCP_EVENTS.has(event.event)) return null;
   const source = event.properties ?? {};
@@ -299,7 +316,9 @@ function filterPostHogEvent(event: PostHogCaptureEvent): PostHogCaptureEvent | n
   if (duration !== undefined) properties.$mcp_duration_ms = duration;
   const isError = safeBoolean(source.$mcp_is_error);
   if (isError !== undefined) properties.$mcp_is_error = isError;
-  const errorClass = normalizedErrorClass(source.$mcp_error_type);
+  const errorClass = isError === true
+    ? structuredFailureClass(source.$mcp_response) ?? normalizedErrorClass(source.$mcp_error_type)
+    : undefined;
   if (errorClass) properties.$mcp_error_type = errorClass;
 
   if (Array.isArray(source.$mcp_listed_tool_names)) {

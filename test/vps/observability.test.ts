@@ -259,6 +259,50 @@ describe("privacy-safe PostHog MCP analytics", () => {
     expect(events.filter((event) => event.event === "usl_mcp_tool_completed")).toHaveLength(0);
   });
 
+  it("classifies concurrent structured Odoo failures without capturing private error text", async () => {
+    const { posthog, events } = capturingPostHog();
+    const observability = createObservability(readyConfiguration(), { posthog });
+    closeCallbacks.push(async () => observability.close());
+    const fetcher = vi.fn<typeof fetch>(async url => {
+      const denied = String(url).includes("res.partner");
+      await new Promise(resolve => setTimeout(resolve, denied ? 10 : 1));
+      return Response.json({ message: "private customer and token must stay local" }, { status: denied ? 403 : 404 });
+    });
+    const registry = createCapabilityRegistry(new OdooClient(8, 1024 * 1024, fetcher));
+    const context = { ...requestContext(), eventObserver: observability,
+      analyticsPrincipalId: observability.principalId(requestContext().principal) };
+    const server = registry.createServer(context);
+    observability.instrumentServer(server, context, registry.list("default"));
+    const client = await connect(server);
+    const results = await Promise.all(["res.partner", "project.task"].map(model => client.callTool({
+      name: "odoo_search_records", arguments: { model, domain: [], fields: ["display_name"], limit: 1 }
+    })));
+    expect(results.every(result => result.isError)).toBe(true);
+    await vi.waitFor(() => expect(events.filter(event => event.event === "$mcp_tool_call")).toHaveLength(2));
+    const calls = events.filter(event => event.event === "$mcp_tool_call");
+    expect(calls.map(event => event.properties?.$mcp_error_type).sort())
+      .toEqual(["model_or_method_not_found", "permission_denied"]);
+    expect(JSON.stringify(events)).not.toContain("private customer");
+    expect(JSON.stringify(events)).not.toContain("token must stay local");
+    expect(events.filter(event => event.event === "usl_mcp_tool_completed")).toHaveLength(0);
+  });
+
+  it.each([
+    JSON.stringify({ error: { code: "private_secret_permission_value", message: "private response" } }),
+    "not valid JSON: private response",
+    "x".repeat(16_385)
+  ])("keeps malformed or unrecognized structured errors private", text => {
+    const event = sanitizePostHogEvent({
+      event: "$mcp_tool_call", distinct_id: "a".repeat(64),
+      properties: { $mcp_is_error: true, $mcp_error_type: "Error",
+        usl_capability_id: "test.analytics", $mcp_response: { isError: true, content: [{ type: "text", text }] } }
+    });
+    expect(event?.properties?.$mcp_error_type).toBe("unknown");
+    expect(JSON.stringify(event)).not.toContain("private response");
+    expect(JSON.stringify(event)).not.toContain("private_secret_permission_value");
+    expect(event?.properties).not.toHaveProperty("$mcp_response");
+  });
+
   it("leaves the advertised tool interface unchanged", async () => {
     const registry = createCapabilityRegistry(new OdooClient());
     const plainServer = registry.createServer(requestContext());

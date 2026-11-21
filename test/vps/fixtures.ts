@@ -71,6 +71,7 @@ export function requestContext(accessMode: "read_only" | "read_write" | "mixed" 
     profile: "default",
     availablePublicMethods: new Map([
       ["usl.agent", new Set(["current_identity", "submit_mcp_feedback"])],
+      ["usl.docs.guide", new Set(["search_pages", "read_page", "list_pages"])],
       ["usl.document", new Set([
         "mcp_search",
         "mcp_get",
