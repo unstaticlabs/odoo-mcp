@@ -84,7 +84,8 @@ export function editSourcesValue(value: unknown, add: readonly string[], remove:
       for (let i = from; i < start; i += 1) cut[i] = true;
       if (start === 0) for (let i = end; i < text.length && /\s/.test(text[i]!); i += 1) cut[i] = true;
     }
-    text = [...text].filter((_char, index) => !cut[index]).join("");
+    // Indices are UTF-16 code units (matchAll, length), so filter code units, not code points.
+    text = text.split("").filter((_unit, index) => !cut[index]).join("");
   }
   if (!text.trim()) text = "";
   const present = new Set(text.split(/\s+/).filter(Boolean));

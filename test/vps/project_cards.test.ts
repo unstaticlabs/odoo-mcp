@@ -78,6 +78,8 @@ describe("Sources helpers", () => {
 
   it("removes only (sources_remove alone) and keeps the space convention", () => {
     expect(editSourcesValue(" a b c ", [], ["b"])).toBe(" a c ");
+    expect(editSourcesValue("😀😀 b x y", [], ["b"])).toBe("😀😀 x y");
+    expect(editSourcesValue("😀😀 x b", [], ["b"])).toBe("😀😀 x");
     expect(editSourcesValue("a b", [], ["a"])).toBe("b");
     expect(editSourcesValue(" a ", [], ["a"])).toBe("");
     expect(editSourcesValue("", ["a", "a", "b"], [])).toBe(" a b ");
