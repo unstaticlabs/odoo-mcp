@@ -7,6 +7,8 @@ import {
   PositiveIdSchema
 } from "../odoo/schemas.js";
 import type { RequestContext } from "../runtime/context.js";
+import { PROJECT_TASK_CONTEXT_FIELDS } from "./curated_fields.js";
+import { propertySummaries, sourcesReferences } from "./project_cards.js";
 import { CapabilityRegistry, defineCapability } from "./registry.js";
 
 const RecordSchema = z.record(z.string(), z.unknown());
@@ -243,14 +245,14 @@ export function registerSemanticCapabilities(registry: CapabilityRegistry, clien
     name: "projects_get_task_context",
     title: "Get Project Task Context",
     description:
-      "Read one project task with assignments, stage, dependencies and readable open blockers, immediate hierarchy, recent chatter, activities, and document links. Waiting is normally dependency-derived; incomplete dependency details and manual Waiting are identified explicitly. Use generic traversal for other fields.",
+      "Read one project task with assignments, stage, state, link (github_url), task properties with labels (Sources parsed into sources), dependencies and readable open blockers, immediate hierarchy, recent chatter, activities, and document links. Waiting is normally dependency-derived; incomplete dependency details and manual Waiting are identified explicitly. Use generic traversal for other fields.",
     layer: "semantic",
     toolsets: ["projects", "activities", "documents"],
     profiles: ["projects"],
     effect: "read",
     annotations: readAnnotations,
     keywords: ["task", "project", "chatter", "activity", "documents", "context"],
-    requiredModules: ["project", "mail"],
+    requiredModules: ["project", "mail", "usl_project"],
     requiredModelAccess: [
       { model: "project.task", operation: "read" },
       { model: "mail.activity", operation: "read" },
@@ -270,11 +272,7 @@ export function registerSemanticCapabilities(registry: CapabilityRegistry, clien
       const [rows, activities, messages, documentLinks] = await Promise.all([
         client.call<unknown[]>(context, "project.task", "read", {
           ids: [task_id],
-          fields: [
-            "display_name", "project_id", "stage_id", "state", "user_ids", "partner_id", "date_deadline",
-            "description", "tag_ids", "parent_id", "child_ids", "company_id", "priority", "create_date", "write_date",
-            "allow_task_dependencies", "depend_on_ids", "depend_on_count", "closed_depend_on_count"
-          ],
+          fields: [...PROJECT_TASK_CONTEXT_FIELDS],
           context: common
         }, { signal }),
         recordActivities(client, context, "project.task", task_id, chatter_limit, requestedContext, signal),
@@ -307,8 +305,12 @@ export function registerSemanticCapabilities(registry: CapabilityRegistry, clien
       // Do not return opaque relation IDs whose records the second read could
       // not access; links below identify only readable open blockers.
       delete taskView.depend_on_ids;
+      // Property definitions carry UI noise; return label, type and value only.
+      const properties = propertySummaries(taskView.task_properties);
+      delete taskView.task_properties;
       return {
-        data: { context: { task: { ...taskView, _ref: ref(context, "project.task", task_id, task.display_name) },
+        data: { context: { task: { ...taskView, link: taskView.github_url || null, properties, sources: sourcesReferences(properties),
+            _ref: ref(context, "project.task", task_id, task.display_name) },
           dependencies: { enabled, complete, total_count: totalCount, closed_count: closedCount,
             waiting_reason: waitingReason, open_blockers: openBlockers },
           activities, messages, document_links: documentLinks.records } },

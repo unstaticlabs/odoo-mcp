@@ -82,6 +82,7 @@ container build, the opt-in live smoke suite, and the release gates.
 - [Architecture](docs/architecture.md)
 - [Authentication and credential operations](docs/authentication.md)
 - [Tool catalogue and profiles](docs/tool-catalogue.md)
+- [Keeping a project card](docs/projects-cards.md)
 - [VPS deployment and rollback](docs/deployment.md)
 - [MCP observability and privacy](docs/observability.md)
 - [Testing](docs/testing.md)

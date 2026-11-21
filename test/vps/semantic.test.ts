@@ -363,7 +363,7 @@ describe("Distribution semantic and business capabilities", () => {
       if (model === "project.task") return Response.json([{ id: 42, display_name: "Card 42" }]);
       return Response.json([]);
     });
-    const modules = new Set(["base", "api_doc", "mail", "project"]);
+    const modules = new Set(["base", "api_doc", "mail", "project", "usl_project"]);
     const server = createCapabilityRegistry(new OdooClient(8, 1024 * 1024, fetcher)).createServer({
       ...requestContext(),
       profile: "projects",

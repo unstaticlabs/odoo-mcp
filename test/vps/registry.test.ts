@@ -45,7 +45,7 @@ describe("canonical capability registry", () => {
     expect(names).not.toContain("odoo_delete_records");
     expect(names).not.toContain("odoo_search_capabilities");
     expect(names).not.toContain("odoo_expand_record");
-    expect(registry.profileBudget("default")).toMatchObject({ tools: 34 });
+    expect(registry.profileBudget("default")).toMatchObject({ tools: 36 });
     expect(registry.profileBudget("default").schemaTokens)
       .toBeLessThanOrEqual(DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET);
   });
@@ -177,7 +177,7 @@ describe("canonical capability registry", () => {
 
   it("omits capabilities whose Distribution modules are known to be unavailable", () => {
     const registry = createCapabilityRegistry(new OdooClient());
-    const modules = new Set(["base", "api_doc", "mail", "project"]);
+    const modules = new Set(["base", "api_doc", "mail", "project", "usl_project"]);
     const names = registry.list("all", { modules }).map((item) => item.name);
     expect(names).toContain("odoo_search_models");
     expect(names).toContain("projects_get_task_context");
