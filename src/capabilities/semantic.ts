@@ -591,7 +591,7 @@ export function registerDocumentCapabilities(registry: CapabilityRegistry, clien
     name: "documents_get_context",
     title: "Get Document Context",
     description:
-      "Get one USL document's metadata, versions, and linked Odoo records in one agent call. Use after document search; fetch paginated extracted text separately with documents_get_content.",
+      "Get a document’s metadata, versions and linked records. Set include_integrity to compare original and archive digests and any confirmed current file sizes when you have file access. Use documents_get_content for extracted text.",
     layer: "semantic",
     toolsets: ["documents"],
     profiles: ["documents"],
@@ -607,13 +607,19 @@ export function registerDocumentCapabilities(registry: CapabilityRegistry, clien
     defaultVisible: true,
     alwaysLoad: false,
     sortOrder: 310,
-    input: z.object({ document_id: PositiveIdSchema, context: OdooContextSchema }).strict(),
+    input: z.object({
+      document_id: PositiveIdSchema,
+      include_integrity: z.boolean().optional(),
+      context: OdooContextSchema
+    }).strict(),
     output: ContextOutputSchema,
-    async handler({ document_id, context: requestedContext }, context, signal) {
+    async handler({ document_id, include_integrity, context: requestedContext }, context, signal) {
       const common = rpcContext(requestedContext, context);
       const [document, versions, links] = await Promise.all([
         client.call<Record<string, unknown>>(context, "usl.document", "mcp_get", { document_id, context: common }, { signal }),
-        client.call<Record<string, unknown>>(context, "usl.document", "mcp_get_versions", { document_id, context: common }, { signal }),
+        client.call<Record<string, unknown>>(context, "usl.document", "mcp_get_versions", {
+          document_id, ...(include_integrity ? { include_integrity: true } : {}), context: common
+        }, { signal }),
         client.call<Record<string, unknown>>(context, "usl.document", "mcp_get_links", { document_id, context: common }, { signal })
       ]);
       return { data: { context: { document: { ...document, _ref: ref(context, "usl.document", document_id, document.name) }, versions: versions.versions ?? [], links: links.links ?? [] } } };
