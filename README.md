@@ -46,6 +46,11 @@ npm start
 
 Configure at least one allowed Odoo target. A single target can use `ODOO_PUBLIC_ORIGIN`, `ODOO_INTERNAL_ORIGIN`, and `ODOO_DATABASE`; multiple targets use `ODOO_TARGETS_JSON`.
 
+For a managed runtime, `MCP_MAINTENANCE_MARKER` can point to an absolute file in
+a mounted directory. While the marker exists, MCP and OAuth requests return
+HTTP 503 with `Retry-After: 60`. The `/healthz` and `/readyz` endpoints stay
+available so the release controller can qualify the candidate before reopening.
+
 Direct HTTP clients send all three headers:
 
 ```text

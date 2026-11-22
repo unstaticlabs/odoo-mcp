@@ -1,4 +1,6 @@
 import { pathToFileURL } from "node:url";
+import { lstat, stat } from "node:fs/promises";
+import { dirname } from "node:path";
 import { createMcpExpressApp } from "@modelcontextprotocol/express";
 import { toNodeHandler } from "@modelcontextprotocol/node";
 import { createMcpHandler, type AuthInfo } from "@modelcontextprotocol/server";
@@ -43,6 +45,21 @@ function profileFromRequest(request: Request): ProfileName {
 function correlationIdFromRequest(request: Request): string {
   const submitted = request.header("X-Correlation-Id")?.trim();
   return submitted && /^[A-Za-z0-9._-]{1,128}$/.test(submitted) ? submitted : crypto.randomUUID();
+}
+
+async function maintenanceActive(marker: string): Promise<boolean> {
+  try {
+    await lstat(marker);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") return true;
+  }
+  try {
+    return !(await stat(dirname(marker))).isDirectory();
+  } catch {
+    // A missing or unreadable mount does not prove that staging was reopened.
+    return true;
+  }
 }
 
 export function createHttpApp(
@@ -219,6 +236,17 @@ export function createHttpApp(
       analytics: services.observability.status
     });
   });
+  if (config.maintenanceMarker) {
+    const marker = config.maintenanceMarker;
+    app.use(async (_request, response, next) => {
+      if (!await maintenanceActive(marker)) {
+        next();
+        return;
+      }
+      response.set("Retry-After", "60").set("Cache-Control", "no-store")
+        .status(503).json({ error: "maintenance" });
+    });
+  }
 
   if (oauth) {
     const authNodeHandler = toNodeHandler({ fetch: oauth.authFetch });

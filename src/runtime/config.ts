@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { readFileSync } from "node:fs";
+import { isAbsolute } from "node:path";
 import { normalizeOdooOrigin, validateOdooDatabase } from "../odoo-target.js";
 import type { OdooPrincipal } from "./context.js";
 
@@ -31,6 +32,7 @@ export interface RuntimeConfig {
   accessRefreshTimeoutMs: number;
   allowLocalHttpOdoo: boolean;
   documentMaterializationEnabled: boolean;
+  maintenanceMarker?: string;
   oauth: OAuthRuntimeConfig | null;
   analytics: AnalyticsRuntimeConfig;
   releaseIdentity: ReleaseIdentity;
@@ -238,6 +240,10 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runtime
   const allowedHosts = csv(env.MCP_ALLOWED_HOSTS);
   const allowedOrigins = [...new Set([publicHostname, ...csv(env.MCP_ALLOWED_ORIGINS)])];
   const oauthEnabled = booleanEnv(env.MCP_OAUTH_ENABLED);
+  const maintenanceMarker = env.MCP_MAINTENANCE_MARKER?.trim() || undefined;
+  if (maintenanceMarker && (!isAbsolute(maintenanceMarker) || maintenanceMarker.includes("\0"))) {
+    throw new Error("MCP_MAINTENANCE_MARKER must be an absolute file path");
+  }
   const authSecret = secretValue(env, "BETTER_AUTH_SECRET");
   const encryptionKey = secretValue(env, "MCP_CREDENTIAL_ENCRYPTION_KEY");
   const oauthValues = [env.MCP_OAUTH_DATABASE, authSecret, encryptionKey];
@@ -273,6 +279,7 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runtime
     ) * 1_000,
     allowLocalHttpOdoo: allowLocalHttp,
     documentMaterializationEnabled: booleanEnv(env.MCP_DOCUMENT_MATERIALIZATION_ENABLED),
+    maintenanceMarker,
     releaseIdentity: {
       mcpCommit: releaseCommit(env.MCP_BUILD_ID),
       gitopsCommit: releaseCommit(env.MCP_GITOPS_COMMIT)
