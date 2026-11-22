@@ -76,6 +76,16 @@ describe("runtime target mapping", () => {
     })).documentMaterializationEnabled).toBe(true);
   });
 
+  it("keeps maintenance opt-in and requires an absolute marker path", () => {
+    expect(loadRuntimeConfig(environment()).maintenanceMarker).toBeUndefined();
+    expect(loadRuntimeConfig(environment({
+      MCP_MAINTENANCE_MARKER: "/run/usl-gateway/maintenance"
+    })).maintenanceMarker).toBe("/run/usl-gateway/maintenance");
+    expect(() => loadRuntimeConfig(environment({
+      MCP_MAINTENANCE_MARKER: "gateway/maintenance"
+    }))).toThrow("must be an absolute file path");
+  });
+
   it("requires the direct credential tuple as a unit", () => {
     const config = loadRuntimeConfig(environment());
     expect(() => resolveDirectConnection(config, new Headers({
