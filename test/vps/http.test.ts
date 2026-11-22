@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -154,6 +154,41 @@ describe("VPS HTTP MCP transport", () => {
     expect(readiness.mcp_commit).toBe("c".repeat(40));
     // The GitOps ledger identity stays off the public endpoint.
     expect(readiness).not.toHaveProperty("gitops_commit");
+  });
+
+  it("closes direct MCP traffic during maintenance while keeping admission probes", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "odoo-mcp-maintenance-"));
+    const marker = join(directory, "maintenance");
+    const calls: string[] = [];
+    const origin = await listeningServer({ ...configuration(), maintenanceMarker: marker }, agentIdentity, calls);
+    closeCallbacks.push(async () => rmSync(directory, { recursive: true, force: true }));
+
+    writeFileSync(marker, "synthetic maintenance");
+    for (const path of ["/mcp", "/mcp/accounting", "/oauth/consent", "/.well-known/oauth-protected-resource"]) {
+      const response = await fetch(origin + path, { headers: credentialHeaders });
+      expect(response.status).toBe(503);
+      expect(response.headers.get("Retry-After")).toBe("60");
+      expect(response.headers.get("Cache-Control")).toBe("no-store");
+      expect(await response.json()).toEqual({ error: "maintenance" });
+    }
+    expect(calls).toHaveLength(0);
+    for (const probe of ["/healthz", "/readyz"]) {
+      expect((await fetch(origin + probe)).status).toBe(200);
+    }
+
+    unlinkSync(marker);
+    const client = new Client({ name: "maintenance-test", version: "1" });
+    const transport = new StreamableHTTPClientTransport(new URL(origin + "/mcp"), {
+      requestInit: { headers: credentialHeaders }
+    });
+    closeCallbacks.push(async () => client.close());
+    await client.connect(transport);
+    expect((await client.listTools()).tools.length).toBeGreaterThan(0);
+    expect(calls.length).toBeGreaterThan(0);
+
+    rmSync(directory, { recursive: true });
+    // A missing volume must not look like a successful reopening.
+    expect((await fetch(origin + "/mcp")).status).toBe(503);
   });
 
   it("serves health/readiness and a modern stateless MCP client", async () => {
