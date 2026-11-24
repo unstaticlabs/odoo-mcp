@@ -79,6 +79,40 @@ The credential-encryption value must decode to exactly 32 bytes. Enrollment:
 6. stores the enrollment in the SQLite volume;
 7. continues the authorization-code/PKCE flow.
 
+### Enrollment in the Odoo browser session
+
+Set `MCP_OAUTH_ODOO_HANDOFF=true` to replace the manual API key form with a
+page in Odoo. The setting needs exactly one configured Odoo target with exactly
+one database, and an Odoo release whose `usl_access_control` module serves
+`/usl/agent-access/connect` and `/usl/agent-access/token`. Odoo must list
+`<MCP_PUBLIC_ORIGIN>/oauth/enroll/callback` in `USL_MCP_OAUTH_RETURN_URLS`.
+
+1. `/oauth/enroll` checks the signature of the authorization query. It stores
+   a pending handoff and redirects the browser to Odoo with a `state`, an S256
+   `code_challenge`, the callback URL, and the name of the OAuth client.
+2. Odoo signs the user in, asks for a fresh identity check, and shows the
+   Agents that the user owns. The user selects an Agent or creates one.
+3. Odoo redirects the browser to `/oauth/enroll/callback` with a one-time code.
+4. The MCP sends the code and its `code_verifier` to Odoo on the internal
+   origin. Odoo creates the Agent credential at this moment and returns the
+   key in the response body.
+5. The MCP validates the key, encrypts it in the vault, and continues the
+   authorization-code flow. These are steps 3 to 7 of the list above.
+
+The API key does not go through the browser, a URL, or a log. No shared secret
+exists between the two services: the code is useless without the verifier, and
+only the MCP process holds the verifier. The pending handoff is bound to the
+browser by an `HttpOnly` cookie, works one time, and expires with the signed
+authorization query (10 minutes at most). The vault stores a hash of the state
+and of the cookie value, and the encrypted verifier.
+
+The manual form stays available at `/oauth/enroll/manual`. The Odoo page links
+to it, and the MCP shows the same link after a cancel or a failure. Use it for
+a client whose browser cannot sign in to Odoo.
+
+A failure after step 4 leaves an unused credential on the Agent in Odoo. Its
+name shows the client and the date. Revoke it in **My Agents**.
+
 Direct HTTP performs the same two-request setup only on a credential's first use in the process. OAuth hydrates a complete snapshot from its persistent volume after a process restart and revalidates it out of band; stdio performs discovery once during startup. Run `node dist/auth/cli.js prepare` after migration to prewarm every active OAuth enrollment before replacing the service. Warm requests do not revalidate identity before listing or invoking tools. Odoo still authenticates the Agent credential and enforces current authority on every actual Odoo request.
 
 Default access-token life is one hour. Rotating refresh tokens last 180 days. An enrollment has a hard one-year ceiling and must then reconnect. `/oauth/revoke` removes the enrollment and associated access, refresh, and consent grants. Tokens fail immediately after the enrollment is removed or its configured target disappears.

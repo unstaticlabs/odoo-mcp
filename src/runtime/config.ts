@@ -64,6 +64,18 @@ export interface OAuthRuntimeConfig {
   accessTokenSeconds: number;
   refreshTokenSeconds: number;
   grantCeilingSeconds: number;
+  /**
+   * The Odoo deployment that owns the browser enrollment page. `null` keeps
+   * the manual API key form as the only enrollment path.
+   */
+  odooHandoff: OdooHandoffTarget | null;
+}
+
+export interface OdooHandoffTarget {
+  targetId: string;
+  publicOrigin: string;
+  internalOrigin: string;
+  database: string;
 }
 
 function csv(value: string | undefined): string[] {
@@ -253,6 +265,14 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runtime
   if (oauthEnabled && oauthValues.some((value) => !value)) {
     throw new Error("OAuth requires MCP_OAUTH_DATABASE, BETTER_AUTH_SECRET, and MCP_CREDENTIAL_ENCRYPTION_KEY");
   }
+  const handoffEnabled = booleanEnv(env.MCP_OAUTH_ODOO_HANDOFF);
+  if (handoffEnabled && !oauthEnabled) {
+    throw new Error("Set MCP_OAUTH_ENABLED=true when enabling MCP_OAUTH_ODOO_HANDOFF");
+  }
+  const handoffTarget = targets[0];
+  if (handoffEnabled && (targets.length !== 1 || !handoffTarget || handoffTarget.databases.length !== 1)) {
+    throw new Error("MCP_OAUTH_ODOO_HANDOFF requires exactly one Odoo target with exactly one database");
+  }
   return {
     host,
     port,
@@ -295,7 +315,15 @@ export function loadRuntimeConfig(env: NodeJS.ProcessEnv = process.env): Runtime
             : [publicOrigin],
           accessTokenSeconds: boundedInteger(env.MCP_OAUTH_ACCESS_TOKEN_SECONDS, 3600, 300, 86_400, "MCP_OAUTH_ACCESS_TOKEN_SECONDS"),
           refreshTokenSeconds: boundedInteger(env.MCP_OAUTH_REFRESH_TOKEN_SECONDS, 180 * 24 * 3600, 3600, 365 * 24 * 3600, "MCP_OAUTH_REFRESH_TOKEN_SECONDS"),
-          grantCeilingSeconds: boundedInteger(env.MCP_OAUTH_GRANT_CEILING_SECONDS, 365 * 24 * 3600, 24 * 3600, 2 * 365 * 24 * 3600, "MCP_OAUTH_GRANT_CEILING_SECONDS")
+          grantCeilingSeconds: boundedInteger(env.MCP_OAUTH_GRANT_CEILING_SECONDS, 365 * 24 * 3600, 24 * 3600, 2 * 365 * 24 * 3600, "MCP_OAUTH_GRANT_CEILING_SECONDS"),
+          odooHandoff: handoffEnabled && handoffTarget
+            ? {
+                targetId: handoffTarget.id,
+                publicOrigin: handoffTarget.publicOrigin,
+                internalOrigin: handoffTarget.internalOrigin,
+                database: handoffTarget.databases[0]!
+              }
+            : null
         }
       : null
   };

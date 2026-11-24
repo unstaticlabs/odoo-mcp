@@ -288,6 +288,35 @@ describe("VPS HTTP MCP transport", () => {
     expect(csp).toContain("connect-src 'self'");
   });
 
+  it("routes the manual enrollment form and the Odoo handoff callback", async () => {
+    const databaseDirectory = mkdtempSync(join(tmpdir(), `odoo-mcp-test-oauth-${randomUUID()}-`));
+    closeCallbacks.push(async () => rmSync(databaseDirectory, { recursive: true, force: true }));
+    const origin = await listeningServer(loadRuntimeConfig({
+      ODOO_PUBLIC_ORIGIN: "https://odoo.example",
+      ODOO_INTERNAL_ORIGIN: "http://odoo:8069",
+      ODOO_DATABASE: "usl",
+      MCP_PUBLIC_ORIGIN: "http://127.0.0.1:3000",
+      MCP_ALLOWED_HOSTS: "127.0.0.1",
+      MCP_ALLOWED_ORIGINS: "127.0.0.1",
+      MCP_OAUTH_ENABLED: "true",
+      MCP_OAUTH_ODOO_HANDOFF: "true",
+      MCP_OAUTH_DATABASE: join(databaseDirectory, "oauth.sqlite"),
+      BETTER_AUTH_SECRET: "vps-test-better-auth-secret-vps-test",
+      MCP_CREDENTIAL_ENCRYPTION_KEY: Buffer.alloc(32, 7).toString("base64")
+    }));
+
+    const manual = await fetch(`${origin}/oauth/enroll/manual`);
+    expect(manual.status).toBe(200);
+    expect(await manual.text()).toContain('name="apiKey"');
+
+    const callback = await fetch(`${origin}/oauth/enroll/callback?state=unknown&code=unknown`);
+    expect(callback.status).toBe(400);
+    expect(callback.headers.get("content-security-policy")).toContain("default-src 'none'");
+    expect(await callback.text()).toContain("Connection request expired");
+
+    expect((await fetch(`${origin}/oauth/enroll/callback`, { method: "POST" })).status).toBe(405);
+  });
+
   it("retains the preceding stateless protocol generation", async () => {
     const origin = await listeningServer();
     const response = await fetch(`${origin}/mcp/advanced`, {
