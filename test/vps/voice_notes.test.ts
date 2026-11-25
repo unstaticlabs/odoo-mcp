@@ -6,7 +6,7 @@ import { requestContext } from "./fixtures.js";
 
 const BASE_MODULES = ["base", "api_doc", "mail", "project", "usl_project"];
 
-async function taskMessages(modules: string[], messages: Record<string, unknown>[]) {
+async function taskMessages(modules: string[] | null, messages: Record<string, unknown>[]) {
   let requested: string[] = [];
   const fetcher = vi.fn<typeof fetch>(async (input, init) => {
     const url = String(input);
@@ -21,7 +21,7 @@ async function taskMessages(modules: string[], messages: Record<string, unknown>
     return Response.json([]);
   });
   const server = createCapabilityRegistry(new OdooClient(8, 1024 * 1024, fetcher)).createServer({
-    ...requestContext(), profile: "projects", availableModules: new Set(modules),
+    ...requestContext(), profile: "projects", availableModules: modules && new Set(modules),
   });
   const client = new Client({ name: "voice-note-test", version: "1" });
   const [ct, st] = InMemoryTransport.createLinkedPair();
@@ -51,9 +51,10 @@ describe("voice note transcripts in record context", () => {
 
   it("keeps a pending transcription visible so the reader knows text is coming", async () => {
     const note = [{ attachment_id: 421, state: "pending", text: "" }];
-    const { messages } = await taskMessages([...BASE_MODULES, "usl_voice"], [
+    const { requested, messages } = await taskMessages([...BASE_MODULES, "usl_voice"], [
       { id: 9, body: "", message_type: "comment", usl_voice_notes: note },
     ]);
+    expect(requested).toContain("usl_voice_notes");
     expect(messages[0]).toMatchObject({ usl_voice_notes: note });
   });
 
@@ -61,5 +62,11 @@ describe("voice note transcripts in record context", () => {
     const { requested, messages } = await taskMessages(BASE_MODULES, [{ id: 8, body: "<p>[QA] Written note</p>", message_type: "comment" }]);
     expect(requested).not.toContain("usl_voice_notes");
     expect(messages).toEqual([{ id: 8, body: "<p>[QA] Written note</p>", message_type: "comment" }]);
+  });
+
+  it("does not ask for the field when the installed modules are unknown", async () => {
+    // An unknown field fails the whole read, so an unknown module set must not guess.
+    const { requested } = await taskMessages(null, []);
+    expect(requested).not.toContain("usl_voice_notes");
   });
 });
