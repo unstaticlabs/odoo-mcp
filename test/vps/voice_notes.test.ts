@@ -21,7 +21,7 @@ async function taskMessages(modules: string[] | null, messages: Record<string, u
     return Response.json([]);
   });
   const server = createCapabilityRegistry(new OdooClient(8, 1024 * 1024, fetcher)).createServer({
-    ...requestContext(), profile: "projects", availableModules: modules && new Set(modules),
+    ...requestContext(), profile: "projects", ...(modules ? { availableModules: new Set(modules) } : {}),
   });
   const client = new Client({ name: "voice-note-test", version: "1" });
   const [ct, st] = InMemoryTransport.createLinkedPair();
