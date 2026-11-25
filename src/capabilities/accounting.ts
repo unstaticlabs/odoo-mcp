@@ -27,7 +27,7 @@ export function registerAccountingCapabilities(registry: CapabilityRegistry, cli
     name: "accounting_get_overview",
     title: "Get Accounting Overview",
     description:
-      "Read the Distribution's company-scoped Accounting cockpit: bank review, draft and incomplete documents, missing evidence, receivables/payables, closing readiness, declarations, hygiene, and review decisions. Use as the first accounting triage call; use generic tools for the underlying records.",
+      "Read the company Accounting cockpit, distinguishing all-date totals, the open annual workspace and latest operational close. Legacy draft_expense_count means expenses to process (draft/submitted/approved), not editable drafts; separate state counts are returned when the server supports them. Native expense permissions still apply.",
     layer: "semantic",
     toolsets: ["accounting", "expenses", "documents"],
     profiles: ["accounting"],
@@ -42,6 +42,21 @@ export function registerAccountingCapabilities(registry: CapabilityRegistry, cli
     input: z.object({ company_id: PositiveIdSchema, context: OdooContextSchema }).strict(),
     output: z.object({ overview: RecordSchema }).strict(),
     async handler({ company_id, context: requestedContext }, context, signal) {
+      const annualFields = ["open_annual_closing_id", "annual_posted_move_count", "annual_journal_count", "annual_archived_journal_count"];
+      const expenseFields = ["draft_only_expense_count", "submitted_expense_count", "approved_expense_count"];
+      const optionalFields = [...annualFields, ...expenseFields];
+      const rpcContext = companyContext(requestedContext, company_id, context);
+      // Negotiate additive fields on this same readable model, without requiring
+      // expense-row access or assuming that the server and MCP deploy together.
+      const metadata = await client.call<Record<string, unknown>>(context, "rebuild.account.overview", "fields_get", {
+        allfields: optionalFields, attributes: ["type"], context: rpcContext
+      }, { signal });
+      if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+        throw new Error("Odoo returned invalid Accounting overview field metadata");
+      }
+      const supportedFields = optionalFields.filter(field => Object.hasOwn(metadata, field));
+      const annualAvailable = annualFields.every(field => supportedFields.includes(field));
+      const expenseAvailable = expenseFields.every(field => supportedFields.includes(field));
       const rows = await client.call<Record<string, unknown>[]>(context, "rebuild.account.overview", "search_read", {
         domain: [["company_id", "=", company_id]],
         fields: [
@@ -56,10 +71,10 @@ export function registerAccountingCapabilities(registry: CapabilityRegistry, cli
           "next_declaration_status", "overdue_declaration_count", "upcoming_declaration_count", "valentin_action_count",
           "accountant_action_count", "hygiene_attention_count", "hygiene_issue_count", "hygiene_status", "evidence_status",
           "review_decision_count", "pending_review_decision_count", "recorded_review_decision_count",
-          "external_report_value_count", "pending_external_report_value_count", "readiness_status"
+          "external_report_value_count", "pending_external_report_value_count", "readiness_status", ...supportedFields
         ],
         limit: 1,
-        context: companyContext(requestedContext, company_id, context)
+        context: rpcContext
       }, { signal });
       const overview = rows[0];
       if (!overview) throw new Error(`No readable Accounting overview exists for company ${company_id}`);
@@ -67,6 +82,15 @@ export function registerAccountingCapabilities(registry: CapabilityRegistry, cli
         data: {
           overview: {
             ...overview,
+            _scope: {
+              posted_move_count: "all_dates",
+              latest_closing_period_id: "latest_operational_close",
+              open_annual_closing_id: "latest_ended_open_annual_workspace",
+              draft_expense_count: { meaning: "expenses_to_process", states: ["draft", "submitted", "approved"], draft_only: false },
+              expense_state_breakdown_available: expenseAvailable,
+              annual_close_fields_available: annualAvailable,
+              expense_counts_grant_edit_permission: false
+            },
             _ref: {
               model: "rebuild.account.overview",
               id: overview.id,
@@ -74,7 +98,11 @@ export function registerAccountingCapabilities(registry: CapabilityRegistry, cli
               url: `${context.principal.publicOrigin}/odoo/rebuild.account.overview/${overview.id}`
             }
           }
-        }
+        },
+        warnings: [
+          ...(!annualAvailable ? ["This server does not expose the full annual-close scope; the latest closing remains operational, not an annual-workspace substitute."] : []),
+          ...(!expenseAvailable ? ["Separate expense state counts are unavailable on this server. The legacy count includes submitted and approved work; do not treat it as editable drafts."] : [])
+        ]
       };
     }
   }));

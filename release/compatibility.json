@@ -78,6 +78,7 @@
     "project.task.type.search_read",
     "project.task.web_save",
     "rebuild.account.management.summary.line.search_read",
+    "rebuild.account.overview.fields_get",
     "rebuild.account.overview.search_read",
     "rebuild.account.tax.report.line.search_read",
     "res.company.read",
