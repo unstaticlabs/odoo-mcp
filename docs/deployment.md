@@ -106,8 +106,7 @@ Odoo records, authorization, and business audit history remain in Odoo and follo
 The `documents_create_download_url` and `documents_revoke_download_url`
 tools require the coordinated `usl_documents` backend public methods and Paperless
 `3.0.5-usl.9`. Until these changes reach `19-usl`, the authoritative Distribution
-source is `usl/codex/chore-post-migration-continuous-operations`. The MCP does not
-proxy file bytes and does not know Paperless credentials. Odoo issues the opaque
+source is `usl/codex/chore-post-migration-continuous-operations`. The download-URL path does not proxy file bytes. MCP never knows Paperless credentials. The optional `binary` mode of `documents_get_content` reads bounded files through the authenticated native `usl.document.mcp_read_binary` method; deploy that server method first. It needs no public bearer ingress. Odoo issues the opaque
 capability and remains the authorization gateway for each GET, HEAD, and Range
 request.
 

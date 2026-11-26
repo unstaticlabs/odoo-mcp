@@ -98,6 +98,7 @@
     "usl.document.mcp_get_content",
     "usl.document.mcp_get_links",
     "usl.document.mcp_get_versions",
+    "usl.document.mcp_read_binary",
     "usl.document.mcp_revoke_download_grant",
     "usl.document.mcp_search",
     "usl.document.unlink_from_record",
