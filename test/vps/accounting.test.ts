@@ -26,7 +26,7 @@ async function connected(fetcher: typeof fetch) {
 
 describe("rebuilt accounting capabilities", () => {
   it("reads the authoritative company overview with a scoped company context", async () => {
-    const fetcher = vi.fn<typeof fetch>(async () => Response.json([{
+    const fetcher = vi.fn<typeof fetch>(async (input) => String(input).endsWith("/fields_get") ? Response.json({}) : Response.json([{
       id: 8,
       display_name: "USL Accounting Overview",
       company_id: [3, "USL"],
@@ -40,8 +40,8 @@ describe("rebuilt accounting capabilities", () => {
     });
 
     expect(result.isError).not.toBe(true);
-    expect(fetcher).toHaveBeenCalledTimes(1);
-    const [url, init] = fetcher.mock.calls[0]!;
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    const [url, init] = fetcher.mock.calls[1]!;
     expect(String(url).endsWith("/json/2/rebuild.account.overview/search_read")).toBe(true);
     expect(JSON.parse(String(init?.body))).toMatchObject({
       domain: [["company_id", "=", 3]],
@@ -65,6 +65,96 @@ describe("rebuilt accounting capabilities", () => {
         }
       }
     });
+  });
+
+  it("projects the open annual close separately from the operational close and all-date totals", async () => {
+    const fixture: Record<string, unknown> = {
+      id: 81, company_id: [3, "[QA] Accounting scope"], posted_move_count: 27,
+      open_annual_closing_id: [901, "[QA] Annual close"], annual_posted_move_count: 9,
+      annual_journal_count: 2, annual_archived_journal_count: 1,
+      latest_closing_period_id: [902, "[QA] Quarterly close"], latest_closing_date_to: "2024-09-30",
+      draft_expense_count: 7, draft_only_expense_count: 2, submitted_expense_count: 1, approved_expense_count: 4
+    };
+    const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+      const args = JSON.parse(String(init?.body));
+      if (String(input).endsWith("/fields_get")) return Response.json(Object.fromEntries(
+        Object.keys(fixture).map(field => [field, { type: field.endsWith("_id") ? "many2one" : "integer" }])
+      ));
+      return Response.json([Object.fromEntries(["id", ...args.fields].filter(field => field in fixture).map(field => [field, fixture[field]]))]);
+    });
+    const client = await connected(fetcher);
+    const result = await client.callTool({ name: "accounting_get_overview", arguments: {
+      company_id: 3, context: { allowed_company_ids: [3, 4], company_id: 4 }
+    } });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({ data: { overview: {
+      posted_move_count: 27, open_annual_closing_id: fixture.open_annual_closing_id,
+      annual_posted_move_count: 9, annual_journal_count: 2, annual_archived_journal_count: 1,
+      latest_closing_period_id: fixture.latest_closing_period_id,
+      draft_expense_count: 7, draft_only_expense_count: 2, submitted_expense_count: 1, approved_expense_count: 4,
+      _scope: {
+        posted_move_count: "all_dates", latest_closing_period_id: "latest_operational_close",
+        open_annual_closing_id: "latest_ended_open_annual_workspace",
+        draft_expense_count: { meaning: "expenses_to_process", states: ["draft", "submitted", "approved"], draft_only: false },
+        expense_state_breakdown_available: true, annual_close_fields_available: true
+      }
+    } } });
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    for (const [url, init] of fetcher.mock.calls) {
+      expect(String(url)).toContain("/rebuild.account.overview/");
+      expect(JSON.parse(String(init?.body)).context).toMatchObject({ allowed_company_ids: [3], company_id: 3 });
+    }
+  });
+
+  it("keeps an older server readable without inventing missing counts or annual data", async () => {
+    const fixture: Record<string, unknown> = { id: 82, company_id: [3, "[QA] Legacy scope"], draft_expense_count: 5,
+      latest_closing_period_id: [903, "[QA] Existing close"] };
+    const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+      if (String(input).endsWith("/fields_get")) return Response.json({});
+      const fields = JSON.parse(String(init?.body)).fields as string[];
+      expect(fields).not.toContain("draft_only_expense_count");
+      expect(fields).not.toContain("open_annual_closing_id");
+      return Response.json([fixture]);
+    });
+    const client = await connected(fetcher);
+    const result = await client.callTool({ name: "accounting_get_overview", arguments: { company_id: 3, context: {} } });
+    expect(result.isError).not.toBe(true);
+    const overview = (result.structuredContent as { data: { overview: Record<string, unknown> } }).data.overview;
+    expect(overview.draft_expense_count).toBe(5);
+    expect(overview).not.toHaveProperty("draft_only_expense_count");
+    expect(overview).not.toHaveProperty("open_annual_closing_id");
+    expect(overview._scope).toMatchObject({ expense_state_breakdown_available: false, annual_close_fields_available: false });
+  });
+
+  it("preserves the already deployed annual projection before expense breakdown is deployed", async () => {
+    const fetcher = vi.fn<typeof fetch>(async (input, init) => {
+      if (String(input).endsWith("/fields_get")) return Response.json({
+        open_annual_closing_id: { type: "many2one" }, annual_posted_move_count: { type: "integer" },
+        annual_journal_count: { type: "integer" }, annual_archived_journal_count: { type: "integer" }
+      });
+      const fields = JSON.parse(String(init?.body)).fields as string[];
+      expect(fields).toContain("open_annual_closing_id");
+      expect(fields).not.toContain("approved_expense_count");
+      return Response.json([{ id: 83, open_annual_closing_id: false, draft_expense_count: 0 }]);
+    });
+    const client = await connected(fetcher);
+    const result = await client.callTool({ name: "accounting_get_overview", arguments: { company_id: 3, context: {} } });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({ data: { overview: {
+      open_annual_closing_id: false, draft_expense_count: 0,
+      _scope: { annual_close_fields_available: true, expense_state_breakdown_available: false }
+    } } });
+  });
+
+  it("does not bypass a native overview metadata denial through another model", async () => {
+    const fetcher = vi.fn<typeof fetch>(async (input) => String(input).endsWith("/fields_get")
+      ? Response.json({ name: "odoo.exceptions.AccessError", message: "[QA] Overview denied" }, { status: 403 })
+      : Response.json([{ id: 84 }]));
+    const client = await connected(fetcher);
+    const result = await client.callTool({ name: "accounting_get_overview", arguments: { company_id: 3, context: {} } });
+    expect(result.isError).toBe(true);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(String(fetcher.mock.calls[0]![0])).toContain("/rebuild.account.overview/fields_get");
   });
 
   it("uses Odoo 19 formatted grouping for key-account balances", async () => {

@@ -63,6 +63,17 @@ Use `docs_search` for guidance before inventing a workflow. It reads the running
 
 Current context helpers cover partners, record activities, project tasks, invoices, individual expenses, expense batches, Home attention, B2C orders, the rebuilt Accounting overview/reports, and the USL document archive. They return bounded high-signal context and warnings when optional linked context cannot be read.
 
+The Accounting overview keeps all-date ledger totals separate from the open annual
+closing workspace and latest operational closing. Its legacy `draft_expense_count`
+means expenses still to process: draft, submitted and approved. It is not an
+editable-draft count. New servers also return `draft_only_expense_count`,
+`submitted_expense_count` and `approved_expense_count` from that same company
+view. `_scope` states these meanings and whether the additive fields are available.
+Older servers remain readable; missing breakdowns are omitted with a warning,
+never replaced with zero. The shortcut negotiates only these optional fields
+through native `fields_get`, then reads one overview snapshot. It does not require
+additional expense-row access or grant permission to edit any expense.
+
 The invoice helper optionally accepts `company_change: {target_company_id, offset, limit}` for one native read-only snapshot of company choices, all line types, actual financial links, origins and evidence. Each page is an independent snapshot with readable-scope counts and explicit truncation or unavailability. Default invoice context remains unchanged. This option adds no company-change action or approval; generic native writes remain available under existing authority.
 
 Document tools use the Distribution archive facade for search, context, bounded text, similarity, and catalogues. Link/unlink operations call one public archive method. `documents_create_download_url` is a consequential action that issues a 30–900 second HTTPS bearer URL for one exact authorized document version; `documents_revoke_download_url` ends that capability early. Both are static on `/mcp` when available and deferred only on `/mcp/all`. Search and read tools report binary availability but never create or return bearer URLs. Issuance does not prove the client downloaded bytes; see the [qualification runbook](document-materialization.md).
