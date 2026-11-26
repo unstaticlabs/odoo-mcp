@@ -95,6 +95,8 @@ async function recordActivities(
   }, { signal });
 }
 
+const VOICE_MODULE = "usl_voice";
+
 async function recordMessages(
   client: OdooClient,
   context: RequestContext,
@@ -104,13 +106,22 @@ async function recordMessages(
   requestedContext: Record<string, unknown>,
   signal: AbortSignal
 ) {
-  return client.call<Record<string, unknown>[]>(context, "mail.message", "search_read", {
+  // A voice note has an empty body: its text lives in usl_voice_notes, which
+  // Odoo computes under the reader's own access. The field exists only with the
+  // add-on, and an unknown field would fail the whole read, so ask for it only
+  // when the module is known to be installed.
+  const voice = context.availableModules?.has(VOICE_MODULE) === true;
+  const messages = await client.call<Record<string, unknown>[]>(context, "mail.message", "search_read", {
     domain: [["model", "=", model], ["res_id", "=", id], ["message_type", "!=", "user_notification"]],
-    fields: ["date", "author_id", "body", "subtype_id", "message_type"],
+    fields: ["date", "author_id", "body", "subtype_id", "message_type", ...(voice ? ["usl_voice_notes"] : [])],
     order: "date desc, id desc",
     limit,
     context: rpcContext(requestedContext, context)
   }, { signal });
+  if (!voice) return messages;
+  return messages.map(({ usl_voice_notes: notes, ...message }) => (
+    Array.isArray(notes) && notes.length ? { ...message, usl_voice_notes: notes } : message
+  ));
 }
 
 const DOCUMENT_LINK_MODULE = "usl_documents";
