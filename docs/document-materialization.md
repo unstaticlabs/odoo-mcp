@@ -5,12 +5,15 @@ grant; the public gateway forwards a download; the client fetches and verifies t
 bytes. A successful `documents_create_download_url` result proves only the first
 step. The URL workflow does not verify client downloads.
 
-For small files, call `documents_get_content` with `binary: {}` instead. Odoo
-reads the exact authorized current original in the same authenticated request;
-select `document_version_id` or `variant: "archive"` inside `binary` when needed.
-The connector receives up to 4 MiB and verifies the complete byte count and
-SHA-256. It returns common images as MCP image content and other files, including
-PDFs, as embedded resources. Opening an embedded PDF depends on the host: receipt
+For files up to 4 MiB, call `documents_get_content` with `binary: {}` to receive
+the current original in the authenticated request. Choose `variant: "archive"`
+inside `binary` for the archived copy.
+To request a specific version, read `documents_get_context`, select the desired
+entry in `versions` and pass its numeric `id` as `document_version_id`. The same
+ID selects a version in `documents_create_download_url`. The entry’s separate
+`version_id` belongs to the archive.
+The connector verifies the complete byte count and SHA-256. It returns common
+images as MCP image content and other files, including PDFs, as embedded resources. Opening an embedded PDF depends on the host: receipt
 of bytes alone does not prove that a model saw its pages. No bearer URL or grant
 is created. Larger files retain the streaming URL workflow.
 
