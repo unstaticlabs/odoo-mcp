@@ -156,6 +156,13 @@ be treated as proof that no blocker exists. Manual or stale Waiting and disabled
 dependencies are distinguished from a proven dependency-derived wait. This
 read-only view does not change task state or repair historical tasks.
 
+A task can also wait for something outside Odoo. Its reason is the ordinary field
+`usl_waiting_reason` (with an optional contact, `usl_waiting_partner_id`). Task
+context returns both, and `waiting_reason` is `external_reason` while one is set;
+read and write them with the generic record tools. Setting a reason makes the task
+Waiting; clearing it, or writing state In Progress, resumes it. To wait for another
+task, use native dependencies.
+
 For different accounting components, `expenses_split_draft` accepts explicit
 gross lines and delegates to the native split wizard. Their sum must match the
 source at its currency precision. Signed discounts and zero components retain
