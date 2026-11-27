@@ -89,10 +89,11 @@ pass `domain: [["usl_search_text", "ilike", query]]`,
 Choose the same `company_ids`, `lang` and `active_test: false` as Home.
 At the same identity and scope, each model has Home's title-first order and
 descending-ID tie breaker. Existing domains can add ordinary filters.
-Use `fields` (or the default selection) for delegated read-only access. The
-existing native classification rejects `specification`/`web_search_read` for
-these read-only profiles; writable profiles can use it. This distinction does
-not change which records the selected domain and native permissions admit.
+Use `fields` for a flat selection or `specification` for related fields.
+Delegated read-only profiles can use either once the Distribution classifies
+the model’s native `web_search_read` as read-only. If an older release returns
+`agent_read_only_action_denied` for that method, use `fields` to continue
+within the same company and record permissions.
 This non-ID order uses offset cursors; unchanged records and access give stable
 pages, but edits between requests can change the result set.
 

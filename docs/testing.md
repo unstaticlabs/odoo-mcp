@@ -242,10 +242,12 @@ collection with no credentials reports skips, never a live pass.
 against a disposable Distribution supporting relevance order. Set the ordinary
 `ODOO_INTEGRATION_ORIGIN`, `ODOO_INTEGRATION_DATABASE` and governed
 `ODOO_INTEGRATION_API_KEY`, plus `ODOO_SEARCH_QA_COMPANY_ID` and optionally
-`ODOO_SEARCH_QA_LANG`. Set `ODOO_SEARCH_QA_SPECIFICATION_ALLOWED=1` only for a
-fixture profile whose native contract authorizes `web_search_read`; otherwise
-the test expects its existing `agent_read_only_action_denied` refusal, and
-does not retry it through another path. `ODOO_SEARCH_QA_FIXTURES` is a JSON object keyed by
+`ODOO_SEARCH_QA_LANG`. Set `ODOO_SEARCH_QA_SPECIFICATION_ALLOWED=1` when the fixture
+authorizes `web_search_read` on all three models. This includes read-only
+profiles on releases containing the reviewed native classifications from
+[Distribution #593](https://github.com/unstaticlabs/odoo/pull/593).
+Leave the flag unset to verify an older read-only profile’s
+`agent_read_only_action_denied` response. `ODOO_SEARCH_QA_FIXTURES` is a JSON object keyed by
 `project.task`, `project.project` and `res.partner`; each value has `query` and
 four independently annotated `ids`, ordered as exact title, phrase title, all
 title words, then content-only mention. Use fictional records, not business data.
