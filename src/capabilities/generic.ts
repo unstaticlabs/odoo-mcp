@@ -881,10 +881,8 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
     }).strict(),
     async handler(_input, context, signal) {
       if (!context.agentIdentity) throw new Error("The governed Agent identity was not resolved");
-      // Even the identity-only response must revalidate the credential with Odoo.
-      const identity = context.agentIdentity.effective_applications.length === 0
-        ? await loadAgentIdentity(client, context, signal)
-        : context.agentIdentity;
+      // The owner may have changed the delegation since tool discovery.
+      const identity = await loadAgentIdentity(client, context, signal);
       const directory = await readEnvironmentDirectory(client, context, identity, signal);
       const modules = [...(context.availableModules ?? [])];
       return {
