@@ -127,6 +127,22 @@ be treated as proof that no blocker exists. Manual or stale Waiting and disabled
 dependencies are distinguished from a proven dependency-derived wait. This
 read-only view does not change task state or repair historical tasks.
 
+When Distribution advertises the computed `usl_waiting_details` JSON field,
+task context reads its current caller-safe causes through native ORM `read`.
+External causes, blocking records, unavailable references and older unexplained
+Waiting are then reported explicitly. Missing field metadata keeps the older
+server behavior; a failed current read is an error, not a fallback to a misleading
+explanation. No new public-method dependency is imposed on older servers.
+
+On Distribution with explained Waiting, use `odoo_call_method` on `project.task`
+with `action_set_waiting`, the task ID and `kwargs` containing `reason` and/or
+`references: [{model, id}]`. Odoo checks the source task and every newly supplied
+reference in one transaction. `action_lift_waiting_cause` accepts an owned
+`cause_id`; the last resolved cause resumes an open task. Task references reuse
+native dependencies and resolve with the linked task. Other records are lifted
+manually. These actions do not change the linked records or grant access to them.
+Older servers retain their existing workflows until Distribution is upgraded.
+
 For different accounting components, `expenses_split_draft` accepts explicit
 gross lines and delegates to the native split wizard. Their sum must match the
 source at its currency precision. Signed discounts and zero components retain

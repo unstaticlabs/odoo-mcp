@@ -13,6 +13,22 @@ import { CapabilityRegistry, defineCapability } from "./registry.js";
 
 const RecordSchema = z.record(z.string(), z.unknown());
 const RecordsSchema = z.array(RecordSchema);
+const WaitingCauseSchema = z.object({
+  id: z.union([PositiveIdSchema, z.literal(false)]),
+  kind: z.enum(["external", "reference", "task", "unavailable"]),
+  lifted: z.boolean().optional(), is_blocking: z.boolean().nullable(),
+  reason: z.string().optional(), message: z.string().optional(),
+  reference: z.object({ model: ModelNameSchema, id: PositiveIdSchema, display_name: z.string(), state: z.string().optional() }).strict().optional()
+}).strict();
+const WaitingDetailsSchema = z.object({
+  schema: z.literal("usl-task-waiting/v1"),
+  tasks: z.array(z.object({
+    id: PositiveIdSchema, state: z.string(), has_open_causes: z.boolean(), legacy_unexplained: z.boolean(),
+    can_change: z.boolean(), causes: z.array(WaitingCauseSchema),
+    native_dependencies: z.object({ enabled: z.boolean(), total_count: z.number().int().nonnegative(),
+      visible_count: z.number().int().nonnegative(), closed_count: z.number().int().nonnegative().optional(), complete: z.boolean() }).strict()
+  }).strict()).max(100)
+}).strict();
 const ContextOutputSchema = z.object({ context: RecordSchema }).strict();
 const ActionOutputSchema = z.object({
   result: z.unknown(),
@@ -256,7 +272,7 @@ export function registerSemanticCapabilities(registry: CapabilityRegistry, clien
     name: "projects_get_task_context",
     title: "Get Project Task Context",
     description:
-      "Read one project task with assignments, stage, state, link (github_url), task properties with labels (Sources parsed into sources), dependencies and readable open blockers, immediate hierarchy, recent chatter, activities, and document links. Waiting is normally dependency-derived; incomplete dependency details and manual Waiting are identified explicitly. Use generic traversal for other fields.",
+      "Read one project task with assignments, stage, state, link (github_url), task properties with labels (Sources parsed into sources), dependencies and readable open blockers, immediate hierarchy, recent chatter, activities, and document links. Reports native task blockers and explained Waiting causes when the server supports them; identifies incomplete or older unexplained Waiting. Use generic traversal for other fields.",
     layer: "semantic",
     toolsets: ["projects", "activities", "documents"],
     profiles: ["projects"],
@@ -280,22 +296,34 @@ export function registerSemanticCapabilities(registry: CapabilityRegistry, clien
     output: ContextOutputSchema,
     async handler({ task_id, chatter_limit, context: requestedContext }, context, signal) {
       const common = rpcContext(requestedContext, context);
-      const [rows, activities, messages, documentLinks] = await Promise.all([
-        client.call<unknown[]>(context, "project.task", "read", {
-          ids: [task_id],
-          fields: [...PROJECT_TASK_CONTEXT_FIELDS],
-          context: common
-        }, { signal }),
+      const [activities, messages, documentLinks, waitingContract] = await Promise.all([
         recordActivities(client, context, "project.task", task_id, chatter_limit, requestedContext, signal),
         recordMessages(client, context, "project.task", task_id, chatter_limit, requestedContext, signal),
-        optionalDocumentLinks(client, context, "project.task", task_id, common, signal)
+        optionalDocumentLinks(client, context, "project.task", task_id, common, signal),
+        client.call<Record<string, { type?: string }>>(context, "project.task", "fields_get", {
+          allfields: ["usl_waiting_details"], attributes: ["type"], context: common
+        }, { signal })
       ]);
-      const task = rows[0] as Record<string, unknown> | undefined;
+      const hasWaitingContract = waitingContract.usl_waiting_details?.type === "json";
+      const rows = await client.call<Record<string, unknown>[]>(context, "project.task", "read", {
+        ids: [task_id], fields: [...PROJECT_TASK_CONTEXT_FIELDS, ...(hasWaitingContract ? ["usl_waiting_details"] : [])],
+        context: common
+      }, { signal });
+      const task = rows[0];
       if (!task) throw new Error(`project.task,${task_id} was not found or is not readable`);
+      // Probe the field contract instead of assuming that MCP and Distribution
+      // deploy together. Older servers keep their established explanation.
+      const explainedWaiting = hasWaitingContract
+        ? WaitingDetailsSchema.parse({ schema: "usl-task-waiting/v1", tasks: [task.usl_waiting_details] })
+          .tasks.find((item) => item.id === task_id)
+        : undefined;
+      if (waitingContract.usl_waiting_details?.type === "json" && !explainedWaiting) {
+        throw new Error("The server did not return the requested task's current Waiting context.");
+      }
       const dependencyIds = Array.isArray(task.depend_on_ids) ? task.depend_on_ids as number[] : [];
       // Search under the caller's rights: a task relation is not permission to
       // disclose another task. A bounded partial result is explicitly incomplete.
-      const dependencies = dependencyIds.length ? await client.call<Record<string, unknown>[]>(context, "project.task", "search_read", {
+      const dependencies = !explainedWaiting && dependencyIds.length ? await client.call<Record<string, unknown>[]>(context, "project.task", "search_read", {
         domain: [["id", "in", dependencyIds.slice(0, 100)]],
         fields: ["display_name", "state"], limit: 100, order: "id asc",
         context: { ...common, active_test: false }
@@ -306,13 +334,25 @@ export function registerSemanticCapabilities(registry: CapabilityRegistry, clien
       // absence of visible relations from masquerading as absence of blockers.
       const totalCount = typeof task.depend_on_count === "number" ? task.depend_on_count : null;
       const closedCount = typeof task.closed_depend_on_count === "number" ? task.closed_depend_on_count : null;
-      const complete = totalCount !== null && dependencies.length === totalCount;
-      const openBlockers = enabled ? dependencies.filter((dependency) => !["1_done", "1_canceled"].includes(String(dependency.state)))
+      const complete = explainedWaiting?.native_dependencies.complete ?? (totalCount !== null && dependencies.length === totalCount);
+      const currentBlockers = new Map<number, Record<string, unknown>>();
+      for (const cause of explainedWaiting?.causes ?? []) {
+        if (cause.kind === "task" && cause.is_blocking && cause.reference) {
+          currentBlockers.set(cause.reference.id, { id: cause.reference.id, display_name: cause.reference.display_name,
+            ...(cause.reference.state ? { state: cause.reference.state } : {}),
+            _ref: ref(context, "project.task", cause.reference.id, cause.reference.display_name) });
+        }
+      }
+      const openBlockers = explainedWaiting ? [...currentBlockers.values()]
+        : enabled ? dependencies.filter((dependency) => !["1_done", "1_canceled"].includes(String(dependency.state)))
         .map((dependency) => ({ ...dependency, _ref: ref(context, "project.task", Number(dependency.id), dependency.display_name) })) : [];
-      const waitingReason = task.state !== "04_waiting_normal" ? "not_waiting"
+      const waitingReason = (explainedWaiting?.state ?? task.state) !== "04_waiting_normal" ? "not_waiting"
+        : explainedWaiting?.has_open_causes ? "explained_causes"
+        : explainedWaiting?.legacy_unexplained ? "legacy_unexplained"
         : !enabled ? "dependencies_disabled" : openBlockers.length ? "open_dependencies"
           : !complete ? "unavailable_dependencies" : "manual_or_stale";
       const taskView = { ...task };
+      delete taskView.usl_waiting_details;
       // Do not return opaque relation IDs whose records the second read could
       // not access; links below identify only readable open blockers.
       delete taskView.depend_on_ids;
@@ -324,6 +364,10 @@ export function registerSemanticCapabilities(registry: CapabilityRegistry, clien
             _ref: ref(context, "project.task", task_id, task.display_name) },
           dependencies: { enabled, complete, total_count: totalCount, closed_count: closedCount,
             waiting_reason: waitingReason, open_blockers: openBlockers },
+          ...(explainedWaiting ? { waiting: { ...explainedWaiting, causes: explainedWaiting.causes.map((cause) => ({
+            ...cause, ...(cause.reference ? { reference: { ...cause.reference,
+              _ref: ref(context, cause.reference.model, cause.reference.id, cause.reference.display_name) } } : {})
+          })) } } : {}),
           activities, messages, document_links: documentLinks.records } },
         ...(documentLinks.warning ? { warnings: [documentLinks.warning] } : {})
       };
