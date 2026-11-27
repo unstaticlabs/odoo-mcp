@@ -198,7 +198,7 @@ function recordId(record: Record<string, unknown>): number | undefined {
 }
 
 const SELECTION_GUIDANCE =
-  "Use fields for flat values (many2one: [id, display_name]) or specification for nested reads, e.g. {\"name\":{},\"line_ids\":{\"fields\":{\"name\":{}},\"limit\":2}}. A bare {} reads relation IDs. A nested limit expands fields for the first N related rows per parent. Later rows can contain only id. To page the rows themselves, search the related model.";
+  "Use fields for flat values (many2one: [id, display_name]) or specification for nested reads, e.g. {\"line_ids\":{\"fields\":{\"name\":{}},\"limit\":2}}. A bare {} reads relation IDs. A nested limit selects the first N IDs per parent; shared IDs are expanded everywhere in the batch and other rows contain only id. To page related rows, search their model by inverse field or by the returned IDs.";
 
 
 function capabilitySummary(match: CapabilitySearchMatch) {
