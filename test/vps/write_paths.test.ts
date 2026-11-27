@@ -414,6 +414,29 @@ describe("the rich-text escaping contract", () => {
     }
   });
 
+  it("posts a comment as the message a person sends, and leaves a note as it was", async () => {
+    const fetcher = vi.fn<typeof fetch>(async () => Response.json({ id: 79 }));
+    const client = await connected(fetcher);
+
+    const comment = await client.callTool({
+      name: "odoo_post_message",
+      arguments: { model: "project.task", id: 492, body: "Done.", subtype: "mail.mt_comment" }
+    });
+    expect(comment.isError).not.toBe(true);
+    expect(requestBody(fetcher, "project.task/message_post")).toMatchObject({
+      subtype_xmlid: "mail.mt_comment",
+      message_type: "comment"
+    });
+
+    fetcher.mockClear();
+    const note = await client.callTool({
+      name: "odoo_post_message",
+      arguments: { model: "project.task", id: 492, body: "Done." }
+    });
+    expect(note.isError).not.toBe(true);
+    expect(requestBody(fetcher, "project.task/message_post")).not.toHaveProperty("message_type");
+  });
+
   it("still escapes tag-shaped prose once the caller says it is plain text", async () => {
     const fetcher = vi.fn<typeof fetch>(async () => Response.json({ id: 79 }));
     const client = await connected(fetcher);
