@@ -4,11 +4,19 @@ import { createCapabilityRegistry } from "../../src/capabilities/index.js";
 import { OdooClient } from "../../src/odoo/client.js";
 import { requestContext } from "./fixtures.js";
 
+let fetcherUrls: string[] = [];
+
 async function taskContext(task: Record<string, unknown>, dependencies: unknown[]) {
+  fetcherUrls = [];
   task = { depend_on_count: Array.isArray(task.depend_on_ids) ? task.depend_on_ids.length : 0, closed_depend_on_count: 0, ...task };
   const fetcher = vi.fn<typeof fetch>(async (input, init) => {
     const url = String(input);
     const body = JSON.parse(String(init?.body));
+    fetcherUrls.push(url.split("/").pop() ?? "");
+    if (url.endsWith("/project.task/read")) {
+      expect(body.fields).toEqual(expect.arrayContaining(["usl_waiting_reason", "usl_waiting_partner_id"]));
+      expect(body.ids).toEqual([42]);
+    }
     if (url.endsWith("/project.task/read")) return Response.json([{ id: 42, display_name: "[QA] Launch", ...task }]);
     if (url.endsWith("/project.task/search_read")) {
       expect(body.context.allowed_company_ids).toEqual([3]);
@@ -27,7 +35,7 @@ async function taskContext(task: Record<string, unknown>, dependencies: unknown[
   try {
     const result = await client.callTool({ name: "projects_get_task_context", arguments: { task_id: 42, context: { allowed_company_ids: [3] } } });
     expect(result.isError).not.toBe(true);
-    return result.structuredContent as { data: { context: { dependencies: Record<string, unknown> } } };
+    return result.structuredContent as { data: { context: { task: Record<string, unknown>; dependencies: Record<string, unknown> } } };
   } finally {
     await client.close(); await server.close();
   }
@@ -46,6 +54,16 @@ describe("task blocker explanations", () => {
   it("does not invent blockers for native manual Waiting", async () => {
     const result = await taskContext({ state: "04_waiting_normal", allow_task_dependencies: true, depend_on_ids: [] }, []);
     expect(result.data.context.dependencies).toMatchObject({ enabled: true, complete: true, waiting_reason: "manual_or_stale", open_blockers: [] });
+  });
+
+  it("reports an external reason and its contact, with one task read and no field probe", async () => {
+    const result = await taskContext({
+      state: "04_waiting_normal", allow_task_dependencies: true, depend_on_ids: [],
+      usl_waiting_reason: "[QA] Supplier quote", usl_waiting_partner_id: [9, "[QA] Synthetic supplier"],
+    }, []);
+    expect(result.data.context.dependencies).toMatchObject({ waiting_reason: "external_reason", open_blockers: [] });
+    expect(result.data.context.task).toMatchObject({ usl_waiting_reason: "[QA] Supplier quote" });
+    expect(fetcherUrls).not.toContain("fields_get");
   });
 
   it("states uncertainty when dependency details are inaccessible", async () => {

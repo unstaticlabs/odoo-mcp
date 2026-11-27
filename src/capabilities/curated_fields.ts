@@ -40,7 +40,7 @@ export const PROJECT_TASK_CONTEXT_FIELDS = [
   "display_name", "project_id", "stage_id", "state", "user_ids", "partner_id", "date_deadline",
   "description", "tag_ids", "parent_id", "child_ids", "company_id", "priority", "create_date", "write_date",
   "allow_task_dependencies", "depend_on_ids", "depend_on_count", "closed_depend_on_count",
-  "github_url", "task_properties"
+  "github_url", "task_properties", "usl_waiting_reason", "usl_waiting_partner_id"
 ] as const;
 
 /** Project task fields `projects_update_task` reads before and after its single write. */

@@ -261,7 +261,7 @@ export function registerSemanticCapabilities(registry: CapabilityRegistry, clien
     name: "projects_get_task_context",
     title: "Get Project Task Context",
     description:
-      "Read one project task with assignments, stage, state, link (github_url), task properties with labels (Sources parsed into sources), dependencies and readable open blockers, immediate hierarchy, recent chatter, activities, and document links. Waiting is normally dependency-derived; incomplete dependency details and manual Waiting are identified explicitly. Use generic traversal for other fields.",
+      "Read one project task with assignments, stage, state, link (github_url), task properties with labels (Sources parsed into sources), dependencies and readable open blockers, the external waiting reason (usl_waiting_reason, usl_waiting_partner_id), immediate hierarchy, recent chatter, activities, and document links. Waiting is normally dependency-derived; incomplete dependency details and manual Waiting are identified explicitly. Use generic traversal for other fields.",
     layer: "semantic",
     toolsets: ["projects", "activities", "documents"],
     profiles: ["projects"],
@@ -315,6 +315,7 @@ export function registerSemanticCapabilities(registry: CapabilityRegistry, clien
       const openBlockers = enabled ? dependencies.filter((dependency) => !["1_done", "1_canceled"].includes(String(dependency.state)))
         .map((dependency) => ({ ...dependency, _ref: ref(context, "project.task", Number(dependency.id), dependency.display_name) })) : [];
       const waitingReason = task.state !== "04_waiting_normal" ? "not_waiting"
+        : task.usl_waiting_reason ? "external_reason"
         : !enabled ? "dependencies_disabled" : openBlockers.length ? "open_dependencies"
           : !complete ? "unavailable_dependencies" : "manual_or_stale";
       const taskView = { ...task };
