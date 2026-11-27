@@ -4,21 +4,18 @@ import { createCapabilityRegistry } from "../../src/capabilities/index.js";
 import { OdooClient } from "../../src/odoo/client.js";
 import { requestContext } from "./fixtures.js";
 
-async function taskContext(task: Record<string, unknown>, dependencies: unknown[], waiting?: Record<string, unknown>) {
+let fetcherUrls: string[] = [];
+
+async function taskContext(task: Record<string, unknown>, dependencies: unknown[]) {
+  fetcherUrls = [];
   task = { depend_on_count: Array.isArray(task.depend_on_ids) ? task.depend_on_ids.length : 0, closed_depend_on_count: 0, ...task };
   const fetcher = vi.fn<typeof fetch>(async (input, init) => {
     const url = String(input);
     const body = JSON.parse(String(init?.body));
-    if (url.endsWith("/project.task/fields_get")) {
-      expect(body.allfields).toEqual(["usl_waiting_details"]);
-      return Response.json(waiting ? { usl_waiting_details: { type: "json" } } : {});
-    }
-    if (url.endsWith("/project.task/read") && body.fields?.includes("usl_waiting_details")) {
+    fetcherUrls.push(url.split("/").pop() ?? "");
+    if (url.endsWith("/project.task/read")) {
+      expect(body.fields).toEqual(expect.arrayContaining(["usl_waiting_reason", "usl_waiting_partner_id"]));
       expect(body.ids).toEqual([42]);
-      expect(body.context.allowed_company_ids).toEqual([3]);
-      return Response.json([{ id: 42, display_name: "[QA] Launch", ...task, state: waiting?.state ?? task.state, usl_waiting_details: { id: 42, state: task.state,
-        has_open_causes: true, legacy_unexplained: false, can_change: true,
-        native_dependencies: { enabled: false, total_count: 0, visible_count: 0, complete: true }, ...waiting } }]);
     }
     if (url.endsWith("/project.task/read")) return Response.json([{ id: 42, display_name: "[QA] Launch", ...task }]);
     if (url.endsWith("/project.task/search_read")) {
@@ -38,7 +35,7 @@ async function taskContext(task: Record<string, unknown>, dependencies: unknown[
   try {
     const result = await client.callTool({ name: "projects_get_task_context", arguments: { task_id: 42, context: { allowed_company_ids: [3] } } });
     expect(result.isError).not.toBe(true);
-    return result.structuredContent as { data: { context: { task: Record<string, unknown>; dependencies: Record<string, unknown>; waiting?: Record<string, unknown> } } };
+    return result.structuredContent as { data: { context: { task: Record<string, unknown>; dependencies: Record<string, unknown> } } };
   } finally {
     await client.close(); await server.close();
   }
@@ -57,6 +54,16 @@ describe("task blocker explanations", () => {
   it("does not invent blockers for native manual Waiting", async () => {
     const result = await taskContext({ state: "04_waiting_normal", allow_task_dependencies: true, depend_on_ids: [] }, []);
     expect(result.data.context.dependencies).toMatchObject({ enabled: true, complete: true, waiting_reason: "manual_or_stale", open_blockers: [] });
+  });
+
+  it("reports an external reason and its contact, with one task read and no field probe", async () => {
+    const result = await taskContext({
+      state: "04_waiting_normal", allow_task_dependencies: true, depend_on_ids: [],
+      usl_waiting_reason: "[QA] Supplier quote", usl_waiting_partner_id: [9, "[QA] Synthetic supplier"],
+    }, []);
+    expect(result.data.context.dependencies).toMatchObject({ waiting_reason: "external_reason", open_blockers: [] });
+    expect(result.data.context.task).toMatchObject({ usl_waiting_reason: "[QA] Supplier quote" });
+    expect(fetcherUrls).not.toContain("fields_get");
   });
 
   it("states uncertainty when dependency details are inaccessible", async () => {
@@ -110,42 +117,4 @@ describe("task blocker explanations", () => {
     expect(result.data.context.dependencies).toMatchObject({ complete: false, total_count: null,
       waiting_reason: "unavailable_dependencies" });
   });
-});
-
-
-describe("explained waiting server compatibility", () => {
-  it("recognizes an external cause even without native project dependencies", async () => {
-    const result = await taskContext({ state: "04_waiting_normal", allow_task_dependencies: false, depend_on_ids: [] }, [], {
-      causes: [{ id: 31, kind: "external", reason: "Awaiting a synthetic external reply", lifted: false, is_blocking: true }],
-    });
-    expect(result.data.context.dependencies.waiting_reason).toBe("explained_causes");
-    expect(result.data.context.waiting).toMatchObject({ has_open_causes: true,
-      causes: [{ kind: "external", reason: "Awaiting a synthetic external reply" }] });
-  });
-  it("preserves unavailable causes without inventing a record identity", async () => {
-    const result = await taskContext({ state: "04_waiting_normal", allow_task_dependencies: true, depend_on_ids: [] }, [], {
-      causes: [{ id: 31, kind: "unavailable", lifted: false, is_blocking: null, message: "The linked record is no longer accessible." }],
-    });
-    expect(result.data.context.dependencies.waiting_reason).toBe("explained_causes");
-    expect(JSON.stringify(result.data.context.waiting)).not.toContain('"reference"');
-  });
-  it("identifies older unexplained Waiting precisely on the new server", async () => {
-    const result = await taskContext({ state: "04_waiting_normal", allow_task_dependencies: true, depend_on_ids: [] }, [], {
-      has_open_causes: false, legacy_unexplained: true, causes: [],
-    });
-    expect(result.data.context.dependencies.waiting_reason).toBe("legacy_unexplained");
-  });
-});
-
-
-it("uses the current native Waiting snapshot instead of earlier task and blocker reads", async () => {
-  const result = await taskContext({ state: "01_in_progress", allow_task_dependencies: true,
-    depend_on_ids: [7], depend_on_count: 1 }, [{ id: 7, display_name: "[QA] Previously readable blocker", state: "01_in_progress" }], {
-    state: "04_waiting_normal", causes: [{ id: 31, kind: "unavailable", lifted: false, is_blocking: null,
-      message: "The linked record is no longer accessible." }],
-    native_dependencies: { enabled: true, total_count: 1, visible_count: 0, complete: false },
-  });
-  expect(result.data.context.task.state).toBe("04_waiting_normal");
-  expect(result.data.context.dependencies).toMatchObject({ waiting_reason: "explained_causes", complete: false, open_blockers: [] });
-  expect(JSON.stringify(result)).not.toContain("Previously readable blocker");
 });
