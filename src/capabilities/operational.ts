@@ -620,7 +620,7 @@ export function registerOperationalCapabilities(registry: CapabilityRegistry, cl
     name: "accounting_change_bill_company",
     title: "Move Draft Vendor Bill to Another Company",
     description:
-      "Move one draft vendor bill or credit note to another company the caller can access, in two calls. First call without confirm: nothing is written; Odoo returns blockers (each with a link and a next step), the proposed journal, fiscal position, payment terms and payable account, every line from -> to with accounts and taxes, unresolved items, and the destination tax totals and due dates, with a preview_id. Second call with confirm=true and that preview_id (and the same mapping) applies it in one Odoo transaction and returns the bill before and after. Pass mapping only for what the preview left unresolved or you want to change: journal_id, fiscal_position_id (false for none), payment_term_id, and lines [{line_id, account_id, tax_ids (empty for no tax), analytic_distribution}]. The bill keeps its identity, quantities, prices, currency and files; it never posts, pays or reconciles. A payment, bank transaction, purchase order, expense link, recurrence, earlier posting or cash rounding blocks the move and is named in the preview.",
+      "Move one draft vendor bill or credit note to another company the caller can access, in two calls. First call without confirm: nothing is written; Odoo returns blockers (each with a link and a next step), the proposed journal, fiscal position, payment terms and payable account, every line from -> to with accounts and taxes, unresolved items, and the destination tax totals and due dates, with a preview_id. Second call with confirm=true and that preview_id (and the same mapping) applies it in one Odoo transaction and returns the bill before and after. Pass mapping only for what the preview left unresolved or you want to change: journal_id, fiscal_position_id (false for none), payment_term_id, and lines [{line_id, account_id, tax_ids (empty for no tax), analytic_distribution}]. The bill keeps its identity, quantities, prices, currency and files; it never posts, pays or reconciles. A payment, bank transaction, purchase order, expense link, recurrence, earlier posting, cash rounding, merged cancelled originals, a supplier or product restricted to the current company, or (for a credit note) the bill it reverses blocks the move and is named in the preview. When the destination total differs from the current one the preview says total_changed; pass accept_total_change: true in the mapping to accept it.",
     layer: "business_action",
     toolsets: ["accounting"],
     profiles: ["accounting"],
@@ -642,6 +642,7 @@ export function registerOperationalCapabilities(registry: CapabilityRegistry, cl
         journal_id: PositiveIdSchema.optional(),
         fiscal_position_id: z.union([PositiveIdSchema, z.literal(false)]).optional(),
         payment_term_id: PositiveIdSchema.optional(),
+        accept_total_change: z.boolean().optional(),
         lines: z.array(z.object({
           line_id: PositiveIdSchema,
           account_id: PositiveIdSchema.optional(),
