@@ -355,6 +355,34 @@ describe("Distribution semantic and business capabilities", () => {
     expect(serialized).not.toContain("download_path");
     expect(serialized).not.toContain("paperless_url");
   });
+
+  it("browses archived documents by an exact native record link without a text query", async () => {
+    const page = { results: [{ id: 17, filename: "synthetic-export.csv" }], has_more: false };
+    const fetcher = vi.fn<typeof fetch>(async () => Response.json(page));
+    const server = createCapabilityRegistry(new OdooClient(8, 1024 * 1024, fetcher))
+      .createServer({ ...requestContext(), profile: "documents" });
+    const client = new Client({ name: "record-document-browse-test", version: "1" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    closeCallbacks.push(async () => { await client.close(); await server.close(); });
+
+    const incomplete = await client.callTool({
+      name: "documents_search", arguments: { linked_model: "project.task" }
+    });
+    expect(incomplete.isError).toBe(true);
+    expect(fetcher).not.toHaveBeenCalled();
+
+    const result = await client.callTool({
+      name: "documents_search", arguments: { linked_model: "project.task", linked_id: 42, limit: 2 }
+    });
+    expect(result.structuredContent).toMatchObject({ data: { result: page } });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    const [url, init] = fetcher.mock.calls[0]!;
+    expect(String(url)).toContain("/usl.document/mcp_search");
+    expect(JSON.parse(String(init?.body))).toMatchObject({ linked_model: "project.task", linked_id: 42, limit: 2, query: "" });
+  });
+
   it("skips document links when the Distribution documents module is absent", async () => {
     const models: string[] = [];
     const fetcher = vi.fn<typeof fetch>(async (input) => {
