@@ -22,7 +22,7 @@ table, when the surface changes.
 
 Each public tool explicitly advertises `readOnlyHint`, `destructiveHint`, and `openWorldHint`. Bounded Odoo reads and specialized draft/preparatory actions stay in the authenticated private workspace and have `openWorldHint=false`. Generic arbitrary-model writes and public-method dispatch remain conservatively classified because Odoo business hooks may overwrite data or contact third parties.
 
-`odoo_add_internal_note` appends an internal-subtype note with zero direct recipients and `notify_skip_followers=true`. This skips native Chatter follower and direct-recipient notifications; ordinary model hooks still run. It is not idempotent. `odoo_post_message` remains available for notifying comments and other Chatter workflows.
+`odoo_add_internal_note` appends an internal-subtype note with zero direct recipients and `notify_skip_followers=true`. This skips native Chatter follower and direct-recipient notifications; ordinary model hooks still run. It is not idempotent. `odoo_post_message` remains available for notifying comments and other Chatter workflows. A comment (`mail.mt_comment`) is posted with `message_type=comment`, so Odoo draws it as the message a person sends; a note keeps Odoo's default type.
 
 Annotations describe behavior, not a bypass for host safety checks or server authorization. Inspect emitted `tools/list` and compare real scheduled-run results before claiming any safety regression fixed.
 
