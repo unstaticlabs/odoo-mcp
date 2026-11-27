@@ -3,6 +3,7 @@ import { billTermsWarnings } from "./bill_terms.js";
 import type { RequestContext } from "../runtime/context.js";
 import { emitEvent } from "../runtime/logging.js";
 import { OdooClient } from "../odoo/client.js";
+import { loadAgentIdentity, type AgentIdentity } from "../odoo/agent_identity.js";
 import {
   assertBoundedJson,
   attributedContext,
@@ -224,6 +225,51 @@ function capabilitySummary(match: CapabilitySearchMatch) {
       operation
     })),
     required_features: [...metadata.requiredFeatures]
+  };
+}
+
+async function readEnvironmentDirectory(client: OdooClient, context: RequestContext, identity: AgentIdentity, signal?: AbortSignal) {
+  // A newly connected Agent may have no directory access. Its own native
+  // identity already names its companies and the user behind its credential.
+  if (identity.effective_applications.length === 0) {
+    return {
+      user: {
+        id: identity.user_id,
+        company_ids: identity.company_ids,
+        _ref: recordReference(context, "res.users", identity.user_id)
+      },
+      companies: decorateRecords(context, "res.company",
+        identity.companies.map(company => ({ id: company.id, display_name: company.name }))),
+      locale: {},
+      warnings: ["No application access is delegated. Company names come from the Agent identity; directory and locale details are unavailable."]
+    };
+  }
+  const userContext = await client.call<Record<string, unknown>>(context, "res.users", "context_get", {}, { signal });
+  const userId = userContext.uid;
+  if (!Number.isInteger(userId) || (userId as number) <= 0) throw new Error("Odoo did not return the authenticated user id");
+  const userRows = await client.call<unknown[]>(context, "res.users", "read", {
+    ids: [userId],
+    fields: ["display_name", "company_id", "company_ids", "lang", "tz"]
+  }, { signal });
+  const [user] = decorateRecords(context, "res.users", userRows);
+  if (!user) throw new Error("The authenticated Odoo user is not readable");
+  const companyIds = Array.isArray(user.company_ids)
+    ? user.company_ids.filter((value): value is number => Number.isInteger(value) && (value as number) > 0)
+    : [];
+  const companyRows = companyIds.length === 0
+    ? []
+    : await client.call<unknown[]>(context, "res.company", "read", {
+        ids: companyIds,
+        fields: ["display_name", "parent_id", "currency_id"]
+      }, { signal });
+  return {
+    user,
+    companies: decorateRecords(context, "res.company", companyRows),
+    locale: {
+      ...(typeof userContext.lang === "string" ? { lang: userContext.lang } : {}),
+      ...(typeof userContext.tz === "string" ? { tz: userContext.tz } : {})
+    },
+    warnings: [] as string[]
   };
 }
 
@@ -834,36 +880,19 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
       }).strict())
     }).strict(),
     async handler(_input, context, signal) {
-      const identity = context.agentIdentity;
-      if (!identity) throw new Error("The governed Agent identity was not resolved");
-      const userContext = await client.call<Record<string, unknown>>(context, "res.users", "context_get", {}, { signal });
-      const userId = userContext.uid;
-      if (!Number.isInteger(userId) || (userId as number) <= 0) throw new Error("Odoo did not return the authenticated user id");
-      const userRows = await client.call<unknown[]>(context, "res.users", "read", {
-        ids: [userId],
-        fields: ["display_name", "company_id", "company_ids", "lang", "tz"]
-      }, { signal });
-      const [user] = decorateRecords(context, "res.users", userRows);
-      if (!user) throw new Error("The authenticated Odoo user is not readable");
-      const companyIds = Array.isArray(user.company_ids)
-        ? user.company_ids.filter((value): value is number => Number.isInteger(value) && (value as number) > 0)
-        : [];
-      const companyRows = companyIds.length === 0
-        ? []
-        : await client.call<unknown[]>(context, "res.company", "read", {
-            ids: companyIds,
-            fields: ["display_name", "parent_id", "currency_id"]
-          }, { signal });
+      if (!context.agentIdentity) throw new Error("The governed Agent identity was not resolved");
+      // Even the identity-only response must revalidate the credential with Odoo.
+      const identity = context.agentIdentity.effective_applications.length === 0
+        ? await loadAgentIdentity(client, context, signal)
+        : context.agentIdentity;
+      const directory = await readEnvironmentDirectory(client, context, identity, signal);
       const modules = [...(context.availableModules ?? [])];
       return {
         data: {
-          user,
-          companies: decorateRecords(context, "res.company", companyRows),
+          user: directory.user,
+          companies: directory.companies,
           modules,
-          locale: {
-            ...(typeof userContext.lang === "string" ? { lang: userContext.lang } : {}),
-            ...(typeof userContext.tz === "string" ? { tz: userContext.tz } : {})
-          },
+          locale: directory.locale,
           principal_kind: identity.principal_kind,
           agent: {
             id: identity.agent.id,
@@ -877,7 +906,10 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
           effective_company_ids: identity.company_ids,
           effective_applications: identity.effective_applications
         },
-        ...(modules.length === 0 ? { warnings: ["Installed module metadata was unavailable for this identity."] } : {})
+        warnings: [
+          ...directory.warnings,
+          ...(modules.length === 0 ? ["Installed module metadata was unavailable for this identity."] : [])
+        ]
       };
     }
   }));

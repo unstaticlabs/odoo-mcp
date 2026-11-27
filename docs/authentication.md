@@ -84,8 +84,11 @@ The credential-encryption value must decode to exactly 32 bytes. Enrollment:
 Set `MCP_OAUTH_ODOO_HANDOFF=true` to replace the manual API key form with a
 page in Odoo. The setting needs exactly one configured Odoo target with exactly
 one database, and an Odoo release whose `usl_access_control` module serves
-`/usl/agent-access/connect` and `/usl/agent-access/token`. Odoo must list
-`<MCP_PUBLIC_ORIGIN>/oauth/enroll/callback` in `USL_MCP_OAUTH_RETURN_URLS`.
+`/usl/agent-access/connect` and `/usl/agent-access/token`. In the Odoo
+distribution, set `ODOO_MCP_OAUTH_ODOO_HANDOFF=true` and set
+`ODOO_MCP_PUBLIC_ORIGIN` to this MCP server's public origin. Compose passes
+the switch to both services. Odoo uses the fixed `/oauth/enroll/callback`
+path on that origin. With the switch off, the client uses manual enrollment.
 
 1. `/oauth/enroll` checks the signature of the authorization query. It stores
    a pending handoff and redirects the browser to Odoo with a `state`, an S256
