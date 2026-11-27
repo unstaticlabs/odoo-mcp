@@ -11,7 +11,7 @@ refer here instead of repeating them.
 | --- | ---: |
 | Tools on `/mcp` with every feature available | 36 |
 | Tools on `/mcp` without document materialization | 34 |
-| Estimated input/output schema tokens on `/mcp` | 20,865 |
+| Estimated input/output schema tokens on `/mcp` | 20,940 |
 | Budget enforced by `/readyz` (`DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET`) | 21,000 |
 
 Odoo module, method, and access availability can lower the counts further.
@@ -76,7 +76,7 @@ additional expense-row access or grant permission to edit any expense.
 
 The invoice helper optionally accepts `company_change: {target_company_id, offset, limit}` for one native read-only snapshot of company choices, all line types, actual financial links, origins and evidence. Each page is an independent snapshot with readable-scope counts and explicit truncation or unavailability. Default invoice context remains unchanged. This option adds no company-change action or approval; generic native writes remain available under existing authority.
 
-Document tools use the Distribution archive facade for search, context, bounded text, similarity, and catalogues. Link/unlink operations call one public archive method. `documents_create_download_url` is a consequential action that issues a 30–900 second HTTPS bearer URL for one exact authorized document version; `documents_revoke_download_url` ends that capability early. Both are static on `/mcp` when available and deferred only on `/mcp/all`. Search and read tools report binary availability but never create or return bearer URLs. Issuance does not prove the client downloaded bytes; see the [qualification runbook](document-materialization.md).
+Document tools use the Distribution archive facade for search, context, bounded text, similarity, and catalogues. Link/unlink operations call one public archive method. `documents_create_download_url` is a consequential action that issues a 30–900 second HTTPS bearer URL for one exact authorized document version; `documents_revoke_download_url` ends that capability early. Both are static on `/mcp` when available and deferred only on `/mcp/all`. Search and read tools report binary availability but never create or return bearer URLs. For supported files up to 4 MiB, `documents_get_content` with an explicit `binary` selection instead returns verified bytes through the existing authenticated connector: common images as MCP image content, other files as embedded resources. The host decides how to open an embedded PDF; receipt of bytes alone is not a claim of model vision. Older servers retain ordinary text reads; a binary request explains when its native method is unavailable. Issuance does not prove the client downloaded bytes; see the [qualification runbook](document-materialization.md).
 
 Thin domain list/get wrappers are intentionally absent where generic search/read already communicates the task cleanly.
 

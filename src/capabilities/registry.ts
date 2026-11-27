@@ -13,6 +13,7 @@ import {
 import type { OdooModelAccess } from "../odoo/client.js";
 import type { AgentAccessState } from "../runtime/agent_access_cache.js";
 import type { ProfileName, RequestContext } from "../runtime/context.js";
+import type { BinaryToolContent } from "../runtime/envelope.js";
 import { envelopeSchema, resultEnvelope, toolError, toolResult } from "../runtime/envelope.js";
 import { emitEvent } from "../runtime/logging.js";
 import { withMcpTraceContext } from "../runtime/observability.js";
@@ -103,6 +104,7 @@ type ObjectSchema = z.ZodObject<any> & StandardSchemaWithJSON;
 type CapabilityHandlerResult<O extends ObjectSchema> = {
   data: z.infer<O>;
   warnings?: string[];
+  binaryContent?: BinaryToolContent[];
 };
 
 export interface Capability {
@@ -229,7 +231,7 @@ export function defineCapability<I extends ObjectSchema, O extends ObjectSchema>
               const envelope = envelopeSchema(spec.output).parse(
                 resultEnvelope(activeContext, spec.id, value.data, value.warnings)
               );
-              return toolResult(envelope);
+              return toolResult(envelope, value.binaryContent);
             };
             const response = isFinalizedMutation(result)
               ? await result.guard(render)
