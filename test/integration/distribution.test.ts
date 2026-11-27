@@ -152,7 +152,7 @@ describe.skipIf(!live)("live USL Odoo Distribution", () => {
           arguments: {
             model: "mail.message",
             domain: [["model", "=", "project.task"], ["res_id", "=", taskId], ["body", "ilike", marker]],
-            fields: ["body", "notification_ids", "partner_ids", "subtype_id"], limit: 1, order: "id desc"
+            fields: ["body", "message_type", "notification_ids", "partner_ids", "subtype_id"], limit: 1, order: "id desc"
           }
         });
         expect(result.isError).not.toBe(true);
@@ -169,7 +169,9 @@ describe.skipIf(!live)("live USL Odoo Distribution", () => {
         }
       });
       expect(control.isError).not.toBe(true);
-      expect((await message(controlMarker)).notification_ids).not.toHaveLength(0);
+      const controlMessage = await message(controlMarker);
+      expect(controlMessage.notification_ids).not.toHaveLength(0);
+      expect(controlMessage.message_type).toBe("comment");
 
       for (const html of [false, true]) {
         const marker = `[QA] Internal note ${crypto.randomUUID()}`;

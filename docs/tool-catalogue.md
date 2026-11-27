@@ -22,7 +22,7 @@ table, when the surface changes.
 
 Each public tool explicitly advertises `readOnlyHint`, `destructiveHint`, and `openWorldHint`. Bounded Odoo reads and specialized draft/preparatory actions stay in the authenticated private workspace and have `openWorldHint=false`. Generic arbitrary-model writes and public-method dispatch remain conservatively classified because Odoo business hooks may overwrite data or contact third parties.
 
-`odoo_add_internal_note` appends an internal-subtype note with zero direct recipients and `notify_skip_followers=true`. This skips native Chatter follower and direct-recipient notifications; ordinary model hooks still run. It is not idempotent. `odoo_post_message` remains available for notifying comments and other Chatter workflows.
+`odoo_add_internal_note` appends an internal-subtype note with zero direct recipients and `notify_skip_followers=true`. This skips native Chatter follower and direct-recipient notifications; ordinary model hooks still run. It is not idempotent. `odoo_post_message` remains available for notifying comments and other Chatter workflows. A comment (`mail.mt_comment`) is posted with `message_type=comment`, so Odoo draws it as the message a person sends; a note keeps Odoo's default type.
 
 Annotations describe behavior, not a bypass for host safety checks or server authorization. Inspect emitted `tools/list` and compare real scheduled-run results before claiming any safety regression fixed.
 
@@ -79,6 +79,35 @@ The invoice helper optionally accepts `company_change: {target_company_id, offse
 Document tools use the Distribution archive facade for search, context, bounded text, similarity, and catalogues. Link/unlink operations call one public archive method. `documents_create_download_url` is a consequential action that issues a 30–900 second HTTPS bearer URL for one exact authorized document version; `documents_revoke_download_url` ends that capability early. Both are static on `/mcp` when available and deferred only on `/mcp/all`. Search and read tools report binary availability but never create or return bearer URLs. For supported files up to 4 MiB, `documents_get_content` with an explicit `binary` selection instead returns verified bytes through the existing authenticated connector: common images as MCP image content, other files as embedded resources. The host decides how to open an embedded PDF; receipt of bytes alone is not a claim of model vision. Older servers retain ordinary text reads; a binary request explains when its native method is unavailable. Issuance does not prove the client downloaded bytes; see the [qualification runbook](document-materialization.md).
 
 Thin domain list/get wrappers are intentionally absent where generic search/read already communicates the task cleanly.
+
+### Task, project and contact content relevance
+
+On a Distribution release supporting native relevance order, use
+`odoo_search_records` on `project.task`, `project.project` or `res.partner`:
+pass `domain: [["usl_search_text", "ilike", query]]`,
+`order: "usl_search_text"`, and `context: {search_relevance_query: query}`.
+Choose the same `company_ids`, `lang` and `active_test: false` as Home.
+At the same identity and scope, each model has Home's title-first order and
+descending-ID tie breaker. Existing domains can add ordinary filters.
+Use `fields` for a flat selection or `specification` for related fields.
+Delegated read-only profiles can use either once the Distribution classifies
+the model’s native `web_search_read` as read-only. If an older release returns
+`agent_read_only_action_denied` for that method, use `fields` to continue
+within the same company and record permissions.
+This non-ID order uses offset cursors; unchanged records and access give stable
+pages, but edits between requests can change the result set.
+
+Discover `usl_search_text` through `odoo_describe_model`; its help advertises this
+conditional order on supported releases. Without the explicit query context,
+the virtual field still reports itself as not ordinarily sortable. Older releases reject this order: do not silently
+substitute an ID order while claiming relevance. Omit it or select another
+native `order` for ordinary generic search. Those paths retain their existing
+order and pagination.
+
+Task message evidence additionally uses `context.search_source_query` and the
+readable `usl_search_sources` field. Record and source rights remain native and
+are rechecked on each read. This path does not call or grant access to the
+abstract Home service, and does not perform fuzzy retrieval.
 
 ## Card maintenance
 
