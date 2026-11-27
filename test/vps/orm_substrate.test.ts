@@ -285,6 +285,27 @@ describe("Odoo read specifications", () => {
     expect(bodies[1]).toMatchObject({ domain: [], offset: 2, limit: 3 });
   });
 
+  it.each(["project.task", "project.project", "res.partner"])("forwards native content relevance and offsets for %s", async (model) => {
+    const bodies: Record<string, unknown>[] = [];
+    const fetcher = vi.fn<typeof fetch>(async (_url, init) => {
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return Response.json([{ id: 2 }, { id: 9 }, { id: 5 }]);
+    });
+    const client = await connected(fetcher);
+    const query = "Atelier Ambre";
+    const args = { model, fields: ["id"], domain: [["usl_search_text", "ilike", query]],
+      order: "usl_search_text", limit: 2, company_ids: [1], lang: "fr_FR", active_test: false,
+      context: { search_relevance_query: query } };
+    const first = await client.callTool({ name: "odoo_search_records", arguments: args });
+    expect(first.isError).not.toBe(true);
+    const cursor = (first.structuredContent as { data: any }).data.page.next_cursor;
+    await client.callTool({ name: "odoo_search_records", arguments: { ...args, cursor } });
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]).toMatchObject({ domain: args.domain, order: "usl_search_text", offset: 0,
+      context: { search_relevance_query: query, allowed_company_ids: [1], lang: "fr_FR", active_test: false } });
+    expect(bodies[1]).toMatchObject({ domain: args.domain, order: "usl_search_text", offset: 2 });
+  });
+
   it("rejects fields together with specification without calling Odoo", async () => {
     const fetcher = vi.fn<typeof fetch>(async () => Response.json([]));
     const client = await connected(fetcher);

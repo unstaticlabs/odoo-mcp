@@ -80,6 +80,35 @@ Document tools use the Distribution archive facade for search, context, bounded 
 
 Thin domain list/get wrappers are intentionally absent where generic search/read already communicates the task cleanly.
 
+### Task, project and contact content relevance
+
+On a Distribution release supporting native relevance order, use
+`odoo_search_records` on `project.task`, `project.project` or `res.partner`:
+pass `domain: [["usl_search_text", "ilike", query]]`,
+`order: "usl_search_text"`, and `context: {search_relevance_query: query}`.
+Choose the same `company_ids`, `lang` and `active_test: false` as Home.
+At the same identity and scope, each model has Home's title-first order and
+descending-ID tie breaker. Existing domains can add ordinary filters.
+Use `fields` for a flat selection or `specification` for related fields.
+Delegated read-only profiles can use either once the Distribution classifies
+the model’s native `web_search_read` as read-only. If an older release returns
+`agent_read_only_action_denied` for that method, use `fields` to continue
+within the same company and record permissions.
+This non-ID order uses offset cursors; unchanged records and access give stable
+pages, but edits between requests can change the result set.
+
+Discover `usl_search_text` through `odoo_describe_model`; its help advertises this
+conditional order on supported releases. Without the explicit query context,
+the virtual field still reports itself as not ordinarily sortable. Older releases reject this order: do not silently
+substitute an ID order while claiming relevance. Omit it or select another
+native `order` for ordinary generic search. Those paths retain their existing
+order and pagination.
+
+Task message evidence additionally uses `context.search_source_query` and the
+readable `usl_search_sources` field. Record and source rights remain native and
+are rechecked on each read. This path does not call or grant access to the
+abstract Home service, and does not perform fuzzy retrieval.
+
 ## Card maintenance
 
 `projects_update_task` writes stage, state, description, link (`github_url`) and Sources references of one task in a single `web_save`; state is required with a stage because Odoo resets it otherwise. `activities_complete` marks activities done through `action_feedback`. Both are static on `/mcp`; see [keeping a project card](projects-cards.md) for what belongs where.
