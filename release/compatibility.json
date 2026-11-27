@@ -45,6 +45,7 @@
   "required_actions": [
     "account.account.search_read",
     "account.move.attach_source_evidence",
+    "account.move.change_bill_company",
     "account.move.configure_draft_vendor_bill",
     "account.move.get_company_change_context",
     "account.move.get_purchase_attachment_context",
