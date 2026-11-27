@@ -30,6 +30,9 @@ const RecordReferenceSchema = z.object({
   display_name: z.string(),
   url: z.string().url()
 }).strict();
+const DocumentVersionInputSchema = PositiveIdSchema.optional().describe(
+  "Use versions[].id from documents_get_context. Omit to use the current version."
+);
 const DownloadVersionSchema = z.object({
   id: PositiveIdSchema,
   paperless_version_id: z.string().min(1).max(200),
@@ -660,7 +663,10 @@ export function registerDocumentCapabilities(registry: CapabilityRegistry, clien
       document_id: PositiveIdSchema,
       offset: z.number().int().min(0).max(1_000_000).default(0),
       limit: z.number().int().min(1).max(8000).default(4000),
-      binary: z.object({ document_version_id: PositiveIdSchema.optional(), variant: z.enum(["original", "archive"]).default("original") }).strict().optional(),
+      binary: z.object({
+        document_version_id: DocumentVersionInputSchema,
+        variant: z.enum(["original", "archive"]).default("original")
+      }).strict().optional(),
       context: OdooContextSchema
     }).strict(),
     output: z.object({ result: RecordSchema }).strict(),
@@ -809,7 +815,7 @@ export function registerBusinessActions(registry: CapabilityRegistry, client: Od
     sortOrder: 515,
     input: z.object({
       document_id: PositiveIdSchema,
-      document_version_id: PositiveIdSchema.optional(),
+      document_version_id: DocumentVersionInputSchema,
       variant: z.enum(["original", "archive"]).default("original"),
       ttl_seconds: z.number().int().min(30).max(900).default(300),
       context: OdooContextSchema
