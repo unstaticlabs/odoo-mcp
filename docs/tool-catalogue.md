@@ -174,6 +174,8 @@ currency rather than summing different currencies together. Both shortcuts use
 one native transaction and never submit, post, pay or reconcile. Unknown
 completion always requires readback before another action.
 
+`accounting_change_bill_company` moves one draft vendor bill or credit note to another company the caller can access, in two calls. The first call (no `confirm`) writes nothing and returns the native `account.move.change_bill_company` preview: blockers with links and next steps, the proposed journal, fiscal position, payment terms and payable account, each line from and to with accounts and taxes, unresolved items, and the destination tax totals and due dates, with a `preview_id`. The second call passes `confirm: true` and that `preview_id` (and the same `mapping`, if any) and applies it in one Odoo transaction, returning the bill before and after. Each call is one transport attempt. After a lost reply, read the bill: a bill already in the destination reports `already_done` when confirmed again. It is listed in the `accounting` profile and on `/mcp/all`, not on `/mcp`, to keep the default surface within its schema budget. It requires the Distribution release that publishes `change_bill_company`.
+
 Activity rescheduling and editing use the generic update tool where Odoo
 permits it; completion uses the documented public method via `odoo_call_method`.
 Less common document linking and catalogue operations, and expense approval and

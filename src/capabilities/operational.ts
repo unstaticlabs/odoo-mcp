@@ -615,6 +615,82 @@ export function registerOperationalCapabilities(registry: CapabilityRegistry, cl
     }
   }));
 
+  registry.add(defineCapability({
+    id: "accounting.vendor_bill.draft.change_company",
+    name: "accounting_change_bill_company",
+    title: "Move Draft Vendor Bill to Another Company",
+    description:
+      "Move one draft vendor bill or credit note to another company the caller can access, in two calls. First call without confirm: nothing is written; Odoo returns blockers (each with a link and a next step), the proposed journal, fiscal position, payment terms and payable account, every line from -> to with accounts and taxes, unresolved items, and the destination tax totals and due dates, with a preview_id. Second call with confirm=true and that preview_id (and the same mapping) applies it in one Odoo transaction and returns the bill before and after. Pass mapping only for what the preview left unresolved or you want to change: journal_id, fiscal_position_id (false for none), payment_term_id, and lines [{line_id, account_id, tax_ids (empty for no tax), analytic_distribution}]. The bill keeps its identity, quantities, prices, currency and files; it never posts, pays or reconciles. A payment, bank transaction, purchase order, expense link, recurrence, earlier posting or cash rounding blocks the move and is named in the preview.",
+    layer: "business_action",
+    toolsets: ["accounting"],
+    profiles: ["accounting"],
+    effect: "write",
+    annotations: actionAnnotations,
+    keywords: ["vendor bill", "credit note", "draft", "company", "transfer", "move", "wrong company", "tax", "fiscal position"],
+    requiredModules: ["account", "usl_accounting"],
+    requiredPublicMethods: [{ model: "account.move", method: "change_bill_company" }],
+    requiredModelAccess: [{ model: "account.move", operation: "write" }],
+    defaultVisible: false,
+    alwaysLoad: false,
+    sortOrder: 605,
+    input: z.object({
+      bill_id: PositiveIdSchema,
+      target_company_id: PositiveIdSchema,
+      confirm: z.boolean().optional().describe("Omit or false to preview. True applies the previewed move and needs preview_id."),
+      preview_id: z.string().min(16).max(128).optional().describe("The preview_id returned by the preview of this same bill and company."),
+      mapping: z.object({
+        journal_id: PositiveIdSchema.optional(),
+        fiscal_position_id: z.union([PositiveIdSchema, z.literal(false)]).optional(),
+        payment_term_id: PositiveIdSchema.optional(),
+        lines: z.array(z.object({
+          line_id: PositiveIdSchema,
+          account_id: PositiveIdSchema.optional(),
+          tax_ids: z.array(PositiveIdSchema).max(50).optional(),
+          analytic_distribution: z.record(z.string().min(1).max(200), z.number().finite())
+            .refine((distribution) => Object.keys(distribution).length <= 100, "At most 100 analytic entries are allowed")
+            .optional()
+        }).strict()).max(100).optional()
+      }).strict().optional(),
+      context: OdooContextSchema
+    }).strict(),
+    output: ActionOutputSchema,
+    async handler(input, context, signal) {
+      if (input.confirm && !input.preview_id) {
+        throw new Error("Preview the move first (confirm omitted), then confirm with its preview_id");
+      }
+      const common = rpcContext(input.context, context);
+      const receipt = await client.call<Record<string, unknown>>(context, "account.move", "change_bill_company", {
+        ids: [input.bill_id],
+        target_company_id: input.target_company_id,
+        ...(input.mapping !== undefined ? { mapping: input.mapping } : {}),
+        confirm: input.confirm === true,
+        ...(input.preview_id !== undefined ? { preview_id: input.preview_id } : {}),
+        context: common
+      }, {
+        kind: "mutation",
+        signal,
+        reconciliation: {
+          targetModel: "account.move",
+          knownIds: [input.bill_id],
+          fields: ["company_id", "journal_id", "fiscal_position_id", "invoice_payment_term_id", "invoice_line_ids", "state"],
+          suggestedTool: "odoo_read_records",
+          instructions: "Read the bill's company, journal, lines and taxes. If company_id is already the target, the move happened: do not preview again. Otherwise preview again and confirm with the new preview_id. A repeated confirmation of a finished move reports already_done and moves nothing."
+        }
+      });
+      return receipt.finalize((result) => {
+        const bill = (result.bill ?? {}) as { display_name?: string };
+        return {
+          data: {
+            result,
+            correlation_id: context.correlationId,
+            outcome: "succeeded" as const,
+            record: recordRef(context, "account.move", input.bill_id, String(bill.display_name ?? ""))
+          }
+        };
+      });
+    }
+  }));
+
   for (const action of [
     { name: "expenses_reset_draft", id: "expenses.reset_draft", method: "action_reset", title: "Reset Expense to Draft", verb: "reset the selected expenses to draft", expectedStates: ["draft"] },
     { name: "expenses_submit", id: "expenses.submit", method: "action_submit", title: "Submit Expenses", verb: "submit the selected draft expenses", expectedStates: ["submitted", "approved"] },
