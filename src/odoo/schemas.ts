@@ -101,7 +101,7 @@ export const DomainSchema = z.array(DomainTermSchema)
 // Odoo's read specification, as consumed by web_search_read, web_read and
 // web_save: a map of field name to an options node. A bare `{}` returns the
 // field's raw value (a many2one comes back as its id); `fields` requests a
-// nested read of a relational field, and `limit`/`order` bound an x2many.
+// nested read of a relational field. An x2many limit bounds field expansion.
 const SPECIFICATION_MAX_DEPTH = 4;
 type SpecificationNode = {
   fields?: Record<string, SpecificationNode>;

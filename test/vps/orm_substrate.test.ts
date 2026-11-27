@@ -224,7 +224,7 @@ describe("Odoo read specifications", () => {
         // limit+1 rows signal another page; `length` is what Odoo counted.
         return Response.json({ length: 3, records: [
           { id: 10, display_name: "A", country_id: { id: 1, display_name: "FR" }, child_ids: [] },
-          { id: 11, display_name: "B", country_id: false, child_ids: [{ id: 30, display_name: "B1" }] },
+          { id: 11, display_name: "B", country_id: false, child_ids: [{ id: 30, display_name: "B1" }, { id: 31 }] },
           { id: 12, display_name: "C", country_id: false, child_ids: [] }
         ] });
       }
@@ -234,7 +234,7 @@ describe("Odoo read specifications", () => {
     const specification = {
       display_name: {},
       country_id: { fields: { display_name: {} } },
-      child_ids: { fields: { display_name: {} }, limit: 5 }
+      child_ids: { fields: { display_name: {} }, limit: 1 }
     };
 
     const first = await client.callTool({
@@ -245,7 +245,7 @@ describe("Odoo read specifications", () => {
     const firstData = (first.structuredContent as { data: any }).data;
     expect(firstData.records).toHaveLength(2);
     expect(firstData.records[0].country_id).toEqual({ id: 1, display_name: "FR" });
-    expect(firstData.records[1].child_ids).toEqual([{ id: 30, display_name: "B1" }]);
+    expect(firstData.records[1].child_ids).toEqual([{ id: 30, display_name: "B1" }, { id: 31 }]);
     expect(firstData.page).toMatchObject({ returned: 2, has_more: true, total: 3 });
     expect(bodies[0]).toMatchObject({ domain: [["is_company", "=", true]], specification, limit: 3, offset: 0, order: "id asc" });
     // An exact total was requested on the first page, so no count_limit capped it.

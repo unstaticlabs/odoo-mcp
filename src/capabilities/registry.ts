@@ -575,7 +575,7 @@ export class CapabilityRegistry {
       {
         instructions: [
           "Use a matching visible specialized tool first for compact context or one business action. Use generic tools for cross-domain exploration; inspect models with odoo_describe_model instead of guessing.",
-          "For relational context pass a specification to odoo_search_records or odoo_read_records; it follows relations to any depth in one call. Pass a specification to the create and update tools to read the result back in the same transaction.",
+          "Pass a specification to odoo_search_records or odoo_read_records to read nested relations in one call. A nested limit controls field expansion. The same specification selects the fields returned by create and update.",
           context.profile === "all"
             ? "Use the host's native tool search to acquire deferred schemas. Capability search recommends tools but does not itself load schemas."
             : context.profile === "default"
