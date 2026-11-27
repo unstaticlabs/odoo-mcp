@@ -78,6 +78,7 @@ export function requestContext(accessMode: "read_only" | "read_write" | "mixed" 
         "mcp_get_versions",
         "mcp_get_links",
         "mcp_get_content",
+        "mcp_read_binary",
         "mcp_find_similar",
         "mcp_list_saved_views",
         "mcp_list_tags",

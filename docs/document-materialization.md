@@ -1,10 +1,27 @@
 # Document materialization: delivery and qualification
 
-Materialization has three separate steps: Odoo authorizes and issues a short-lived
+The download-URL workflow has three separate steps: Odoo authorizes and issues a short-lived
 grant; the public gateway forwards a download; the client fetches and verifies the
 bytes. A successful `documents_create_download_url` result proves only the first
-step. MCP does not fetch file bytes, proxy Paperless, or verify client downloads.
-Use `documents_get_content` for OCR/text when binary access is unnecessary.
+step. The URL workflow does not verify client downloads.
+
+For small files, call `documents_get_content` with `binary: {}` instead. Odoo
+reads the exact authorized current original in the same authenticated request;
+select `document_version_id` or `variant: "archive"` inside `binary` when needed.
+The connector receives up to 4 MiB and verifies the complete byte count and
+SHA-256. It returns common images as MCP image content and other files, including
+PDFs, as embedded resources. Opening an embedded PDF depends on the host: receipt
+of bytes alone does not prove that a model saw its pages. No bearer URL or grant
+is created. Larger files retain the streaming URL workflow.
+
+Ordinary calls still return paginated OCR/text. Do not combine text paging with
+a binary selection. A server without the native method gives an explicit binary
+unavailability error; text reads remain compatible. Metadata, company and linked
+record permissions are enforced again for every file request. Share withdrawal
+blocks subsequent reads; it cannot recall bytes already received by a client.
+`source_checksum_verified` identifies SHA-256 or historical MD5 verification
+against the archive version; null means the archive has no recognized checksum.
+The returned SHA-256 always covers the bytes actually received.
 
 ## Gateway correction (2026-09-05)
 
