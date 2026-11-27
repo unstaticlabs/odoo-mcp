@@ -545,7 +545,7 @@ export function registerDocumentCapabilities(registry: CapabilityRegistry, clien
     name: "documents_search",
     title: "Search Documents",
     description:
-      "Search the USL document archive through the Distribution's bounded hybrid, exact, or semantic facade. Use this purpose-built archive interface for document content and metadata discovery.",
+      "Search the USL document archive by text or saved view. To list files already linked to a specific Odoo record, send linked_model and linked_id with no query. Use documents_get_context for each document's versions and links.",
     layer: "semantic",
     toolsets: ["documents"],
     profiles: ["documents"],
@@ -582,9 +582,11 @@ export function registerDocumentCapabilities(registry: CapabilityRegistry, clien
     }).strict(),
     output: z.object({ result: RecordSchema }).strict(),
     async handler({ context: requestedContext, ...input }, context, signal) {
-      if (!input.query.trim() && !input.saved_view_id) throw new Error("Document search requires query or saved_view_id");
       if ((input.linked_model && !input.linked_id) || (!input.linked_model && input.linked_id)) {
         throw new Error("linked_model and linked_id must be supplied together");
+      }
+      if (!input.query.trim() && !input.saved_view_id && !input.linked_model) {
+        throw new Error("Provide a search query, saved view, or linked record (linked_model and linked_id)");
       }
       if (input.offset + input.limit > 50) throw new Error("Document search offset plus limit may not exceed 50");
       const result = await client.call<Record<string, unknown>>(context, "usl.document", "mcp_search", {
