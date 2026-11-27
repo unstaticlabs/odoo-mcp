@@ -198,7 +198,7 @@ function recordId(record: Record<string, unknown>): number | undefined {
 }
 
 const SELECTION_GUIDANCE =
-  "Select output with fields (flat; many2one values are [id, display_name] pairs) or with specification, Odoo's nested read spec, e.g. {\"name\": {}, \"partner_id\": {\"fields\": {\"display_name\": {}, \"email\": {}}}, \"line_ids\": {\"fields\": {\"name\": {}}, \"limit\": 20}}: it follows relations to any depth in one call, and a bare {} on a relational field returns only ids.";
+  "Use fields for flat values (many2one: [id, display_name]) or specification for nested reads, e.g. {\"line_ids\":{\"fields\":{\"name\":{}},\"limit\":2}}. A bare {} reads relation IDs. A nested limit selects the first N IDs per parent; shared IDs are expanded everywhere in the batch and other rows contain only id. To page related rows, search their model by inverse field or by the returned IDs.";
 
 
 function capabilitySummary(match: CapabilitySearchMatch) {
@@ -671,11 +671,11 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
     name: "odoo_expand_record",
     title: "Expand Odoo Record Relations",
     description:
-      "Read one record and follow up to ten named many2one, one2many, or many2many fields by one hop. Superseded by specification on odoo_search_records and odoo_read_records, which follow relations to any depth in one call; retained for clients that already use it.",
+      "Read one record and follow up to ten named many2one, one2many, or many2many fields by one hop. Existing clients can continue using this tool. Use specification on odoo_search_records or odoo_read_records for nested relations in one call.",
     layer: "generic",
     toolsets: ["core"],
     // Off every static profile: `specification` on the search and read tools
-    // does this to any depth in one call instead of one hop in N+1 calls.
+    // follows nested relations in one call.
     profiles: [],
     effect: "read",
     annotations: readAnnotations,

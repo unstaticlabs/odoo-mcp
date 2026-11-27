@@ -243,6 +243,37 @@
           "Do not mutate expenses or invent permission requirements."
         ]
       }
+    },
+    {
+      "id": "chatgpt_document_original_without_second_connection",
+      "scenario": "everyday_workflow",
+      "profile": "default",
+      "backend_metadata": "available",
+      "prompt": "The OCR of a synthetic archived image omitted a line. The file is below the direct-read size limit. Inspect its original through this connector without creating a temporary download link.",
+      "expected": {
+        "visible_tools": [
+          "documents_get_context",
+          "documents_get_content"
+        ],
+        "hidden_tools": [
+          "odoo_delete_records"
+        ],
+        "preferred_tools": [
+          "documents_get_context",
+          "documents_get_content"
+        ],
+        "forbidden_tools": [
+          "documents_create_download_url",
+          "documents_revoke_download_url",
+          "odoo_call_method"
+        ],
+        "assertions": [
+          "Request the explicit binary mode of the existing content tool for the known authorized version.",
+          "Inspect image content rather than treating incomplete OCR as the original.",
+          "Keep file bytes out of ordinary text metadata and never invent a second bearer URL.",
+          "If the host cannot inspect an embedded PDF, disclose that limitation rather than claiming the PDF pages were seen."
+        ]
+      }
     }
   ]
 }

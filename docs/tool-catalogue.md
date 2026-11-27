@@ -11,7 +11,7 @@ refer here instead of repeating them.
 | --- | ---: |
 | Tools on `/mcp` with every feature available | 36 |
 | Tools on `/mcp` without document materialization | 34 |
-| Estimated input/output schema tokens on `/mcp` | 20,865 |
+| Estimated input/output schema tokens on `/mcp` | 20,940 |
 | Budget enforced by `/readyz` (`DEFAULT_PROFILE_SCHEMA_TOKEN_BUDGET`) | 21,000 |
 
 Odoo module, method, and access availability can lower the counts further.
@@ -36,7 +36,7 @@ The preferred discovery and read tools are:
 | `docs_search` | Find ranked user-guide pages, descriptions, matching text and canonical links. Native internal-user guide access applies. |
 | `odoo_search_models` | Find accessible technical models from authenticated API metadata. |
 | `odoo_describe_model` | Inspect fields and public method signatures before guessing. |
-| `odoo_search_records` | Perform bounded cross-domain or long-tail search; a `specification` reads relations to any depth in one call. |
+| `odoo_search_records` | Search across models and read nested relations in one call. |
 | `odoo_read_records` | Read known record IDs, flat or with a nested `specification`. |
 
 `odoo_search_capabilities` is deliberately absent from `/mcp`. That profile lists
@@ -76,7 +76,7 @@ additional expense-row access or grant permission to edit any expense.
 
 The invoice helper optionally accepts `company_change: {target_company_id, offset, limit}` for one native read-only snapshot of company choices, all line types, actual financial links, origins and evidence. Each page is an independent snapshot with readable-scope counts and explicit truncation or unavailability. Default invoice context remains unchanged. This option adds no company-change action or approval; generic native writes remain available under existing authority.
 
-Document tools use the Distribution archive facade for search, context, bounded text, similarity, and catalogues. Link/unlink operations call one public archive method. `documents_create_download_url` is a consequential action that issues a 30–900 second HTTPS bearer URL for one exact authorized document version; `documents_revoke_download_url` ends that capability early. Both are static on `/mcp` when available and deferred only on `/mcp/all`. Search and read tools report binary availability but never create or return bearer URLs. Issuance does not prove the client downloaded bytes; see the [qualification runbook](document-materialization.md).
+Document tools use the Distribution archive facade for search, context, bounded text, similarity, and catalogues. Link/unlink operations call one public archive method. `documents_create_download_url` is a consequential action that issues a 30–900 second HTTPS bearer URL for one exact authorized document version; `documents_revoke_download_url` ends that capability early. Both are static on `/mcp` when available and deferred only on `/mcp/all`. Search and read tools report binary availability but never create or return bearer URLs. For supported files up to 4 MiB, `documents_get_content` with an explicit `binary` selection instead returns verified bytes through the existing authenticated connector: common images as MCP image content, other files as embedded resources. The host decides how to open an embedded PDF; receipt of bytes alone is not a claim of model vision. Older servers retain ordinary text reads; a binary request explains when its native method is unavailable. Issuance does not prove the client downloaded bytes; see the [qualification runbook](document-materialization.md).
 
 Thin domain list/get wrappers are intentionally absent where generic search/read already communicates the task cleanly.
 
@@ -213,7 +213,8 @@ Module, public-method, model-access, and feature predicates remove specialized t
 - Relational (x2many) values accept raw Odoo command tuples or the named form `{link|unlink|delete|set: [ids]}`, `{create: [values]}`, `{update: [{id, values}]}`, `{clear: true}`, lowered to those tuples in a fixed order.
 - `company_ids`, `lang`, and `active_test` are named parameters that map onto `allowed_company_ids`, `lang`, and `active_test`. They override the same key supplied inside `context` and report the override as a warning.
 - `odoo_describe_model` projects and caps its payload. It returns `fields_page`/`methods_page` totals; absence must be read from those, not from the returned keys.
-- `odoo_search_records` and `odoo_read_records` accept either `fields` (flat; many2one values are `[id, display_name]` pairs, from `search_read`/`read`) or `specification`, Odoo's nested read spec (`web_search_read`): `{"name": {}, "partner_id": {"fields": {"display_name": {}}}, "line_ids": {"fields": {...}, "limit": 20}}` follows relations to any depth in one call. A bare `{}` on a relational field returns only ids. `odoo_expand_record` is superseded and registered on `all` only.
+- `odoo_search_records` and `odoo_read_records` accept `fields` for flat reads (many2one values are `[id, display_name]` pairs) or `specification` to read related fields in the same call. A bare `{}` on a relation returns its IDs. With `{"line_ids": {"fields": {"name": {}}, "limit": 1}}`, an order with two lines can return `[{"id": 11, "name": "Service"}, {"id": 12}]`. Odoo takes the first N related IDs from each parent and expands every occurrence of those IDs in the batch. If two contacts share a tag, it can be expanded for both, even when it appears after the limit on one contact.
+- To page the actual related rows, search their model with a top-level `limit`. For order lines, filter on the inverse `order_id`. If a relation has no inverse field, get its IDs from the parent and filter the related search with `["id", "in", ids]`. The legacy `odoo_expand_record` tool remains available on the `all` profile.
 - `odoo_create_records` and `odoo_update_records` accept the same `specification` and return the records as `read_back`, so no follow-up read is needed. A single create and every update run `web_save`, where the write and the read-back share one Odoo transaction; a batch create runs `create` and then reads the new records back by id through `web_search_read`, because Odoo's `web_save_multi` only writes to records that already exist.
 - Searches ordered by `id asc` or `id desc` alone page by keyset: the next page restricts the domain by the last id seen and cannot skip or repeat rows when records are inserted or deleted between pages. Any other order pages by offset. Cursors are bound to the query and carry their mode.
 - Every write path that takes a rich-text body states the escaping contract in its own field descriptions. With `description_is_html`, `body_is_html`, or `note_is_html` false, the server escapes the text and turns newlines into `<br>`. With the flag true, the server stores the string as raw HTML and the caller must not escape it. `odoo_update_records` stays the pass-through reference: `values.description` is written exactly as given.

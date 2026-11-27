@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { readDocumentBinary } from "./document_binary.js";
+import { CapabilityInputError } from "../runtime/envelope.js";
 import { OdooClient } from "../odoo/client.js";
 import {
   attributedContext,
@@ -602,7 +604,7 @@ export function registerDocumentCapabilities(registry: CapabilityRegistry, clien
     name: "documents_get_context",
     title: "Get Document Context",
     description:
-      "Get one USL document's metadata, versions, and linked Odoo records in one agent call. Use after document search; fetch paginated extracted text separately with documents_get_content.",
+      "Get a document’s metadata, versions and linked records. Set include_integrity to compare original and archive digests and any confirmed current file sizes when you have file access. Use documents_get_content for extracted text.",
     layer: "semantic",
     toolsets: ["documents"],
     profiles: ["documents"],
@@ -618,13 +620,19 @@ export function registerDocumentCapabilities(registry: CapabilityRegistry, clien
     defaultVisible: true,
     alwaysLoad: false,
     sortOrder: 310,
-    input: z.object({ document_id: PositiveIdSchema, context: OdooContextSchema }).strict(),
+    input: z.object({
+      document_id: PositiveIdSchema,
+      include_integrity: z.boolean().optional(),
+      context: OdooContextSchema
+    }).strict(),
     output: ContextOutputSchema,
-    async handler({ document_id, context: requestedContext }, context, signal) {
+    async handler({ document_id, include_integrity, context: requestedContext }, context, signal) {
       const common = rpcContext(requestedContext, context);
       const [document, versions, links] = await Promise.all([
         client.call<Record<string, unknown>>(context, "usl.document", "mcp_get", { document_id, context: common }, { signal }),
-        client.call<Record<string, unknown>>(context, "usl.document", "mcp_get_versions", { document_id, context: common }, { signal }),
+        client.call<Record<string, unknown>>(context, "usl.document", "mcp_get_versions", {
+          document_id, ...(include_integrity ? { include_integrity: true } : {}), context: common
+        }, { signal }),
         client.call<Record<string, unknown>>(context, "usl.document", "mcp_get_links", { document_id, context: common }, { signal })
       ]);
       return { data: { context: { document: { ...document, _ref: ref(context, "usl.document", document_id, document.name) }, versions: versions.versions ?? [], links: links.links ?? [] } } };
@@ -634,15 +642,15 @@ export function registerDocumentCapabilities(registry: CapabilityRegistry, clien
   registry.add(defineCapability({
     id: "documents.content.get",
     name: "documents_get_content",
-    title: "Get Document Text",
+    title: "Get Document Content",
     description:
-      "Read one bounded page of extracted text from a USL document. Use after documents_search/documents_get_context and continue with next_offset; this does not return arbitrary binary attachments.",
+      "Read a bounded page of extracted document text; continue with next_offset. Set binary to receive the exact authorized original or archive file, up to 4 MiB, without a second URL or browser login. Common images use MCP image content; PDFs use embedded resources whose viewing depends on the host. Select version/variant explicitly when needed; omit text paging in binary mode. Larger files use documents_create_download_url.",
     layer: "semantic",
     toolsets: ["documents"],
     profiles: ["documents"],
     effect: "read",
     annotations: readAnnotations,
-    keywords: ["document text", "OCR", "content", "pagination"],
+    keywords: ["document text", "OCR", "content", "pagination", "original", "receipt", "image", "PDF", "binary"],
     requiredModules: ["usl_documents"],
     requiredPublicMethods: [{ model: "usl.document", method: "mcp_get_content" }],
     defaultVisible: true,
@@ -652,10 +660,15 @@ export function registerDocumentCapabilities(registry: CapabilityRegistry, clien
       document_id: PositiveIdSchema,
       offset: z.number().int().min(0).max(1_000_000).default(0),
       limit: z.number().int().min(1).max(8000).default(4000),
+      binary: z.object({ document_version_id: PositiveIdSchema.optional(), variant: z.enum(["original", "archive"]).default("original") }).strict().optional(),
       context: OdooContextSchema
     }).strict(),
     output: z.object({ result: RecordSchema }).strict(),
-    async handler({ document_id, offset, limit, context: requestedContext }, context, signal) {
+    async handler({ document_id, offset, limit, binary, context: requestedContext }, context, signal) {
+      if (binary) {
+        if (offset !== 0 || limit !== 4000) throw new CapabilityInputError("INVALID_BINARY_SELECTION", "Text paging cannot be combined with a file request.", "Omit offset and limit when selecting binary; larger files use the download-URL workflow.");
+        return readDocumentBinary(client, { document_id, ...binary, context: requestedContext }, context, signal);
+      }
       const result = await client.call<Record<string, unknown>>(context, "usl.document", "mcp_get_content", {
         document_id, offset, limit, context: rpcContext(requestedContext, context)
       }, { signal });

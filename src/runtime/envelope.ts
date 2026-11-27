@@ -36,9 +36,13 @@ export function resultEnvelope<T>(
   };
 }
 
-export function toolResult(value: Record<string, unknown>) {
+export type BinaryToolContent =
+  | { type: "image"; mimeType: string; data: string }
+  | { type: "resource"; resource: { uri: string; mimeType: string; blob: string } };
+
+export function toolResult(value: Record<string, unknown>, binary: BinaryToolContent[] = []) {
   return {
-    content: [{ type: "text" as const, text: JSON.stringify(value) }],
+    content: [{ type: "text" as const, text: JSON.stringify(value) }, ...binary],
     structuredContent: value
   };
 }

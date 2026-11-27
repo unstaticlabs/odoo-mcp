@@ -356,6 +356,46 @@ describe("Distribution semantic and business capabilities", () => {
     expect(serialized).not.toContain("paperless_url");
   });
 
+  it("requests version integrity only on explicit reads, without creating or fetching a file", async () => {
+    const digest = "a".repeat(64);
+    const calls: Array<[string, Record<string, unknown>]> = [];
+    const fetcher = vi.fn<typeof fetch>(async (url, init) => {
+      const method = String(url).split("/").at(-1)!;
+      const body = JSON.parse(String(init?.body));
+      calls.push([method, body]);
+      if (method === "mcp_get_versions") {
+        const version = { id: 81, ...(body.include_integrity ? {
+          integrity: { original: { algorithm: "sha256", digest, size_bytes: 8 }, archive: null }
+        } : {}) };
+        return Response.json({ versions: [version] });
+      }
+      return Response.json(method === "mcp_get" ? { id: 17, name: "Synthetic export" } : { links: [] });
+    });
+    const server = createCapabilityRegistry(new OdooClient(8, 1024 * 1024, fetcher))
+      .createServer({ ...requestContext(), profile: "documents" });
+    const client = new Client({ name: "version-integrity-test", version: "1" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    closeCallbacks.push(async () => { await client.close(); await server.close(); });
+
+    for (const include of [undefined, false, true]) {
+      calls.length = 0;
+      const result = await client.callTool({ name: "documents_get_context",
+        arguments: { document_id: 17, ...(include === undefined ? {} : { include_integrity: include }) } });
+      expect(result.isError).not.toBe(true);
+      expect(calls.map(([method]) => method).sort()).toEqual(["mcp_get", "mcp_get_links", "mcp_get_versions"]);
+      for (const [method, body] of calls) {
+        if (include && method === "mcp_get_versions") {
+          expect(body.include_integrity).toBe(true);
+        } else {
+          expect(body).not.toHaveProperty("include_integrity");
+        }
+      }
+      expect(JSON.stringify(result.structuredContent).includes(digest)).toBe(include === true);
+    }
+  });
+
   it("browses archived documents by an exact native record link without a text query", async () => {
     const page = { results: [{ id: 17, filename: "synthetic-export.csv" }], has_more: false };
     const fetcher = vi.fn<typeof fetch>(async () => Response.json(page));
