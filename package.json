@@ -33,7 +33,7 @@
     "better-auth": "1.7.21",
     "better-sqlite3": "^13.0.0",
     "express": "^5.1.0",
-    "posthog-node": "5.69.0",
+    "posthog-node": "6.2.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
