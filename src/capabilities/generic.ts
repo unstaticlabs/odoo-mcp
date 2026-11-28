@@ -1146,6 +1146,9 @@ export function registerGenericCapabilities(registry: CapabilityRegistry, client
         body: message.html,
         body_is_html: true,
         subtype_xmlid: subtype,
+        // message_post defaults to message_type "notification", which Odoo draws as a system line with
+        // no bubble. A comment is what a person sends from "Send message": it carries the type "comment".
+        ...(subtype === "mail.mt_comment" ? { message_type: "comment" } : {}),
         context: attributedContext(requestedContext, context.correlationId)
       }, {
         kind: "mutation",

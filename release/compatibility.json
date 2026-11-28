@@ -45,6 +45,7 @@
   "required_actions": [
     "account.account.search_read",
     "account.move.attach_source_evidence",
+    "account.move.change_bill_company",
     "account.move.configure_draft_vendor_bill",
     "account.move.get_company_change_context",
     "account.move.get_purchase_attachment_context",
@@ -73,6 +74,7 @@
     "mail.activity.search_read",
     "mail.message.search_read",
     "project.task.create",
+    "project.task.fields_get",
     "project.task.read",
     "project.task.search_read",
     "project.task.type.search_read",

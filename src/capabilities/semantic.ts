@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { readDocumentBinary } from "./document_binary.js";
 import { CapabilityInputError } from "../runtime/envelope.js";
-import { OdooClient } from "../odoo/client.js";
+import { OdooClient, OdooError } from "../odoo/client.js";
 import {
   attributedContext,
   ModelNameSchema,
@@ -9,7 +9,7 @@ import {
   PositiveIdSchema
 } from "../odoo/schemas.js";
 import type { RequestContext } from "../runtime/context.js";
-import { PROJECT_TASK_CONTEXT_FIELDS } from "./curated_fields.js";
+import { PROJECT_TASK_CONTEXT_FIELDS, PROJECT_TASK_WAITING_FIELDS } from "./curated_fields.js";
 import { propertySummaries, sourcesReferences } from "./project_cards.js";
 import { CapabilityRegistry, defineCapability } from "./registry.js";
 
@@ -30,6 +30,9 @@ const RecordReferenceSchema = z.object({
   display_name: z.string(),
   url: z.string().url()
 }).strict();
+const DocumentVersionInputSchema = PositiveIdSchema.optional().describe(
+  "Use versions[].id from documents_get_context. Omit to use the current version."
+);
 const DownloadVersionSchema = z.object({
   id: PositiveIdSchema,
   paperless_version_id: z.string().min(1).max(200),
@@ -77,6 +80,28 @@ function ref(context: RequestContext, model: string, id: number, displayName?: u
     display_name: typeof displayName === "string" && displayName ? displayName : `${model},${id}`,
     url: `${context.principal.publicOrigin}/odoo/${model}/${id}`
   };
+}
+
+async function readTaskContext(
+  client: OdooClient, context: RequestContext, taskId: number,
+  common: Record<string, unknown>, signal?: AbortSignal
+) {
+  const read = (fields: readonly string[]) => client.call<Record<string, unknown>[]>(context, "project.task", "read", {
+    ids: [taskId], fields, context: common
+  }, { signal });
+  try {
+    return await read([...PROJECT_TASK_CONTEXT_FIELDS, ...PROJECT_TASK_WAITING_FIELDS]);
+  } catch (error) {
+    // Only negotiate when Odoo names an absent Waiting field. Current servers need one task read.
+    if (!(error instanceof OdooError) || !["odoo_server_error", "invalid_request"].includes(error.code)) throw error;
+    const missing = PROJECT_TASK_WAITING_FIELDS.find(field => error.message === `Invalid field '${field}' on 'project.task'`);
+    if (!missing) throw error;
+    const metadata = await client.call<Record<string, unknown>>(context, "project.task", "fields_get", {
+      allfields: PROJECT_TASK_WAITING_FIELDS, attributes: ["type"], context: common
+    }, { signal });
+    if (!metadata || typeof metadata !== "object" || Array.isArray(metadata) || Object.hasOwn(metadata, missing)) throw error;
+    return read([...PROJECT_TASK_CONTEXT_FIELDS, ...PROJECT_TASK_WAITING_FIELDS.filter(field => Object.hasOwn(metadata, field))]);
+  }
 }
 
 async function recordActivities(
@@ -258,7 +283,7 @@ export function registerSemanticCapabilities(registry: CapabilityRegistry, clien
     name: "projects_get_task_context",
     title: "Get Project Task Context",
     description:
-      "Read one project task with assignments, stage, state, link (github_url), task properties with labels (Sources parsed into sources), dependencies and readable open blockers, immediate hierarchy, recent chatter, activities, and document links. Waiting is normally dependency-derived; incomplete dependency details and manual Waiting are identified explicitly. Use generic traversal for other fields.",
+      "Read one project task with assignments, stage, state, link (github_url), task properties with labels (Sources parsed into sources), dependencies and readable open blockers, the external waiting reason (usl_waiting_reason, usl_waiting_partner_id), immediate hierarchy, recent chatter, activities, and document links. Waiting is normally dependency-derived; incomplete dependency details and manual Waiting are identified explicitly. Use generic traversal for other fields.",
     layer: "semantic",
     toolsets: ["projects", "activities", "documents"],
     profiles: ["projects"],
@@ -283,16 +308,12 @@ export function registerSemanticCapabilities(registry: CapabilityRegistry, clien
     async handler({ task_id, chatter_limit, context: requestedContext }, context, signal) {
       const common = rpcContext(requestedContext, context);
       const [rows, activities, messages, documentLinks] = await Promise.all([
-        client.call<unknown[]>(context, "project.task", "read", {
-          ids: [task_id],
-          fields: [...PROJECT_TASK_CONTEXT_FIELDS],
-          context: common
-        }, { signal }),
+        readTaskContext(client, context, task_id, common, signal),
         recordActivities(client, context, "project.task", task_id, chatter_limit, requestedContext, signal),
         recordMessages(client, context, "project.task", task_id, chatter_limit, requestedContext, signal),
         optionalDocumentLinks(client, context, "project.task", task_id, common, signal)
       ]);
-      const task = rows[0] as Record<string, unknown> | undefined;
+      const task = rows[0];
       if (!task) throw new Error(`project.task,${task_id} was not found or is not readable`);
       const dependencyIds = Array.isArray(task.depend_on_ids) ? task.depend_on_ids as number[] : [];
       // Search under the caller's rights: a task relation is not permission to
@@ -312,6 +333,7 @@ export function registerSemanticCapabilities(registry: CapabilityRegistry, clien
       const openBlockers = enabled ? dependencies.filter((dependency) => !["1_done", "1_canceled"].includes(String(dependency.state)))
         .map((dependency) => ({ ...dependency, _ref: ref(context, "project.task", Number(dependency.id), dependency.display_name) })) : [];
       const waitingReason = task.state !== "04_waiting_normal" ? "not_waiting"
+        : task.usl_waiting_reason ? "external_reason"
         : !enabled ? "dependencies_disabled" : openBlockers.length ? "open_dependencies"
           : !complete ? "unavailable_dependencies" : "manual_or_stale";
       const taskView = { ...task };
@@ -337,7 +359,7 @@ export function registerSemanticCapabilities(registry: CapabilityRegistry, clien
     name: "accounting_get_invoice_context",
     title: "Get Invoice Context",
     description:
-      "Read one invoice or vendor bill with lines, payment state, activities, recent chatter, and archived-document links. Relevant bills include purchase_attachments and native review/separate-draft actions. Page truncated results via odoo_call_method: model account.move, method get_purchase_attachment_context, bill ids, kwargs {offset:next_offset,limit:50} (limit 1–100). Opt into company_change with an explicit target for one native paged snapshot of financial relations, origins, evidence and native-compatible choices. Each page is a separate snapshot; no mappings or changes are applied.",
+      "Read one invoice or vendor bill with lines, payment state, activities, recent chatter, and archived-document links. Relevant bills include purchase_attachments and native review/separate-draft actions. Page truncated results via odoo_call_method: model account.move, method get_purchase_attachment_context, bill ids, kwargs {offset:next_offset,limit:50} (limit 1–100). Opt into company_change with an explicit target for one native paged snapshot of financial relations, origins, evidence and native-compatible choices. Each page is a separate snapshot; no mappings or changes are applied. To move a draft bill to another company, use accounting_change_bill_company (account.move.change_bill_company): preview first, then confirm with the preview_id.",
     layer: "semantic",
     toolsets: ["accounting", "activities", "documents"],
     profiles: ["accounting"],
@@ -660,7 +682,10 @@ export function registerDocumentCapabilities(registry: CapabilityRegistry, clien
       document_id: PositiveIdSchema,
       offset: z.number().int().min(0).max(1_000_000).default(0),
       limit: z.number().int().min(1).max(8000).default(4000),
-      binary: z.object({ document_version_id: PositiveIdSchema.optional(), variant: z.enum(["original", "archive"]).default("original") }).strict().optional(),
+      binary: z.object({
+        document_version_id: DocumentVersionInputSchema,
+        variant: z.enum(["original", "archive"]).default("original")
+      }).strict().optional(),
       context: OdooContextSchema
     }).strict(),
     output: z.object({ result: RecordSchema }).strict(),
@@ -809,7 +834,7 @@ export function registerBusinessActions(registry: CapabilityRegistry, client: Od
     sortOrder: 515,
     input: z.object({
       document_id: PositiveIdSchema,
-      document_version_id: PositiveIdSchema.optional(),
+      document_version_id: DocumentVersionInputSchema,
       variant: z.enum(["original", "archive"]).default("original"),
       ttl_seconds: z.number().int().min(30).max(900).default(300),
       context: OdooContextSchema

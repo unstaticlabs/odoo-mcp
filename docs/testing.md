@@ -235,3 +235,27 @@ vault alone does not establish upgrade safety. See [migration guidance](migratio
 Vitest 5 suites use the default sequential execution rather than the removed
 `.sequential` collector chain. The live integration suite remains opt-in;
 collection with no credentials reports skips, never a live pass.
+
+## Native content relevance
+
+`test/integration/search_relevance.test.ts` exercises the existing generic tool
+against a disposable Distribution supporting relevance order. Set the ordinary
+`ODOO_INTEGRATION_ORIGIN`, `ODOO_INTEGRATION_DATABASE` and governed
+`ODOO_INTEGRATION_API_KEY`, plus `ODOO_SEARCH_QA_COMPANY_ID` and optionally
+`ODOO_SEARCH_QA_LANG`. Set `ODOO_SEARCH_QA_SPECIFICATION_ALLOWED=1` when the fixture
+authorizes `web_search_read` on all three models. This includes read-only
+profiles on releases containing the reviewed native classifications from
+[Distribution #593](https://github.com/unstaticlabs/odoo/pull/593).
+Leave the flag unset to verify an older read-only profile’s
+`agent_read_only_action_denied` response. `ODOO_SEARCH_QA_FIXTURES` is a JSON object keyed by
+`project.task`, `project.project` and `res.partner`; each value has `query` and
+four independently annotated `ids`, ordered as exact title, phrase title, all
+title words, then content-only mention. Use fictional records, not business data.
+
+Run `npx vitest run test/integration/search_relevance.test.ts` separately with
+existing read-only and writable delegated credentials. It checks both fields
+reads across cursor pages, the profile's structured-read contract, and ordinary ID order. Fixture
+creation is external; these tests only read. Without this explicit configuration
+the suite skips, which is not a qualification pass. Native Odoo tests own the
+larger FR/EN corpus, current company/record/source withdrawal and hidden-title
+boundaries.

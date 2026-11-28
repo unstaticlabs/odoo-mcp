@@ -231,6 +231,11 @@ describe("VPS HTTP MCP transport", () => {
       closeCallbacks.push(async () => client.close());
       const { tools } = await client.listTools();
       if (profile === "default") expect(tools).toHaveLength(36);
+      const versionHint = expect.stringContaining("versions[].id");
+      expect(tools.find((tool) => tool.name === "documents_get_content")?.inputSchema)
+        .toHaveProperty("properties.binary.properties.document_version_id.description", versionHint);
+      expect(tools.find((tool) => tool.name === "documents_create_download_url")?.inputSchema)
+        .toHaveProperty("properties.document_version_id.description", versionHint);
       for (const name of ["documents_search", "documents_get_content", "documents_create_download_url",
         "documents_revoke_download_url", "projects_create_task", "expenses_get_context",
         "expenses_update_draft", "expenses_configure_draft_vendor_bill", "activities_schedule", "odoo_post_message", "odoo_add_internal_note", "odoo_submit_feedback"]) {
