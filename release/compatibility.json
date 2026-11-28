@@ -74,6 +74,7 @@
     "mail.activity.search_read",
     "mail.message.search_read",
     "project.task.create",
+    "project.task.fields_get",
     "project.task.read",
     "project.task.search_read",
     "project.task.type.search_read",

@@ -6,18 +6,29 @@ import { requestContext } from "./fixtures.js";
 
 let fetcherUrls: string[] = [];
 
-async function taskContext(task: Record<string, unknown>, dependencies: unknown[]) {
+async function taskContext(task: Record<string, unknown>, dependencies: unknown[],
+  availableWaiting: string[] = ["usl_waiting_reason", "usl_waiting_partner_id"],
+  readError?: { message: string; status: number }) {
   fetcherUrls = [];
   task = { depend_on_count: Array.isArray(task.depend_on_ids) ? task.depend_on_ids.length : 0, closed_depend_on_count: 0, ...task };
   const fetcher = vi.fn<typeof fetch>(async (input, init) => {
     const url = String(input);
     const body = JSON.parse(String(init?.body));
     fetcherUrls.push(url.split("/").pop() ?? "");
-    if (url.endsWith("/project.task/read")) {
-      expect(body.fields).toEqual(expect.arrayContaining(["usl_waiting_reason", "usl_waiting_partner_id"]));
-      expect(body.ids).toEqual([42]);
+    if (url.endsWith("/project.task/fields_get")) {
+      expect(body.context.allowed_company_ids).toEqual([3]);
+      expect(body.allfields).toEqual(["usl_waiting_reason", "usl_waiting_partner_id"]);
+      return Response.json(Object.fromEntries(availableWaiting.map(field => [field, { type: field === "usl_waiting_reason" ? "char" : "many2one" }])));
     }
-    if (url.endsWith("/project.task/read")) return Response.json([{ id: 42, display_name: "[QA] Launch", ...task }]);
+    if (url.endsWith("/project.task/read")) {
+      expect(body.ids).toEqual([42]);
+      expect(body.context.allowed_company_ids).toEqual([3]);
+      if (readError) return Response.json({ message: readError.message }, { status: readError.status });
+      const unsupported = body.fields.find((field: string) => field.startsWith("usl_waiting_") && !availableWaiting.includes(field));
+      if (unsupported) return Response.json({ message: `Invalid field '${unsupported}' on 'project.task'` }, { status: 500 });
+      const selected = Object.fromEntries(Object.entries(task).filter(([field]) => body.fields.includes(field)));
+      return Response.json([{ id: 42, display_name: "[QA] Launch", ...selected }]);
+    }
     if (url.endsWith("/project.task/search_read")) {
       expect(body.context.allowed_company_ids).toEqual([3]);
       expect(body.context.active_test).toBe(false);
@@ -34,7 +45,7 @@ async function taskContext(task: Record<string, unknown>, dependencies: unknown[
   await client.connect(ct);
   try {
     const result = await client.callTool({ name: "projects_get_task_context", arguments: { task_id: 42, context: { allowed_company_ids: [3] } } });
-    expect(result.isError).not.toBe(true);
+    if (result.isError) throw new Error(JSON.stringify(result.content));
     return result.structuredContent as { data: { context: { task: Record<string, unknown>; dependencies: Record<string, unknown> } } };
   } finally {
     await client.close(); await server.close();
@@ -109,6 +120,40 @@ describe("task blocker explanations", () => {
     expect(result.data.context.dependencies).toMatchObject({ complete: false, total_count: 1,
       waiting_reason: "unavailable_dependencies", open_blockers: [] });
     expect(JSON.stringify(result)).not.toContain('"depend_on_ids"');
+  });
+
+  it("reads a task and explains its open dependency on a server without external waiting fields", async () => {
+    const result = await taskContext({ state: "04_waiting_normal", allow_task_dependencies: true, depend_on_ids: [7] },
+      [{ id: 7, display_name: "[QA] Rehearsal", state: "01_in_progress" }], []);
+    expect(result.data.context.task).toMatchObject({ id: 42, display_name: "[QA] Launch" });
+    expect(result.data.context.task).not.toHaveProperty("usl_waiting_reason");
+    expect(result.data.context.dependencies).toMatchObject({ complete: true, waiting_reason: "open_dependencies",
+      open_blockers: [{ id: 7 }] });
+  });
+
+  it("keeps the external reason when the server exposes it without the optional contact", async () => {
+    const result = await taskContext({ state: "04_waiting_normal", usl_waiting_reason: "[QA] Sound check", depend_on_ids: [] },
+      [], ["usl_waiting_reason"]);
+    expect(result.data.context.task.usl_waiting_reason).toBe("[QA] Sound check");
+    expect(result.data.context.task).not.toHaveProperty("usl_waiting_partner_id");
+    expect(result.data.context.dependencies.waiting_reason).toBe("external_reason");
+  });
+
+  it.each([
+    ["denied reads", 403, "Access to this task is denied"],
+    ["field visibility denials", 403, "Invalid field 'usl_waiting_reason' on 'project.task'"],
+    ["missing core fields", 500, "Invalid field 'state' on 'project.task'"],
+    ["errors from another model", 500, "Invalid field 'usl_waiting_reason' on 'res.partner'"],
+  ])("preserves %s", async (_case, status, message) => {
+    await expect(taskContext({}, [], [], { status: Number(status), message: String(message) })).rejects.toThrow(String(message));
+    expect(fetcherUrls).not.toContain("fields_get");
+  });
+
+  it("returns the original read error when Odoo still declares the rejected field", async () => {
+    const message = "Invalid field 'usl_waiting_reason' on 'project.task'";
+    await expect(taskContext({}, [], ["usl_waiting_reason"], { status: 500, message })).rejects.toThrow(message);
+    expect(fetcherUrls.filter(method => method === "read")).toHaveLength(1);
+    expect(fetcherUrls.filter(method => method === "fields_get")).toHaveLength(1);
   });
 
   it("does not claim completeness when the native count is unavailable", async () => {

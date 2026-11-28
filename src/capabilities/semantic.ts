@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { readDocumentBinary } from "./document_binary.js";
 import { CapabilityInputError } from "../runtime/envelope.js";
-import { OdooClient } from "../odoo/client.js";
+import { OdooClient, OdooError } from "../odoo/client.js";
 import {
   attributedContext,
   ModelNameSchema,
@@ -9,7 +9,7 @@ import {
   PositiveIdSchema
 } from "../odoo/schemas.js";
 import type { RequestContext } from "../runtime/context.js";
-import { PROJECT_TASK_CONTEXT_FIELDS } from "./curated_fields.js";
+import { PROJECT_TASK_CONTEXT_FIELDS, PROJECT_TASK_WAITING_FIELDS } from "./curated_fields.js";
 import { propertySummaries, sourcesReferences } from "./project_cards.js";
 import { CapabilityRegistry, defineCapability } from "./registry.js";
 
@@ -80,6 +80,28 @@ function ref(context: RequestContext, model: string, id: number, displayName?: u
     display_name: typeof displayName === "string" && displayName ? displayName : `${model},${id}`,
     url: `${context.principal.publicOrigin}/odoo/${model}/${id}`
   };
+}
+
+async function readTaskContext(
+  client: OdooClient, context: RequestContext, taskId: number,
+  common: Record<string, unknown>, signal?: AbortSignal
+) {
+  const read = (fields: readonly string[]) => client.call<Record<string, unknown>[]>(context, "project.task", "read", {
+    ids: [taskId], fields, context: common
+  }, { signal });
+  try {
+    return await read([...PROJECT_TASK_CONTEXT_FIELDS, ...PROJECT_TASK_WAITING_FIELDS]);
+  } catch (error) {
+    // Only negotiate when Odoo names an absent Waiting field. Current servers need one task read.
+    if (!(error instanceof OdooError) || !["odoo_server_error", "invalid_request"].includes(error.code)) throw error;
+    const missing = PROJECT_TASK_WAITING_FIELDS.find(field => error.message === `Invalid field '${field}' on 'project.task'`);
+    if (!missing) throw error;
+    const metadata = await client.call<Record<string, unknown>>(context, "project.task", "fields_get", {
+      allfields: PROJECT_TASK_WAITING_FIELDS, attributes: ["type"], context: common
+    }, { signal });
+    if (!metadata || typeof metadata !== "object" || Array.isArray(metadata) || Object.hasOwn(metadata, missing)) throw error;
+    return read([...PROJECT_TASK_CONTEXT_FIELDS, ...PROJECT_TASK_WAITING_FIELDS.filter(field => Object.hasOwn(metadata, field))]);
+  }
 }
 
 async function recordActivities(
@@ -286,16 +308,12 @@ export function registerSemanticCapabilities(registry: CapabilityRegistry, clien
     async handler({ task_id, chatter_limit, context: requestedContext }, context, signal) {
       const common = rpcContext(requestedContext, context);
       const [rows, activities, messages, documentLinks] = await Promise.all([
-        client.call<unknown[]>(context, "project.task", "read", {
-          ids: [task_id],
-          fields: [...PROJECT_TASK_CONTEXT_FIELDS],
-          context: common
-        }, { signal }),
+        readTaskContext(client, context, task_id, common, signal),
         recordActivities(client, context, "project.task", task_id, chatter_limit, requestedContext, signal),
         recordMessages(client, context, "project.task", task_id, chatter_limit, requestedContext, signal),
         optionalDocumentLinks(client, context, "project.task", task_id, common, signal)
       ]);
-      const task = rows[0] as Record<string, unknown> | undefined;
+      const task = rows[0];
       if (!task) throw new Error(`project.task,${task_id} was not found or is not readable`);
       const dependencyIds = Array.isArray(task.depend_on_ids) ? task.depend_on_ids as number[] : [];
       // Search under the caller's rights: a task relation is not permission to
