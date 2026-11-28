@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute } from "node:path";
@@ -61,6 +61,27 @@ const StoredAccessSnapshotSchema = z.object({
 
 const MAX_ENCRYPTED_SNAPSHOT_BYTES = 4 * 1024 * 1024;
 const SNAPSHOT_AAD_PREFIX = "usl-odoo-mcp-agent-access-snapshot-v1\0";
+
+/** Upper bound on browser handoffs that wait for Odoo at one time. */
+const MAX_PENDING_HANDOFFS = 10_000;
+
+export interface PendingHandoff {
+  /** Opaque value that Odoo returns unchanged in the callback URL. */
+  state: string;
+  /** Cookie value that binds the handoff to the browser that started it. */
+  binding: string;
+  /** S256 challenge that Odoo stores with its one-time code. */
+  codeChallenge: string;
+}
+
+export interface ConsumedHandoff {
+  codeVerifier: string;
+  oauthQuery: string;
+}
+
+function sha256Base64Url(value: string): string {
+  return createHash("sha256").update(value).digest("base64url");
+}
 
 export interface ValidatedEnrollment {
   enrollmentId: string;
@@ -209,12 +230,79 @@ export class CredentialVault implements AgentAccessSnapshotStore {
         updated_at INTEGER NOT NULL
       );
     `);
+    this.database.exec(`
+      CREATE TABLE IF NOT EXISTS odoo_enrollment_handoff (
+        state_hash TEXT PRIMARY KEY,
+        binding_hash TEXT NOT NULL,
+        encrypted_code_verifier TEXT NOT NULL,
+        oauth_query TEXT NOT NULL,
+        expires_at INTEGER NOT NULL
+      );
+    `);
+    this.database.prepare("DELETE FROM odoo_enrollment_handoff WHERE expires_at <= ?")
+      .run(Math.floor(Date.now() / 1000));
     this.database.prepare(`
       DELETE FROM odoo_agent_access_snapshot
       WHERE enrollment_id IN (
         SELECT enrollment_id FROM odoo_enrollment WHERE grant_expires_at <= ?
       )
     `).run(Math.floor(Date.now() / 1000));
+  }
+
+  /**
+   * Record one browser handoff to Odoo. The table keeps only hashes of the
+   * state and of the browser binding, and the code verifier is encrypted, so
+   * a copy of the database cannot complete a pending handoff.
+   */
+  createHandoff(oauthQuery: string, ttlSeconds: number, existingBinding?: string): PendingHandoff {
+    const now = Math.floor(Date.now() / 1000);
+    this.database.prepare("DELETE FROM odoo_enrollment_handoff WHERE expires_at <= ?").run(now);
+    const pending = this.database.prepare("SELECT COUNT(*) AS total FROM odoo_enrollment_handoff").get() as { total: number };
+    if (pending.total >= MAX_PENDING_HANDOFFS) throw new Error("Too many Odoo enrollments are pending");
+    const state = randomBytes(32).toString("base64url");
+    const binding = existingBinding ?? randomBytes(32).toString("base64url");
+    const codeVerifier = randomBytes(32).toString("base64url");
+    this.database.prepare(`
+      INSERT INTO odoo_enrollment_handoff (
+        state_hash, binding_hash, encrypted_code_verifier, oauth_query, expires_at
+      ) VALUES (?, ?, ?, ?, ?)
+    `).run(sha256Base64Url(state), sha256Base64Url(binding), this.encrypt(codeVerifier), oauthQuery, now + ttlSeconds);
+    return { state, binding, codeChallenge: sha256Base64Url(codeVerifier) };
+  }
+
+  /**
+   * Return a pending handoff one time. A wrong browser binding does not use
+   * up the handoff, so a third party that learns the state cannot cancel it.
+   */
+  consumeHandoff(state: string, binding: string): ConsumedHandoff | null {
+    const stateHash = sha256Base64Url(state);
+    const transaction = this.database.transaction((): ConsumedHandoff | null => {
+      const row = this.database.prepare(
+        "SELECT binding_hash, encrypted_code_verifier, oauth_query, expires_at FROM odoo_enrollment_handoff WHERE state_hash = ?"
+      ).get(stateHash) as {
+        binding_hash: string;
+        encrypted_code_verifier: string;
+        oauth_query: string;
+        expires_at: number;
+      } | undefined;
+      if (!row) return null;
+      const expected = Buffer.from(row.binding_hash);
+      const submitted = Buffer.from(sha256Base64Url(binding));
+      if (expected.byteLength !== submitted.byteLength || !timingSafeEqual(expected, submitted)) return null;
+      this.database.prepare("DELETE FROM odoo_enrollment_handoff WHERE state_hash = ?").run(stateHash);
+      if (row.expires_at <= Math.floor(Date.now() / 1000)) return null;
+      return { codeVerifier: this.decrypt(row.encrypted_code_verifier), oauthQuery: row.oauth_query };
+    });
+    return transaction.immediate();
+  }
+
+  /** Registered display name of an OAuth client, when Better Auth stores one. */
+  clientDisplayName(clientId: string): string | null {
+    if (!columnExists(this.database, "oauthClient", "name")) return null;
+    const row = this.database.prepare(
+      "SELECT name FROM oauthClient WHERE clientId = ? LIMIT 1"
+    ).get(clientId) as { name?: unknown } | undefined;
+    return typeof row?.name === "string" && row.name.trim() ? row.name.trim() : null;
   }
 
   stableEnrollmentId(targetId: string, database: string, odooUserId: number): string {

@@ -264,7 +264,7 @@ export function createHttpApp(
         next(error);
       }
     });
-    app.all("/oauth/enroll", async (request, response, next) => {
+    app.all(["/oauth/enroll", "/oauth/enroll/manual", "/oauth/enroll/callback"], async (request, response, next) => {
       try {
         await enrollmentNodeHandler(request, response, request.body);
       } catch (error) {
